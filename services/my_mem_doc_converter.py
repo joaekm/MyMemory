@@ -27,10 +27,10 @@ except ImportError:
 
 # Entity Consolidator för context injection
 try:
-    from services.entity_consolidator import get_known_entities, get_canonical
+    from services.entity_register import get_known_entities, get_canonical
 except ImportError:
     try:
-        from entity_consolidator import get_known_entities, get_canonical
+        from entity_register import get_known_entities, get_canonical
     except ImportError:
         # Fallback om entity_consolidator inte finns
         def get_known_entities():

@@ -23,7 +23,7 @@ try:
     from services.intent_router import route_intent
     from services.context_builder import build_context
     from services.planner import create_report
-    from services.entity_consolidator import add_alias, get_canonical, get_known_entities
+    from services.entity_register import add_alias, get_canonical, get_known_entities
     from services.session_logger import (
         start_session, end_session, log_search, log_feedback, log_abort
     )
@@ -32,7 +32,7 @@ except ImportError:
     from intent_router import route_intent
     from context_builder import build_context
     from planner import create_report
-    from entity_consolidator import add_alias, get_canonical, get_known_entities
+    from entity_register import add_alias, get_canonical, get_known_entities
     from session_logger import (
         start_session, end_session, log_search, log_feedback, log_abort
     )

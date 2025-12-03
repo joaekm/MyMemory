@@ -1,255 +1,293 @@
 """
-Entity Consolidator - Alias-hantering för MyMemory
+Consolidator - Drömprocessen för MyMemory (OBJEKT-48)
 
-Paradigm: Alias = Insamlingsinstruktion (INTE sök-expansion)
-- Vid INSAMLING: Normalisera varianter till canonical name
-- Vid FEEDBACK: Lägg till nya alias-mappningar
-- Vid SÖKNING: Ingen expansion behövs (metadata är redan normaliserad)
+Ansvar:
+- Läsa signaler från session_logger
+- Identifiera mönster (zero-hit searches, frekventa termer)
+- Generera "synapser" (alias-förslag, taxonomi-förslag)
+- Applicera godkända synapser
 
-Lagring: ~/MyMemory/Index/entity_aliases.json
+Körs via: `python -m services.entity_consolidator` eller `--consolidate` flag
 """
 
 import os
 import json
+import yaml
 import logging
+from datetime import datetime
 from typing import Optional
+from collections import Counter
 
-LOGGER = logging.getLogger('EntityConsolidator')
+# Loaders
+try:
+    from services.session_logger import get_unprocessed_sessions, mark_sessions_processed
+    from services.entity_register import add_alias, get_known_entities
+    from google import genai
+except ImportError:
+    from session_logger import get_unprocessed_sessions, mark_sessions_processed
+    from entity_register import add_alias, get_known_entities
+    from google import genai
 
-# Default path för alias-fil
-_ALIAS_FILE = os.path.expanduser("~/MyMemory/Index/entity_aliases.json")
+LOGGER = logging.getLogger('Consolidator')
 
-# Cache för snabb lookup
-_ALIASES_CACHE = None
-_REVERSE_CACHE = None  # variant -> canonical
-
-
-def _load_aliases() -> dict:
-    """Ladda alias-mappningar från fil."""
-    global _ALIASES_CACHE, _REVERSE_CACHE
-    
-    if _ALIASES_CACHE is not None:
-        return _ALIASES_CACHE
-    
-    if os.path.exists(_ALIAS_FILE):
-        try:
-            with open(_ALIAS_FILE, 'r', encoding='utf-8') as f:
-                _ALIASES_CACHE = json.load(f)
-        except Exception as e:
-            LOGGER.error(f"Kunde inte ladda aliases: {e}")
-            _ALIASES_CACHE = {"persons": {}, "projects": {}, "concepts": {}}
-    else:
-        # Skapa tom struktur
-        _ALIASES_CACHE = {"persons": {}, "projects": {}, "concepts": {}}
-    
-    # Bygg reverse cache (variant -> canonical)
-    _REVERSE_CACHE = {}
-    for entity_type, entities in _ALIASES_CACHE.items():
-        for canonical, aliases in entities.items():
-            _REVERSE_CACHE[canonical.lower()] = canonical
-            for alias in aliases:
-                _REVERSE_CACHE[alias.lower()] = canonical
-    
-    return _ALIASES_CACHE
-
-
-def _save_aliases(data: dict):
-    """Spara alias-mappningar till fil."""
-    global _ALIASES_CACHE, _REVERSE_CACHE
-    
-    # Säkerställ att mappen finns
-    os.makedirs(os.path.dirname(_ALIAS_FILE), exist_ok=True)
-    
-    try:
-        with open(_ALIAS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        
-        # Invalidera cache
-        _ALIASES_CACHE = data
-        
-        # Bygg om reverse cache
-        _REVERSE_CACHE = {}
-        for entity_type, entities in data.items():
-            for canonical, aliases in entities.items():
-                _REVERSE_CACHE[canonical.lower()] = canonical
-                for alias in aliases:
-                    _REVERSE_CACHE[alias.lower()] = canonical
-        
-        LOGGER.info(f"Sparade aliases till {_ALIAS_FILE}")
-    except Exception as e:
-        LOGGER.error(f"Kunde inte spara aliases: {e}")
-        raise
-
-
-def get_canonical(variant: str) -> Optional[str]:
-    """
-    Slå upp canonical name för en variant.
-    
-    Används vid INSAMLING för att normalisera namn i metadata.
-    
-    Args:
-        variant: En namnvariant (t.ex. "Sänk")
-    
-    Returns:
-        Canonical name (t.ex. "Cenk Bisgen") eller None om okänd
-    
-    Exempel:
-        get_canonical("Sänk") -> "Cenk Bisgen"
-        get_canonical("Okänd Person") -> None
-    """
-    _load_aliases()  # Säkerställ att cache är laddad
-    
-    if _REVERSE_CACHE is None:
-        return None
-    
-    return _REVERSE_CACHE.get(variant.lower())
-
-
-def add_alias(canonical: str, alias: str, source: str = "user", entity_type: str = "persons"):
-    """
-    Lägg till en alias-mappning.
-    
-    Används vid EXPLICIT FEEDBACK ("/learn Cenk = Sänk").
-    
-    Args:
-        canonical: Kanoniskt namn (t.ex. "Cenk Bisgen")
-        alias: Variant att mappa (t.ex. "Sänk")
-        source: Varifrån aliaset kommer ("user", "consolidator", "transcriber")
-        entity_type: Typ av entitet ("persons", "projects", "concepts")
-    
-    Raises:
-        ValueError: Om entity_type är ogiltigt
-    """
-    if entity_type not in ["persons", "projects", "concepts"]:
-        raise ValueError(f"Ogiltig entity_type: {entity_type}")
-    
-    data = _load_aliases()
-    
-    # Säkerställ att entity_type finns
-    if entity_type not in data:
-        data[entity_type] = {}
-    
-    # Säkerställ att canonical finns
-    if canonical not in data[entity_type]:
-        data[entity_type][canonical] = []
-    
-    # Lägg till alias om det inte redan finns
-    alias_lower = alias.lower()
-    existing_lower = [a.lower() for a in data[entity_type][canonical]]
-    
-    if alias_lower not in existing_lower and alias_lower != canonical.lower():
-        data[entity_type][canonical].append(alias)
-        _save_aliases(data)
-        LOGGER.info(f"Lade till alias: '{alias}' -> '{canonical}' (source={source})")
-    else:
-        LOGGER.debug(f"Alias '{alias}' finns redan för '{canonical}'")
-
-
-def remove_alias(canonical: str, alias: str, entity_type: str = "persons"):
-    """
-    Ta bort en alias-mappning.
-    
-    Används för att korrigera felaktiga alias.
-    
-    Args:
-        canonical: Kanoniskt namn
-        alias: Alias att ta bort
-        entity_type: Typ av entitet
-    """
-    data = _load_aliases()
-    
-    if entity_type not in data:
-        return
-    
-    if canonical not in data[entity_type]:
-        return
-    
-    # Ta bort (case-insensitive)
-    alias_lower = alias.lower()
-    data[entity_type][canonical] = [
-        a for a in data[entity_type][canonical]
-        if a.lower() != alias_lower
+# --- CONFIG LOADER ---
+def _load_config():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    paths = [
+        os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
+        os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
     ]
-    
-    _save_aliases(data)
-    LOGGER.info(f"Tog bort alias: '{alias}' från '{canonical}'")
+    for p in paths:
+        if os.path.exists(p):
+            with open(p, 'r') as f:
+                return yaml.safe_load(f)
+    return {}
+
+def _load_prompts():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    paths = [
+        os.path.join(script_dir, '..', 'config', 'chat_prompts.yaml'),
+        os.path.join(script_dir, 'config', 'chat_prompts.yaml'),
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            with open(p, 'r', encoding='utf-8') as f:
+                return yaml.safe_load(f)
+    return {}
+
+CONFIG = _load_config()
+PROMPTS = _load_prompts()
+
+API_KEY = CONFIG.get('ai_engine', {}).get('api_key', '')
+MODEL_LITE = CONFIG.get('ai_engine', {}).get('models', {}).get('model_lite', '')
+
+# AI Client (lazy init)
+_AI_CLIENT = None
+
+def _get_ai_client():
+    global _AI_CLIENT
+    if _AI_CLIENT is None and API_KEY:
+        _AI_CLIENT = genai.Client(api_key=API_KEY)
+    return _AI_CLIENT
 
 
-def get_known_entities() -> dict:
+def analyze_signals(sessions: list) -> dict:
     """
-    Hämta alla kända entiteter och deras aliases.
+    Analysera signaler och identifiera mönster.
     
-    Används vid INSAMLING för context injection i prompts.
+    Args:
+        sessions: Lista med sessioner från session_logger
     
     Returns:
-        dict med:
-            - persons: Lista med kanoniska personnamn
-            - projects: Lista med kanoniska projektnamn
-            - concepts: Lista med kanoniska konceptnamn
-            - aliases: Dict med alla alias-mappningar {variant: canonical}
-    
-    Exempel:
-        {
-            "persons": ["Cenk Bisgen", "Joakim Ekman"],
-            "projects": ["Adda PoC", "MyMemory"],
-            "concepts": ["Strategi", "AI"],
-            "aliases": {"Sänk": "Cenk Bisgen", "Jocke": "Joakim Ekman"}
-        }
+        dict med identifierade mönster
     """
-    data = _load_aliases()
+    zero_hit_keywords = Counter()
+    frequent_keywords = Counter()
+    aborts = []
     
-    result = {
-        "persons": list(data.get("persons", {}).keys()),
-        "projects": list(data.get("projects", {}).keys()),
-        "concepts": list(data.get("concepts", {}).keys()),
-        "aliases": {}
+    for session in sessions:
+        for signal in session.get('signals', []):
+            if signal.get('type') == 'search':
+                keywords = signal.get('keywords', [])
+                hits = signal.get('hits', 0)
+                
+                if hits == 0:
+                    for kw in keywords:
+                        zero_hit_keywords[kw] += 1
+                else:
+                    for kw in keywords:
+                        frequent_keywords[kw] += 1
+            
+            elif signal.get('type') == 'abort':
+                aborts.append({
+                    'session_id': session.get('session_id'),
+                    'rounds': signal.get('rounds'),
+                    'reason': signal.get('reason')
+                })
+    
+    return {
+        'zero_hit_keywords': zero_hit_keywords.most_common(20),
+        'frequent_keywords': frequent_keywords.most_common(20),
+        'aborts': aborts,
+        'total_sessions': len(sessions)
     }
-    
-    # Bygg alias-mapping (variant -> canonical)
-    for entity_type, entities in data.items():
-        for canonical, aliases in entities.items():
-            for alias in aliases:
-                result["aliases"][alias] = canonical
-    
-    return result
 
 
-def get_all_aliases() -> dict:
+def generate_synapse_suggestions(patterns: dict) -> list:
     """
-    Hämta hela alias-strukturen.
+    Generera synaps-förslag baserat på mönster.
+    
+    Args:
+        patterns: Mönster från analyze_signals
     
     Returns:
-        dict med hela alias-strukturen (persons, projects, concepts)
+        Lista med synaps-förslag
     """
-    return _load_aliases().copy()
+    suggestions = []
+    known = get_known_entities()
+    known_names = set(known.get('persons', []) + known.get('projects', []))
+    known_aliases = set(known.get('aliases', {}).keys())
+    
+    # Analysera zero-hit keywords
+    for keyword, count in patterns.get('zero_hit_keywords', []):
+        if count < 2:
+            continue  # Behöver minst 2 träffar för att vara intressant
+        
+        # Kolla om det liknar ett känt namn (fuzzy match)
+        for known_name in known_names:
+            if _is_similar(keyword, known_name):
+                # Föreslå alias
+                suggestions.append({
+                    'type': 'alias',
+                    'canonical': known_name,
+                    'alias': keyword,
+                    'confidence': 0.7,
+                    'reason': f"'{keyword}' söktes {count} gånger utan träff, liknar '{known_name}'"
+                })
+                break
+    
+    return suggestions
 
 
-def clear_cache():
+def _is_similar(a: str, b: str, threshold: float = 0.7) -> bool:
+    """Enkel likhetskontroll (case-insensitive substring eller prefix)."""
+    a_lower = a.lower()
+    b_lower = b.lower()
+    
+    # Exakt match (case-insensitive)
+    if a_lower == b_lower:
+        return False  # Redan samma, inget alias behövs
+    
+    # Substring match
+    if a_lower in b_lower or b_lower in a_lower:
+        return True
+    
+    # Prefix match (minst 3 tecken)
+    if len(a_lower) >= 3 and len(b_lower) >= 3:
+        if a_lower[:3] == b_lower[:3]:
+            return True
+    
+    return False
+
+
+def apply_synapse(synapse: dict, auto_apply: bool = False) -> bool:
     """
-    Rensa cache. Används vid testning eller efter extern uppdatering.
+    Applicera en synaps (alias, taxonomi-förslag, etc.)
+    
+    Args:
+        synapse: Synaps-objekt
+        auto_apply: Om True, applicera automatiskt utan bekräftelse
+    
+    Returns:
+        True om applicerad, False annars
     """
-    global _ALIASES_CACHE, _REVERSE_CACHE
-    _ALIASES_CACHE = None
-    _REVERSE_CACHE = None
+    synapse_type = synapse.get('type')
+    
+    if synapse_type == 'alias':
+        canonical = synapse.get('canonical')
+        alias = synapse.get('alias')
+        confidence = synapse.get('confidence', 0)
+        
+        # Kräv hög confidence för auto-apply
+        if auto_apply and confidence < 0.8:
+            LOGGER.info(f"Skippar låg-confidence alias: {alias} -> {canonical}")
+            return False
+        
+        try:
+            add_alias(canonical, alias, source="consolidator")
+            LOGGER.info(f"Applicerade alias: {alias} -> {canonical}")
+            return True
+        except Exception as e:
+            LOGGER.error(f"Kunde inte applicera alias: {e}")
+            return False
+    
+    return False
 
 
-# --- TEST ---
+def run_consolidation(auto_apply: bool = False, verbose: bool = True) -> dict:
+    """
+    Kör hela konsolideringsprocessen.
+    
+    Args:
+        auto_apply: Om True, applicera synapser automatiskt
+        verbose: Om True, skriv ut progress
+    
+    Returns:
+        dict med resultat
+    """
+    if verbose:
+        print("=== Consolidator (Dreaming) ===\n")
+    
+    # Steg 1: Hämta oprocessade sessioner
+    sessions = get_unprocessed_sessions()
+    
+    if not sessions:
+        if verbose:
+            print("Inga oprocessade sessioner att analysera.")
+        return {"status": "NO_SESSIONS", "processed": 0}
+    
+    if verbose:
+        print(f"Hittade {len(sessions)} oprocessade sessioner.")
+    
+    # Steg 2: Analysera signaler
+    patterns = analyze_signals(sessions)
+    
+    if verbose:
+        print(f"\nMönster identifierade:")
+        print(f"  - Zero-hit keywords: {len(patterns['zero_hit_keywords'])}")
+        print(f"  - Frequent keywords: {len(patterns['frequent_keywords'])}")
+        print(f"  - Avbrott: {len(patterns['aborts'])}")
+    
+    # Steg 3: Generera synaps-förslag
+    suggestions = generate_synapse_suggestions(patterns)
+    
+    if verbose:
+        print(f"\nSynaps-förslag: {len(suggestions)}")
+        for s in suggestions:
+            print(f"  - [{s['type']}] {s.get('alias', '')} -> {s.get('canonical', '')} (conf: {s.get('confidence', 0):.2f})")
+    
+    # Steg 4: Applicera synapser
+    applied = 0
+    if auto_apply:
+        for synapse in suggestions:
+            if apply_synapse(synapse, auto_apply=True):
+                applied += 1
+    
+    # Steg 5: Markera sessioner som processade
+    session_ids = [s.get('session_id') for s in sessions]
+    mark_sessions_processed(session_ids)
+    
+    if verbose:
+        print(f"\n✓ Processade {len(sessions)} sessioner.")
+        if auto_apply:
+            print(f"✓ Applicerade {applied} synapser.")
+        else:
+            print(f"  (Använd --apply för att applicera synapser automatiskt)")
+    
+    return {
+        "status": "OK",
+        "processed": len(sessions),
+        "patterns": patterns,
+        "suggestions": suggestions,
+        "applied": applied
+    }
+
+
+# --- CLI ---
 if __name__ == "__main__":
-    # Testa grundläggande funktioner
-    print("=== Entity Consolidator Test ===\n")
+    import argparse
     
-    # Lägg till testdata
-    add_alias("Cenk Bisgen", "Sänk", source="test")
-    add_alias("Cenk Bisgen", "Cenk", source="test")
-    add_alias("Joakim Ekman", "Jocke", source="test")
-    add_alias("Adda PoC", "Adda-grejen", source="test", entity_type="projects")
+    parser = argparse.ArgumentParser(description="Consolidator - Dreaming process")
+    parser.add_argument("--apply", action="store_true", help="Applicera synapser automatiskt")
+    parser.add_argument("--quiet", action="store_true", help="Tyst körning")
     
-    # Testa lookup
-    print(f"get_canonical('Sänk') = {get_canonical('Sänk')}")
-    print(f"get_canonical('Cenk') = {get_canonical('Cenk')}")
-    print(f"get_canonical('Jocke') = {get_canonical('Jocke')}")
-    print(f"get_canonical('Okänd') = {get_canonical('Okänd')}")
+    args = parser.parse_args()
     
-    # Testa get_known_entities
-    print(f"\nKända entiteter: {json.dumps(get_known_entities(), indent=2, ensure_ascii=False)}")
+    result = run_consolidation(
+        auto_apply=args.apply,
+        verbose=not args.quiet
+    )
+    
+    if result.get('status') != 'OK':
+        print(f"\nStatus: {result.get('status')}")
 
