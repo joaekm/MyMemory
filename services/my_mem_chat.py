@@ -23,11 +23,21 @@ try:
     from services.intent_router import route_intent
     from services.context_builder import build_context
     from services.planner import create_report
+    from services.entity_consolidator import add_alias, get_canonical, get_known_entities
+    from services.session_logger import (
+        start_session, end_session, log_search, log_feedback, log_abort
+    )
 except ImportError:
     # Fallback för direkt körning
     from intent_router import route_intent
     from context_builder import build_context
     from planner import create_report
+    from entity_consolidator import add_alias, get_canonical, get_known_entities
+    from session_logger import (
+        start_session, end_session, log_search, log_feedback, log_abort
+    )
+
+import re
 
 # --- ARGUMENT PARSER (endast vid direkt körning) ---
 def parse_args():
@@ -134,6 +144,95 @@ def debug_panel(title, content, style="yellow", debug_mode=False, debug_trace=No
         clean_content = clean_content.replace("[green]", "").replace("[/green]", "")
         clean_content = clean_content.replace("[magenta]", "").replace("[/magenta]", "")
         debug_trace[trace_key] = clean_content
+
+# --- FEEDBACK HANDLING ---
+
+def _parse_learn_command(text: str) -> tuple:
+    """
+    Parsa /learn kommandot.
+    
+    Format: /learn X = Y (person|projekt|koncept)
+    
+    Returns:
+        (canonical, alias, entity_type) eller (None, None, None)
+    """
+    # Matcha: /learn X = Y eller /learn X = Y (typ)
+    pattern = r'^/learn\s+(.+?)\s*=\s*(.+?)(?:\s*\((\w+)\))?\s*$'
+    match = re.match(pattern, text.strip(), re.IGNORECASE)
+    
+    if not match:
+        return None, None, None
+    
+    canonical = match.group(1).strip()
+    alias = match.group(2).strip()
+    entity_type = match.group(3).lower() if match.group(3) else "persons"
+    
+    # Normalisera entity_type
+    type_map = {
+        "person": "persons",
+        "persons": "persons",
+        "projekt": "projects",
+        "project": "projects",
+        "projects": "projects",
+        "koncept": "concepts",
+        "concept": "concepts",
+        "concepts": "concepts"
+    }
+    entity_type = type_map.get(entity_type, "persons")
+    
+    return canonical, alias, entity_type
+
+
+def _interpret_feedback(text: str) -> dict:
+    """
+    Tolka naturligt språk som potentiell feedback.
+    
+    Returns:
+        dict med is_feedback, type, canonical, alias, entity_type, confidence
+    """
+    # Kolla om det finns en feedback_interpreter prompt
+    prompt_template = PROMPTS.get('feedback_interpreter', {}).get('instruction', '')
+    if not prompt_template:
+        return {"is_feedback": False}
+    
+    full_prompt = prompt_template.format(user_input=text)
+    
+    try:
+        ai_client = get_ai_client()
+        response = ai_client.models.generate_content(model=MODEL_LITE, contents=full_prompt)
+        result_text = response.text.replace("```json", "").replace("```", "").strip()
+        result = json.loads(result_text)
+        return result
+    except Exception as e:
+        LOGGER.debug(f"Feedback interpretation failed: {e}")
+        return {"is_feedback": False}
+
+
+def _handle_feedback(canonical: str, alias: str, entity_type: str) -> str:
+    """
+    Hantera bekräftad feedback genom att spara alias.
+    
+    Returns:
+        Bekräftelsemeddelande till användaren
+    """
+    try:
+        add_alias(canonical, alias, source="user", entity_type=entity_type)
+        
+        # Logga feedback för Dreaming
+        log_feedback(canonical, alias, entity_type, source="user")
+        
+        type_names = {
+            "persons": "person",
+            "projects": "projekt",
+            "concepts": "koncept"
+        }
+        type_name = type_names.get(entity_type, "entitet")
+        
+        return f"✓ Noterat! Nästa gång jag hör '{alias}' skriver jag '{canonical}' ({type_name})."
+    except Exception as e:
+        LOGGER.error(f"Kunde inte spara alias: {e}")
+        return f"✗ Kunde inte spara aliaset: {e}"
+
 
 # --- STEP 2a: THE HUNTER ---
 def search_lake(keywords):
@@ -463,6 +562,16 @@ def execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=None)
     
     context_result = build_context(intent_data, debug_trace=debug_trace)
     
+    # Logga sökning för Dreaming
+    stats = context_result.get('stats', {})
+    total_hits = stats.get('lake_hits', 0) + stats.get('vector_hits', 0)
+    log_search(
+        query=query,
+        keywords=intent_data.get('keywords', []),
+        hits=total_hits,
+        intent=intent_data.get('intent', 'RELAXED')
+    )
+    
     if context_result.get('status') == 'NO_RESULTS':
         if debug_mode:
             console.print(f"[yellow]HARDFAIL: {context_result.get('reason')}[/yellow]")
@@ -476,7 +585,6 @@ def execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=None)
         }
     
     if debug_mode:
-        stats = context_result.get('stats', {})
         debug_content = f"[bold]Lake:[/bold] {stats.get('lake_hits', 0)} träffar\n"
         debug_content += f"[bold]Vektor:[/bold] {stats.get('vector_hits', 0)} träffar\n"
         debug_content += f"[bold]Efter dedup:[/bold] {stats.get('after_dedup', 0)} kandidater"
@@ -568,21 +676,21 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
         sources = pipeline_result.get('sources', [])
         gaps = pipeline_result.get('gaps', [])
         
-        # Ny synthesizer-prompt för v6.0 (tar rapport, inte dokument)
-        synth_prompt = f"""Svara på användarens fråga baserat på följande rapport.
-
-RAPPORT (sammanställd från källdokument):
-{report}
-
-IDENTIFIERADE LUCKOR:
-{gaps if gaps else "Inga kända luckor"}
-
-INSTRUKTIONER:
-1. Ge ett koncist och användbart svar baserat på rapporten
-2. Om rapporten saknar information, var tydlig med det
-3. Hänvisa till källor om relevant
-
-FRÅGA: {query}"""
+        # Syntes med prompt från config
+        synth_template = PROMPTS.get('synthesizer_v6', {}).get('instruction', '')
+        if not synth_template:
+            LOGGER.error("HARDFAIL: synthesizer_v6 prompt saknas i chat_prompts.yaml")
+            return {
+                "answer": "Konfigurationsfel: synthesizer_v6 prompt saknas",
+                "sources": sources,
+                "debug_trace": debug_trace if collect_debug else {}
+            }
+        
+        synth_prompt = synth_template.format(
+            report=report,
+            gaps=gaps if gaps else "Inga kända luckor",
+            query=query
+        )
         
         contents = []
         for msg in chat_history:
@@ -650,13 +758,44 @@ def chat_loop(debug_mode=False, use_v6=True):
     console.print(Panel(f"[bold white]Digitalist Företagsminne {version}[/bold white]", style="on blue", box=box.DOUBLE, expand=False))
     if debug_mode:
         console.print("[dim]Debug Mode: ON[/dim]")
+    
+    # Starta session för signal-loggning
+    start_session()
         
     chat_history = [] 
 
     while True:
         query = Prompt.ask("\n[bold green]Du[/bold green]")
-        if query.lower() in ['exit', 'quit', 'sluta']: break
+        if query.lower() in ['exit', 'quit', 'sluta']:
+            end_session("normal")
+            break
         if not query.strip(): continue
+
+        # === HANTERA /learn KOMMANDO ===
+        if query.startswith('/learn'):
+            canonical, alias, entity_type = _parse_learn_command(query)
+            if canonical and alias:
+                result = _handle_feedback(canonical, alias, entity_type)
+                console.print(f"[bold purple]MyMem:[/bold purple] {result}")
+                continue
+            else:
+                console.print("[yellow]Format: /learn NAMN = ALIAS (person|projekt|koncept)[/yellow]")
+                console.print("[dim]Exempel: /learn Cenk Bisgen = Sänk[/dim]")
+                continue
+        
+        # === KOLLA OM DET ÄR NATURLIGT SPRÅK FEEDBACK ===
+        # (Endast om det börjar med typiska feedback-fraser)
+        feedback_phrases = ["är samma", "heter egentligen", "kallas också", "är alias för"]
+        if any(phrase in query.lower() for phrase in feedback_phrases):
+            feedback = _interpret_feedback(query)
+            if feedback.get('is_feedback') and feedback.get('confidence', 0) > 0.7:
+                canonical = feedback.get('canonical')
+                alias = feedback.get('alias')
+                entity_type = feedback.get('entity_type', 'persons')
+                if canonical and alias:
+                    result = _handle_feedback(canonical, alias, entity_type)
+                    console.print(f"[bold purple]MyMem:[/bold purple] {result}")
+                    continue
 
         # Debug trace för CLI
         debug_trace = {} if debug_mode else None
@@ -673,15 +812,17 @@ def chat_loop(debug_mode=False, use_v6=True):
             sources = pipeline_result.get('sources', [])
             gaps = pipeline_result.get('gaps', [])
             
-            # Syntes med rapport
-            synth_prompt = f"""Svara på användarens fråga baserat på följande rapport.
-
-RAPPORT:
-{report}
-
-LUCKOR: {gaps if gaps else "Inga"}
-
-FRÅGA: {query}"""
+            # Syntes med prompt från config
+            synth_template = PROMPTS.get('synthesizer_v6', {}).get('instruction', '')
+            if not synth_template:
+                console.print("[red]HARDFAIL: synthesizer_v6 prompt saknas i config[/red]")
+                continue
+            
+            synth_prompt = synth_template.format(
+                report=report,
+                gaps=gaps if gaps else "Inga kända luckor",
+                query=query
+            )
             
             contents = []
             for msg in chat_history:

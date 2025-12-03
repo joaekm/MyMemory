@@ -25,6 +25,19 @@ try:
 except ImportError:
     pass
 
+# Entity Consolidator för context injection
+try:
+    from services.entity_consolidator import get_known_entities, get_canonical
+except ImportError:
+    try:
+        from entity_consolidator import get_known_entities, get_canonical
+    except ImportError:
+        # Fallback om entity_consolidator inte finns
+        def get_known_entities():
+            return {"persons": [], "projects": [], "concepts": [], "aliases": {}}
+        def get_canonical(name):
+            return None
+
 # --- CONFIG LOADER ---
 def ladda_yaml(filnamn, strict=True):
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -144,6 +157,42 @@ def extract_text(filväg, ext):
         return None
 
 # --- AI ANALYSIS (DYNAMIC PROMPT) ---
+def _build_entity_context():
+    """Bygg context-sträng med kända entiteter för prompt injection."""
+    try:
+        known = get_known_entities()
+        context_parts = []
+        
+        if known.get('persons'):
+            context_parts.append(f"KÄNDA PERSONER: {', '.join(known['persons'][:30])}")
+        if known.get('projects'):
+            context_parts.append(f"KÄNDA PROJEKT: {', '.join(known['projects'][:20])}")
+        if known.get('aliases'):
+            # Visa alias-mappningar som hjälp
+            alias_examples = [f"'{a}' = '{c}'" for a, c in list(known['aliases'].items())[:10]]
+            if alias_examples:
+                context_parts.append(f"KÄNDA ALIAS: {', '.join(alias_examples)}")
+        
+        return "\n".join(context_parts) if context_parts else ""
+    except Exception as e:
+        LOGGER.debug(f"Kunde inte hämta entity context: {e}")
+        return ""
+
+
+def _normalize_entities(entities):
+    """Normalisera entiteter via entity_consolidator."""
+    normalized = []
+    for entity in entities:
+        canonical = get_canonical(entity)
+        if canonical:
+            if canonical not in normalized:
+                normalized.append(canonical)
+        else:
+            if entity not in normalized:
+                normalized.append(entity)
+    return normalized
+
+
 def generera_metadata(text, filnamn):
     if not AI_CLIENT or not text: 
         return {
@@ -161,7 +210,14 @@ def generera_metadata(text, filnamn):
         LOGGER.error("CRITICAL: Prompt saknas i services_prompts.yaml!")
         return {"summary": "Prompt Error", "graph_master_node": "Okategoriserat"}
 
+    # Bygg context med kända entiteter
+    entity_context = _build_entity_context()
+    
     system_instruction = raw_prompt.replace("{valid_nodes}", str(valid_nodes))
+    
+    # Injicera entity context om tillgänglig
+    if entity_context:
+        system_instruction = f"{entity_context}\n\n{system_instruction}"
 
     try:
         # Skicka max 30k tecken för analys för att spara tokens
@@ -173,6 +229,10 @@ def generera_metadata(text, filnamn):
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         data = json.loads(response.text.replace('```json', '').replace('```', ''))
+        
+        # Normalisera entities via entity_consolidator
+        if data.get("entities"):
+            data["entities"] = _normalize_entities(data["entities"])
         
         if data.get("graph_master_node") not in valid_nodes:
             LOGGER.warning(f"AI gissade ogiltig nod '{data.get('graph_master_node')}'. Fallback till 'Okategoriserat'.")

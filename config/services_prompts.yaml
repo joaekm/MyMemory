@@ -50,14 +50,23 @@ doc_converter:
     Analysera texten och placera den i exakt EN av ovanstående kategorier.
     Skapa även ett "context_id" som grupperar detta dokument med andra (t.ex. PROJEKT_X).
 
+    VIKTIG INSTRUKTION FÖR ENTITETER:
+    Om texten nämner en person eller ett projekt som finns i listan KÄNDA PERSONER/PROJEKT,
+    använd EXAKT det namnet. Gissa INTE egna varianter.
+    
     OUTPUT KRAV (Returnera ENDAST denna JSON):
     {
-      "summary": "Kort sammanfattning på svenska.",
+      "summary": "Kort sammanfattning på svenska. INKLUDERA viktiga datum och aktiviteter.",
       "graph_master_node": "MÅSTE vara ett värde exakt från listan GILTIGA MASTER NODER.",
       "graph_sub_node": "En passande underkategori.",
       "context_id": "Ett ID för att gruppera detta (SNAKE_CASE).",
       "keywords": ["Sökord för vektordatabasen", "interna begrepp", "specifika begrepp", "slang", "övrigt med relevans"],
-      "entities": ["Identifierade personer", "Företag"]
+      "entities": ["Identifierade personer", "Företag"],
+      "dates_mentioned": ["YYYY-MM-DD format för alla datum nämnda i texten"],
+      "actions": ["Aktiviteter som nämns (t.ex. 'Användartester', 'Demo', 'Möte')"],
+      "deadlines": [
+        {"what": "Vad som ska ske", "when": "YYYY-MM-DD"}
+      ]
     }
 
 # --- Chatt-agenten (RAG-gränssnitt) ---

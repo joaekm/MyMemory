@@ -146,3 +146,42 @@ Problem: "Systemet hittar inte 'Cenk' när jag söker"
 - Generella lösningar löser KLASSER av problem, inte instanser
 - "Elegant" = En lösning som löser många problem samtidigt
 
+---
+
+## Princip 6: Inga Hårdkodade Promptar
+
+**ALLA AI-promptar ska ligga i config-filer**, aldrig i Python-kod.
+
+### Varför?
+
+- **Separation of Concerns:** Kod och promptar har olika livscykler
+- **Iterera snabbt:** Ändra promptar utan att röra kod
+- **Versionhantering:** Se prompt-ändringar tydligt i git
+- **Konsistens:** En plats för alla promptar
+
+### Config-filer:
+
+- `config/chat_prompts.yaml` - Promptar för chat-relaterade funktioner
+- `config/services_prompts.yaml` - Promptar för tjänster (DocConverter, Transcriber, etc.)
+
+### Exempel på FEL:
+
+```python
+# ❌ DÅLIGT: Hårdkodad prompt
+def analyze(text):
+    prompt = f"Analysera följande text och extrahera nyckelord: {text}"
+    return ai_client.generate(prompt)
+```
+
+### Exempel på RÄTT:
+
+```python
+# ✅ BRA: Prompt från config
+def analyze(text):
+    prompt_template = PROMPTS.get('keyword_extractor', {}).get('instruction', '')
+    if not prompt_template:
+        raise ValueError("HARDFAIL: keyword_extractor prompt saknas i config")
+    prompt = prompt_template.format(text=text)
+    return ai_client.generate(prompt)
+```
+

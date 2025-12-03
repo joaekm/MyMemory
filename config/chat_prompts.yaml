@@ -70,6 +70,25 @@ planner_select:
         "reasoning": "kort motivering av urvalet"
     }}
 
+synthesizer_v6:
+  role: "Du är MyMem - ett personligt företagsminne."
+  instruction: |
+    Svara på användarens fråga baserat på följande rapport.
+    
+    RAPPORT (sammanställd från källdokument):
+    {report}
+    
+    IDENTIFIERADE LUCKOR:
+    {gaps}
+    
+    INSTRUKTIONER:
+    1. Ge ett koncist och användbart svar baserat på rapporten
+    2. Om rapporten saknar information, var tydlig med det
+    3. Hänvisa till källor om relevant
+    4. Anpassa svarslängd efter frågetyp (kort fråga = kort svar)
+    
+    FRÅGA: {query}
+
 planner_report:
   role: "Du skapar en kurerad rapport baserad på källdokument."
   instruction: |
@@ -102,6 +121,45 @@ planner_report:
         "sources_used": ["filnamn1.md", "filnamn2.md"],
         "gaps": ["Information som saknas för komplett svar..."],
         "confidence": 0.0-1.0
+    }}
+
+consolidator:
+  role: "Du analyserar användarmönster för att föreslå förbättringar."
+  instruction: |
+    Du analyserar sökloggar från en användarsession.
+    
+    SIGNALER:
+    {signals}
+    
+    KÄNDA ENTITETER:
+    {known_entities}
+    
+    UPPGIFT:
+    Identifiera mönster och föreslå förbättringar:
+    
+    1. ALIAS-KANDIDATER:
+       - Keywords med 0 träffar som liknar kända namn
+       - Stavningsvarianter av kända entiteter
+    
+    2. TAXONOMI-KANDIDATER:
+       - Ofta sökta termer som inte finns i taxonomin
+       - Nya ämnesområden som verkar viktiga
+    
+    3. RE-INDEXERINGS-KANDIDATER:
+       - Dokument som ofta missas vid sökning
+    
+    Svara JSON:
+    {{
+        "alias_suggestions": [
+            {{"canonical": "Cenk Bisgen", "alias": "Sänk", "confidence": 0.9, "reason": "..."}}
+        ],
+        "taxonomy_suggestions": [
+            {{"term": "AI-strategi", "suggested_parent": "Strategi", "reason": "..."}}
+        ],
+        "reindex_suggestions": [
+            {{"pattern": "möten från 2025", "reason": "..."}}
+        ],
+        "insights": "Övergripande insikter om användarbeteende..."
     }}
 
 # === LEGACY (v5.2 - behålls för bakåtkompatibilitet) ===
@@ -259,6 +317,33 @@ evaluator:
         "gaps": ["Vad saknades eller kunde förbättras..."],
         "reasoning": "Detaljerad motivering av bedömningen..."
     }}
+
+feedback_interpreter:
+  role: "Du tolkar feedback från användaren om entiteter och alias."
+  instruction: |
+    Användaren har sagt något som kan vara feedback om entiteter.
+    
+    INPUT: {user_input}
+    
+    TOLKA om detta är feedback om:
+    1. ALIAS: "X och Y är samma person/projekt" -> alias
+    2. KORRIGERING: "Det heter inte X, det heter Y" -> korrigering
+    3. INGET: Vanlig fråga, inte feedback -> null
+    
+    Svara JSON:
+    {{
+        "is_feedback": true/false,
+        "type": "alias" | "correction" | null,
+        "canonical": "Det rätta/fullständiga namnet",
+        "alias": "Varianten som ska mappas",
+        "entity_type": "persons" | "projects" | "concepts",
+        "confidence": 0.0-1.0
+    }}
+    
+    EXEMPEL:
+    - "Cenk och Sänk är samma person" -> {{"is_feedback": true, "type": "alias", "canonical": "Cenk", "alias": "Sänk", "entity_type": "persons", "confidence": 0.9}}
+    - "Adda-grejen är Adda PoC" -> {{"is_feedback": true, "type": "alias", "canonical": "Adda PoC", "alias": "Adda-grejen", "entity_type": "projects", "confidence": 0.8}}
+    - "Vad hände igår?" -> {{"is_feedback": false, "type": null, "canonical": null, "alias": null, "entity_type": null, "confidence": 0.0}}
 
 interrogator_check:
   role: "Du avgör om du har tillräcklig information för att lösa din uppgift, ELLER om du ska ge upp."
