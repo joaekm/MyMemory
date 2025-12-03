@@ -57,6 +57,45 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
 
 ## Öppna Objekt (Nästa Fas)
 
+* **OBJEKT-46 (Prio 0 - ARKITEKTUR):** Implementera **Pipeline v6.0** (Refaktorering).
+    * *Beslut:* 2025-12-03 – Överenskommelse om ny sök-pipeline.
+    * *Nuvarande (v5.2):* Planering → Jägaren + Vektorn → Domaren → Syntes (3 AI-anrop, otydlig SOC)
+    * *Ny pipeline (v6.0):*
+        ```
+        Input → IntentRouter → ContextBuilder → Planner → Synthesizer → Output
+                    (AI)           (Kod)         (AI)        (AI)
+                Klassificera     Hämta data   Bygg rapport   Svara
+        ```
+    * *Komponenter:*
+        1. **IntentRouter** (`services/intent_router.py`) - AI (Flash Lite)
+            - Klassificera intent: `FACT` (specifik data) vs `INSPIRATION` (idéer)
+            - Bestäm strategi: `STRICT` (bara Jägaren) vs `RELAXED` (båda parallellt)
+            - Parsa tidsreferenser ("igår" → absolut datum)
+            - Upplös kontext från historik ("det projektet" → "Adda PoC")
+        2. **ContextBuilder** (`services/context_builder.py`) - **Kod (Python)**
+            - Deterministisk informationshämtning
+            - `STRICT`: Endast `search_lake` (nyckelord)
+            - `RELAXED`: `search_lake` + `vector_db` parallellt
+            - Ingen AI – snabbt, förutsägbart, debuggbart
+        3. **Planner** (`services/planner.py`) - AI (Flash Lite)
+            - Tar kandidater från ContextBuilder
+            - Skapar en kurerad **rapport** (kondenserad, relevant information)
+            - Synthesizer får rapporten – INTE råa dokument
+        4. **Synthesizer** (befintlig) - AI (Pro)
+            - Genererar svar baserat på rapporten
+            - Framtid: Kan begära ny rapport om resultatet är svagt
+    * *Principer:*
+        - **Tydlig SOC:** Varje komponent har ETT ansvar
+        - **HARDFAIL:** Varje steg rapporterar explicit om det misslyckas
+        - **Rapport > Dokument:** Synthesizer får aldrig rådata
+    * *Framgångskriterium:* Samma eller bättre kvalitet på svar, men tydligare flöde och debuggbarhet.
+    * *Implementationsordning:*
+        1. IntentRouter (med temporal parsing)
+        2. ContextBuilder (ersätter nuvarande sök-logik)
+        3. Planner (ersätter Domaren, skapar rapport)
+        4. Integration i `my_mem_chat.py`
+    * *Framtid (v7.0):* Agentic loop där Planner kan iterera vid svagt resultat.
+
 * **OBJEKT-41 (Prio 0 - KRITISK):** Implementera **"Aggregerad Insikt"** ("The Inverted T").
     * *Problem:* Chatten fungerar som arkiv (returnerar data) istället för minne (ger insikt).
     * *Mål:* Synthesizern ska ge **mervärde** genom att koppla ihop information från olika kontexter.

@@ -557,3 +557,52 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
 * **Slutsats:** Bättre metadata vid insamling = mindre städning efteråt. Agenterna ska inte gissa – de ska veta.
 
 * **Backlogg:** OBJEKT-45 (Context Injection vid Insamling)
+
+### Konflikt 45: Pipeline-arkitektur v6.0 ("Rapport över Dokument")
+
+* **Problem (v5.2):** Nuvarande pipeline har otydlig separation of concerns:
+    - Planering, Jägaren, Vektorn, Domaren, Syntes – vem gör vad?
+    - Domaren (AI) gör re-ranking, men baserat på vad?
+    - Synthesizer får 30+ råa dokument (upp till 100k tecken)
+    - 3 AI-anrop men oklart värde från varje
+
+* **Observation (Diskussion 2025-12-03):**
+    - Gemini föreslog: IntentRouter → ContextBuilder → Synthesizer (2 AI-anrop)
+    - Problem: Vem skapar "rapporten" som Synthesizer behöver?
+    - Insikt: Synthesizer ska inte få råa dokument – den ska få en kurerad rapport
+
+* **Resonemang:**
+    ```
+    Alternativ A (Ursprungligt förslag):
+    IntentRouter (AI) → ContextBuilder (Kod) → Synthesizer (AI)
+    Problem: Synthesizer måste själv filtrera 30 dokument → långsamt
+    
+    Alternativ B (Planner×2):
+    Planner(Intent) → ContextBuilder → Planner(Rapport) → Synthesizer
+    Problem: Otydlig SOC, en komponent med två lägen
+    
+    Alternativ C (Vald lösning):
+    IntentRouter → ContextBuilder → Planner → Synthesizer
+    ✅ Tydlig SOC: Varje komponent har ETT ansvar
+    ✅ Planner skapar rapport, Synthesizer konsumerar rapport
+    ✅ ContextBuilder är KOD, inte AI → snabbt, förutsägbart
+    ```
+
+* **Beslut: Pipeline v6.0**
+    ```
+    Input → IntentRouter → ContextBuilder → Planner → Synthesizer → Output
+                (AI)           (Kod)         (AI)        (AI)
+            Klassificera     Hämta data   Bygg rapport   Svara
+    ```
+
+* **Nyckelprinciper:**
+    1. **Rapport > Dokument:** Synthesizer får aldrig rådata, bara en kurerad rapport
+    2. **ContextBuilder är Kod:** Deterministisk, snabb, debuggbar – ingen AI
+    3. **Tydlig SOC:** Varje komponent har exakt ett ansvar
+    4. **HARDFAIL:** Varje steg rapporterar explicit om det misslyckas
+
+* **Framtid (v7.0):**
+    - Agentic loop: Om Synthesizer bedömer rapporten som svag → begär ny rapport
+    - Planner kan fråga användaren om intent är oklar
+
+* **Backlogg:** OBJEKT-46 (Pipeline v6.0 Refaktorering)

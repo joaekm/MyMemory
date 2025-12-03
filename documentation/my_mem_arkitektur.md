@@ -92,6 +92,29 @@ Syntes (Gemini Pro)
 - `chat_prompts.yaml`: Alla system-instruktioner (Planering, Domare, Syntes).
 - **Refresh:** Initierar nya DB-anslutningar vid varje sökning för att se nydata direkt.
 
+### Pipeline v6.0 (Planerad - OBJEKT-46)
+
+**Beslut 2025-12-03:** Ny arkitektur med tydligare separation of concerns.
+
+```
+Input → IntentRouter → ContextBuilder → Planner → Synthesizer → Output
+             (AI)           (Kod)         (AI)        (AI)
+         Klassificera     Hämta data   Bygg rapport   Svara
+```
+
+| Komponent | Typ | Ansvar | Fil |
+|-----------|-----|--------|-----|
+| **IntentRouter** | AI (Flash Lite) | Klassificera intent (FACT/INSPIRATION), parsa tid, upplös kontext | `intent_router.py` |
+| **ContextBuilder** | **Kod** | Deterministisk sökning baserad på strategi | `context_builder.py` |
+| **Planner** | AI (Flash Lite) | Skapa kurerad rapport från kandidater | `planner.py` |
+| **Synthesizer** | AI (Pro) | Generera svar från rapport | (befintlig) |
+
+**Nyckelskillnader mot v5.2:**
+- Synthesizer får en **rapport**, inte råa dokument
+- ContextBuilder är **deterministisk kod**, inte AI
+- Tydlig SOC: Varje komponent har ETT ansvar
+- Förberedd för agentic loop (v7.0)
+
 ### Launcher (macOS)
 - **Fil:** `MyMemory.app/Contents/Resources/Scripts/main.scpt`
 - **Funktion:** Orkestrerar start av backend och frontend.
