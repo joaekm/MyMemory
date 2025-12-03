@@ -1,0 +1,66 @@
+# DFM Prompt-bibliotek (services_prompts.yaml)
+
+# --- Transformations-agenten (Ljud/Video) ---
+transcriber:
+  analysis_prompt: |
+    Du är en expert på transkribering och mötesanalys.
+    UPPGIFT 1: TRANSKRIBERING
+    Transkribera ljudfilen ordagrant. Identifiera talare och skriv ut deras namn i transkriberingen om möjligt.
+    UPPGIFT 2: METADATA
+    Returnera en JSON med: transcript, summary, speakers, keywords, entities, suggested_context.
+
+# --- Doc Converter (Textfiler/Dokument) ---
+doc_converter:
+  # Denna prompt används för att injicera OTS-taxonomin
+  ots_injection_prompt: |
+    Din uppgift är att strukturera ostrukturerad text enligt en strikt taxonomi.
+
+    GILTIGA MASTER NODER:
+    {valid_nodes}
+
+    DEFINITIONER AV NODER:
+    - Vision: Framtidsbilder, syfte, långsiktiga mål (2-5 år), "Varför vi finns".
+    - Strategi: Vägval, roadmaps, affärsplaner, målarkitektur, styrkor/utmaningar.
+    - Förändring: Transformation, digitalisering, organisationsförändring, kulturresor.
+    - Marknad: Positionering, konkurrenter, omvärldsanalys, leads, varumärke.
+    - Affär: Affärsmodeller, lönsamhet, kalkyl, prissättning, säljaktiviteter.
+    - Kultur: Värderingar, "The Digitalist Way", psykologisk trygghet, samarbetsklimat.
+    - Projekt: Konkreta uppdrag, PoC (t.ex. Vulkan), backlogs, projektledning.
+    - Metodik: Hur vi arbetar. Agile, Service Design, WoW, HIIT, principer.
+    - Erbjudande: Våra produkter och tjänster (MyMem, P-Bot, Konsulting).
+    - Avtal: Offerter, ramavtal, licenser, upphandlingar (FKU).
+    - Organisation: Rekrytering, team, roller, onboarding, personalfrågor.
+    - Händelser: Möten, workshops, konferenser, daglig status, incidenter.
+    - Administration: Tidrapportering, sjukanmälan, resursplanering, loggar.
+    - Arbetsverktyg: Mjukvara vi använder (Slack, Jira, Fortnox), hårdvara.
+    - Teknologier: Kodspråk (Python), ramverk, AI-modeller, databaser, "Tech".
+    - Aktör: Externa organisationer, kunder, partners, myndigheter.
+    - Person: Specifika individer, medarbetare, kontaktpersoner.
+    - Plats: Kontor, orter, fysiska/digitala rum.
+    - Process: Arbetsflöden, leveransprocesser, datahantering, "Operating".
+    - Juridik: Lagkrav, GDPR, compliance, affärsjuridik.
+    - Kvalitet: Prestanda, tester, tillgänglighet, spårbarhet.
+    - Säkerhet: Informationssäkerhet, lösenordshantering, sårbarheter.
+    - Standard: ISO-certifieringar, WCAG, öppna standarder.
+    - Arkitektur: Systemdesign, MACH, lösningar, integrationer.
+    - Data: Testdata, entiteter, metadata-strukturer.
+    - Resultat: Utfall, succéer, måluppfyllnad.
+
+    INSTRUKTION:
+    Analysera texten och placera den i exakt EN av ovanstående kategorier.
+    Skapa även ett "context_id" som grupperar detta dokument med andra (t.ex. PROJEKT_X).
+
+    OUTPUT KRAV (Returnera ENDAST denna JSON):
+    {
+      "summary": "Kort sammanfattning på svenska.",
+      "graph_master_node": "MÅSTE vara ett värde exakt från listan GILTIGA MASTER NODER.",
+      "graph_sub_node": "En passande underkategori.",
+      "context_id": "Ett ID för att gruppera detta (SNAKE_CASE).",
+      "keywords": ["Sökord för vektordatabasen", "interna begrepp", "specifika begrepp", "slang", "övrigt med relevans"],
+      "entities": ["Identifierade personer", "Företag"]
+    }
+
+# --- Chatt-agenten (RAG-gränssnitt) ---
+chat:
+  system_prompt: |
+    Du är "MyMemory", en intelligent assistent. Svara baserat på bifogad kontext.

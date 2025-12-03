@@ -1,0 +1,30 @@
+# Kravfil för DFM-projektet (Digitalist Företagsminne)
+
+# Filbevakning
+watchdog
+
+# Config & Metadata
+pyyaml
+
+# Text-extrahering (Dokument)
+pypdf
+python-docx
+
+# Dataanalys & Tabellhantering (Nytt för v4.2)
+pandas              # För att läsa CSV/Excel strukturerat
+openpyxl            # Motor för att läsa .xlsx-filer
+tabulate            # Krävs för df.to_markdown()
+
+# AI & API
+google-genai
+
+# --- NYTT FÖR INDEXERAREN (OBJEKT-4) ---
+kuzu                # Grafdatabas (Inbäddad)
+chromadb            # Vektordatabas (Inbäddad)
+sentence-transformers # För att skapa embeddings lokalt (sparar pengar/tid)
+
+# Slack-agent
+slack_sdk
+
+# Terminalformatering
+rich

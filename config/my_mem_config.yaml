@@ -1,0 +1,111 @@
+# DFM Konfiguration (dfm_config.yaml)
+
+# --- SYSTEMINSTÄLLNINGAR (NY) ---
+system:
+  timezone: "Europe/Stockholm" # Styr alla tidsstämplar i systemet (Assets, Lake, Index)
+  locale: "sv_SE"
+
+# --- SÄKERHET & BEHÖRIGHET ---
+security:
+  # Standardnivå för all nyinsamlad data (Privacy-First).
+  # Vi använder standarden: Högre siffra = Högre säkerhet.
+  default_access_level: 5
+
+  # Definition av säkerhetsklasser (Access Level):
+  # 5 = PRIVATE      (Endast ägaren. "Eyes Only".)
+  # 4 = RESTRICTED   (Delat med specifika projekt/kontexter.)
+  # 3 = INTERNAL     (Hela organisationen - Företagsminnet.)
+  # 2 = PARTNER      (Delat med externa samarbetspartners/kunder.)
+  # 1 = PUBLIC       (Helt öppet / Publicerat.)
+
+# --- ÄGARE & PROFIL ---
+owner:
+  id: "joakim.ekman"
+  profile:
+    full_name: "Joakim Ekman"
+    role: "Enhetschef Drive"
+    organization: "Digitalist"
+    location: "Stockholm, Sverige"
+    
+    # Nyckelkompetenser (Hjälper AI:n att välja nivå på svaret)
+    skills:
+      - "Systemarkitektur"
+      - "Servicedesign"
+      - "Mjukvaruutveckling"
+      - "Verksamhetsutveckling"
+      - "Ledarskap"
+
+# Sökvägar
+paths:
+  drop_folder: "~/Desktop/MemoryDrop"
+  lake_store: "~/MyMemory/Lake"
+  asset_store: "~/MyMemory/Assets"
+  chroma_db: "~/MyMemory/Index/ChromaDB"
+  kuzu_db: "~/MyMemory/Index/KuzuDB"
+  taxonomy_file: "~/MyMemory/Index/my_mem_taxonomy.json"
+
+# Loggning
+logging:
+  log_file_path: "~/MyMemory/Logs/my_mem_system.log"
+  log_level: "INFO"
+
+# AI-Motor & Modeller
+ai_engine:
+  api_key: "YOUR_GOOGLE_API_KEY_HERE"  # Get from https://aistudio.google.com/ 
+  
+  # Definitioner av modeller
+  models:
+    model_pro: "models/gemini-pro-latest" 
+    model_fast: "models/gemini-flash-latest"
+    model_lite: "models/gemini-flash-lite-latest"
+
+  # Mappning: Vilken modell gör vad?
+  tasks:
+    # Transkribering (Kräver hög kvalitet)
+    transcription: "model_pro" 
+    
+    # Metadata-berikning i Desktop (Kräver snabbhet)
+    enrichment: "model_fast"
+    
+    # Framtida: Konsolidering/Städning
+    consolidation: "model_pro"
+
+# --- NY STRUKTUR FÖR FILTYPER ---
+processing:
+  metadata_text_limit: 50000
+
+# Dokument som Desktop-agenten ska hantera
+  document_extensions:
+    - .pdf
+    - .docx
+    - .txt
+    - .md
+    - .json
+    - .xls
+    - .xlsx
+    - .csv
+  
+  # Media som Transformations-agenten ska hantera
+  audio_extensions:
+    - .mp3
+    - .wav
+    - .m4a
+    - .mp4
+    - .aac
+    - .flac
+    - .ogg
+    - .mov
+
+# --- SLACK INTEGRATION ---
+slack:
+  bot_token: "YOUR_SLACK_BOT_TOKEN_HERE"  # Get from Slack App settings
+  
+  # Kanaler att övervaka (ID eller Namn)
+  channels:
+    - "C07FA03N3JS" #se_drive
+    - "C02134V7RDF" #Vulkan
+    - "C09C099K86R" #Salj/Sales
+    - "C09TVCN9X39" #MyMem-inbox
+
+  # Hur långt bakåt ska vi titta vid start? (Dagar)
+  history_days: 7

@@ -1,0 +1,82 @@
+# MyMemory Development Rules
+
+## Princip 1: HARDFAIL > Silent Fallback
+
+**Inga tysta fallbacks.** Om en operation misslyckas ska systemet:
+
+1. **Rapportera felet explicit** till användaren
+2. **Logga orsaken** med full kontext
+3. **Avbryta operationen** istället för att gissa
+
+### Varför?
+
+- **Transparens:** Användaren ska veta varför något misslyckades
+- **Debuggbarhet:** Tysta fallbacks maskerar buggar och gör dem svåra att hitta
+- **Förtroende:** Bättre att säga "jag vet inte" än att ge ett dåligt svar
+
+### Exempel på FEL (anti-pattern):
+
+```python
+# ❌ DÅLIGT: Tyst fallback
+def search(query, strategy="STRICT"):
+    results = strict_search(query)
+    if not results:
+        results = relaxed_search(query)  # Tyst fallback - användaren vet inte
+    return results
+```
+
+### Exempel på RÄTT:
+
+```python
+# ✅ BRA: Explicit hardfail
+def search(query, strategy="STRICT"):
+    results = strict_search(query)
+    if not results:
+        return {
+            "status": "NO_RESULTS",
+            "reason": f"Strict search for '{query}' returned 0 hits",
+            "suggestion": "Försök med bredare söktermer",
+            "results": []
+        }
+    return {"status": "OK", "results": results}
+```
+
+### Undantag:
+
+Fallbacks är tillåtna **endast** om:
+1. De är **explicit dokumenterade** i svaret till användaren
+2. De **loggas** med nivå WARNING eller högre
+3. Användaren kan **se** att en fallback användes (t.ex. i debug_trace)
+
+```python
+# ✅ OK: Explicit fallback med transparens
+if not results:
+    logger.warning(f"STRICT search failed, using RELAXED fallback")
+    results = relaxed_search(query)
+    return {
+        "status": "FALLBACK_USED",
+        "fallback_reason": "Strict search returned 0 results",
+        "results": results
+    }
+```
+
+---
+
+## Princip 2: Fail Fast, Fail Loud
+
+- Validera input tidigt
+- Kasta exceptions istället för att returnera None
+- Logga ALLA fel, även "förväntade"
+
+---
+
+## Princip 3: Ingen AI-cringe
+
+Undvik töntiga metafornamn i kod och dokumentation:
+- ❌ "Trädgårdsmästaren", "Bibliotekarien", "Portvakten"
+- ✅ "Konsolidering", "Vektorsökning", "Desktop-agent"
+
+Behåll deskriptiva namn som faktiskt beskriver funktionen:
+- ✅ "Jägaren" (keyword search) - acceptabelt
+- ✅ "Domaren" (re-ranker) - acceptabelt
+

@@ -1,0 +1,44 @@
+# Python
+venvP312/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs (keep structure, ignore contents)
+logs/*.md
+logs/*.txt
+!logs/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Data directories (user-specific)
+# These contain personal data and should not be committed
+# Uncomment if you want to exclude them:
+# Lake/
+# Assets/
+# Index/
+
+# Temporary files
+*.tmp
+*.temp
+~*
+
+# API keys (should be in config, but just in case)
+*.env
+.env
+

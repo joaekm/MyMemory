@@ -1,0 +1,44 @@
+# Simuleringsuppgifter för MyMemory
+# Format: Titel | Beskrivning (uppgift för testpersonan)
+# 
+# BASERAT PÅ FAKTISKT INNEHÅLL I LAKE (2025-12-03):
+# ✓ Adda PoC-projekt (AI-avropsstöd) - flera inspelningar och dokument
+# ✓ Inköpslänken/Lönelänken - nytt möte 2025-12-02  
+# ✓ Slack-digests (#se_drive, #salj, #mymem-inbox)
+# ✓ Beläggning/resursplanering 2026 (CSV)
+# ✓ Strategi & Affärsplaner (Aronsborg)
+# ✓ Stacken.ai produktblad
+# ✓ Vulkan-möten (operativt)
+# ✓ Almedalsveckan-planering
+# ✓ Industritorget huvudavtal
+
+# === UPPGIFTER SOM HAR BRA DATAUNDERLAG ===
+
+Adda PoC Status | Du ska ge en statusuppdatering om Adda-projektet till ledningsgruppen. Ta reda på vad som hänt på mötena, vad som bestämts om tekniken, och var vi står just nu i PoC:en.
+
+Inköpslänken Scoping | Du hade möte med Adda om Inköpslänken igår. Sammanfatta vad som diskuterades - tekniska krav, säkerhet, och vad vi lovade leverera.
+
+Slack-uppdatering Drive | Du har missat Slack i några dagar. Vad har diskuterats i Drive-kanalen? Något viktigt du missat?
+
+Beläggning Q1 2026 | Du ska planera Q1 2026. Vilka i teamet har ledig kapacitet? Vem är fullbelagd?
+
+Strategisk Riktning | Du ska förbereda en presentation om Digitalists strategi. Vad beslutades på Aronsborg? Vad är visionen?
+
+Stacken.ai Pitch | En kund frågar om era AI-tjänster. Vad är Stacken.ai? Vad kostar det? Vad ingår?
+
+# === UPPGIFTER MED PARTIELLT DATAUNDERLAG ===
+
+Veckorapport | Du ska skriva veckorapport för ledningen. Vad har hänt denna vecka? Vilka möten, beslut, framsteg?
+
+Julfesten | Kollegorna frågar om julfesten den 10 december. När börjar det? Var är det? Vad händer under dagen?
+
+Almedalen 2025 | Planeringen för Almedalsveckan har börjat. Vad vet du om upplägget? Vilka är med i kärntruppen?
+
+Rekryteringsbehov | Du ska tipsa om rekryteringsbehoven för 2026. Vilka roller söker vi?
+
+# === UTMANANDE UPPGIFTER (testar systemets gränser) ===
+
+Förra Fredagen | Vad gjorde du förra fredagen? Några möten eller aktiviteter loggade?
+
+Kundbudgetar | Hur ligger vi till mot budget för våra största kunder? (Testar om sådana data finns)
+
