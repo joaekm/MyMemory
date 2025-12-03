@@ -1,3 +1,111 @@
+# === PIPELINE v6.0 ===
+
+intent_router:
+  role: "Du analyserar användarfrågor för att avgöra sökstrategi och graf-expansion."
+  instruction: |
+    DAGENS DATUM: {date} ({weekday})
+    
+    FRÅGA: {query}
+    
+    CHATTHISTORIK:
+    {history}
+    
+    TILLGÄNGLIGA HUVUDNODER I GRAFEN:
+    {taxonomy_nodes}
+    
+    UPPGIFT:
+    1. Klassificera intent:
+       - STRICT: Användaren söker specifik fakta (datum, namn, citat, siffror)
+       - RELAXED: Användaren söker idéer, sammanfattningar, eller bred förståelse
+    
+    2. Parsa tidsreferenser till absoluta datum:
+       - "igår" → beräkna från dagens datum
+       - "förra veckan" → intervall (after/before)
+       - "senaste mötet" → null (för svårt att avgöra exakt)
+    
+    3. Upplös kontextreferenser från historiken:
+       - "det projektet" → vilket projekt nämndes senast?
+       - "han/hon" → vem pratade vi om?
+    
+    4. Extrahera sökord (keywords) och en bred semantisk söksträng (vector_query)
+    
+    5. Bestäm graf-expansion (graph_paths):
+       - Om STRICT: tom lista [] (ingen expansion)
+       - Om RELAXED: lista relevanta huvudnoder att expandera
+       - Välj ENDAST från listan ovan
+    
+    Svara JSON:
+    {{
+        "intent": "STRICT" | "RELAXED",
+        "keywords": ["ord1", "ord2"],
+        "vector_query": "semantisk söksträng för vektorsökning",
+        "time_filter": {{"after": "YYYY-MM-DD", "before": "YYYY-MM-DD"}} | null,
+        "context_resolved": {{"referens": "upplöst värde"}},
+        "graph_paths": ["Huvudnod1", "Huvudnod2"],
+        "reasoning": "kort motivering av klassificering och graf-val"
+    }}
+
+planner_select:
+  role: "Du väljer de mest relevanta dokumenten för att besvara en fråga."
+  instruction: |
+    ANVÄNDARENS FRÅGA: {query}
+    
+    INTENT: {intent}
+    
+    KANDIDAT-DOKUMENT (sorterade på relevans):
+    {candidates}
+    
+    UPPGIFT:
+    Välj de 10-15 dokument som är MEST relevanta för att besvara frågan.
+    
+    URVALSKRITERIER:
+    - Om STRICT: Prioritera dokument med exakta matchningar
+    - Om RELAXED: Inkludera även dokument med relaterad kontext
+    - Undvik dokument som uppenbart är irrelevanta
+    - Prioritera dokument med högre score
+    
+    Svara JSON:
+    {{
+        "selected_ids": ["doc_id_1", "doc_id_2", "..."],
+        "reasoning": "kort motivering av urvalet"
+    }}
+
+planner_report:
+  role: "Du skapar en kurerad rapport baserad på källdokument."
+  instruction: |
+    ANVÄNDARENS FRÅGA: {query}
+    
+    INTENT: {intent}
+    
+    KÄLLDOKUMENT:
+    {documents}
+    
+    UPPGIFT:
+    Skapa en RAPPORT som kondenserar relevant information från dokumenten.
+    
+    RAPPORT-KRAV:
+    1. Strukturerad markdown med tydliga rubriker
+    2. Extrahera FAKTA: namn, datum, siffror, citat
+    3. Sammanfatta KONTEXT: bakgrund, relationer, sammanhang
+    4. Max 800 ord
+    5. Ange vilka dokument du använde
+    6. Notera LUCKOR: vad saknas för ett komplett svar?
+    
+    VIKTIGT:
+    - Citera inte hela dokument, extrahera det väsentliga
+    - Om information saknas, var tydlig med det
+    - Prioritera konkreta fakta över generella beskrivningar
+    
+    Svara JSON:
+    {{
+        "report": "## Rapport\\n\\n### Sammanfattning\\n...\\n\\n### Detaljer\\n...",
+        "sources_used": ["filnamn1.md", "filnamn2.md"],
+        "gaps": ["Information som saknas för komplett svar..."],
+        "confidence": 0.0-1.0
+    }}
+
+# === LEGACY (v5.2 - behålls för bakåtkompatibilitet) ===
+
 planner:
   role: "Din roll är att förstå syfte och riktning i chatthistoriken och leverera relevanta NYCKELORD för semantisk, taxonomisk och matchningsmässig sökning."
   instruction: |

@@ -606,3 +606,70 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
     - Planner kan fråga användaren om intent är oklar
 
 * **Backlogg:** OBJEKT-46 (Pipeline v6.0 Refaktorering)
+
+### Konflikt 46: Statisk Metadata vs Levande Kunskap ("Dreaming")
+
+* **Problem (Verifierad 2025-12-03):** Vid test av Pipeline v6.0 missade systemet specifik fakta ("10 december" för användartester) trots att informationen fanns i Lake. Analys visade att:
+    - Dokumentets summary nämnde inte "10 december" eller "användartester"
+    - Keywords saknade dessa termer
+    - Planner kunde inte veta att dokumentet var relevant
+
+* **Rotorsak:** Metadata genereras vid insamling och förblir **statisk**. Systemet lär sig inte vad som är viktigt för användaren över tid.
+
+* **Insikt:** Arkitekturen har fem kraftfulla delar som inte samverkar optimalt:
+    ```
+    Taxonomi ← Graf ← Vektor ← Lake ← LLM
+    ```
+    Alla dessa borde förstärka varandra i en **levande cykel**.
+
+* **Konceptet "Dreaming" (Hjärnmetafor):**
+    ```
+    ┌─────────────────────────────────────────────────────────────┐
+    │ VAKEN (Användande)                                          │
+    ├─────────────────────────────────────────────────────────────┤
+    │ Systemet samlar "signaler":                                │
+    │ • Vilka sökningar gjordes?                                 │
+    │ • Vilka dokument hittades/missades?                        │
+    │ • Vilka sessioner avbröts (frustration)?                   │
+    │ • Vilka entiteter refererades ofta?                        │
+    └─────────────────────────────────────────────────────────────┘
+                              ↓
+    ┌─────────────────────────────────────────────────────────────┐
+    │ DRÖMMER (Vid omstart / schemalagt)                         │
+    ├─────────────────────────────────────────────────────────────┤
+    │ LLM processar signalerna och skapar "synapser":            │
+    │ • Nya kopplingar i grafen (aliases, relationer)            │
+    │ • Förfinade undernoder i taxonomin                         │
+    │ • Justerade prioriteringar för metadata-extraktion         │
+    │ • Flaggade dokument för re-indexering                      │
+    └─────────────────────────────────────────────────────────────┘
+                              ↓
+    ┌─────────────────────────────────────────────────────────────┐
+    │ VAKNAR (Nästa session)                                     │
+    ├─────────────────────────────────────────────────────────────┤
+    │ Systemet är lite bättre anpassat till användaren:          │
+    │ • Graf har nya relationer                                  │
+    │ • Taxonomi har relevanta undernoder                        │
+    │ • Insamling vet vad som är viktigt                         │
+    └─────────────────────────────────────────────────────────────┘
+    ```
+
+* **Tre signalkällor:**
+    1. **Implicit (observation):** Sökbeteende, avbrott, follow-ups – lågt förtroende, kräver mönster
+    2. **Explicit (direkt feedback):** Användaren säger "Cenk och Sänk är samma person" – högt förtroende, omedelbart
+    3. **Dokument (nya inputs):** Transkriptioner, Slack, dokument – medium förtroende
+
+* **Explicit feedback i chatten:**
+    ```
+    Du: Cenk och Sänk är samma person.
+    MyMem: ✓ Noterat! Jag har lagt till "Sänk" som alias för "Cenk Bisgen".
+    ```
+
+* **Koppling till andra objekt:**
+    - **OBJEKT-45 (Insamling):** "Dreaming" förbättrar vad som extraheras vid nästa insamling
+    - **OBJEKT-46 (Användande):** Pipeline v6.0 drar nytta av rikare metadata
+    - **OBJEKT-44 (Lärande):** Entity Resolution är ett specialfall av "synapser"
+
+* **Slutsats:** Systemet ska inte bara lagra och söka – det ska **lära sig och anpassa sig** till användaren över tid. Taxonomins huvudnoder förblir fasta (för framtida delning), men undernoder och grafen växer organiskt.
+
+* **Backlogg:** OBJEKT-48 (Dreaming / Självlärande System)

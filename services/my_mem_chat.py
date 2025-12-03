@@ -18,6 +18,17 @@ from rich.table import Table
 from rich import box
 from rich.live import Live
 
+# Pipeline v6.0 imports
+try:
+    from services.intent_router import route_intent
+    from services.context_builder import build_context
+    from services.planner import create_report
+except ImportError:
+    # Fallback för direkt körning
+    from intent_router import route_intent
+    from context_builder import build_context
+    from planner import create_report
+
 # --- ARGUMENT PARSER (endast vid direkt körning) ---
 def parse_args():
     parser = argparse.ArgumentParser(description="MyMem Chat Client")
@@ -408,8 +419,107 @@ def execute_pipeline(query, chat_history, debug_mode=False, debug_trace=None):
     return final_context
 
 
+# === PIPELINE v6.0 ===
+def execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=None):
+    """
+    Pipeline v6.0: IntentRouter → ContextBuilder → Planner → Synthesizer
+    
+    Args:
+        query: Användarens fråga
+        chat_history: Lista med tidigare meddelanden
+        debug_mode: Om True, visa debug-paneler
+        debug_trace: Dict att samla debug-info till (optional)
+    
+    Returns:
+        dict: {
+            "status": "OK" | "NO_RESULTS" | "ERROR",
+            "report": Markdown-rapport för Synthesizer,
+            "sources": Lista med filnamn,
+            "gaps": Lista med identifierade luckor
+        }
+    """
+    start_time = time.time()
+    
+    # Fas 1: IntentRouter (AI)
+    if debug_mode:
+        console.print("[dim]→ IntentRouter...[/dim]")
+    
+    intent_data = route_intent(query, chat_history, debug_trace=debug_trace)
+    
+    if intent_data.get('status') == 'ERROR':
+        LOGGER.error(f"IntentRouter HARDFAIL: {intent_data.get('reason')}")
+        # Fortsätt ändå med fallback-värden
+    
+    if debug_mode:
+        debug_content = f"[bold]Intent:[/bold] {intent_data.get('intent')}\n"
+        debug_content += f"[cyan]Keywords:[/cyan] {intent_data.get('keywords')}\n"
+        debug_content += f"[green]Graf-paths:[/green] {intent_data.get('graph_paths')}\n"
+        debug_content += f"[magenta]Tidsfilter:[/magenta] {intent_data.get('time_filter')}"
+        debug_panel("1. INTENT", debug_content, style="magenta", debug_mode=debug_mode)
+    
+    # Fas 2: ContextBuilder (Kod)
+    if debug_mode:
+        console.print("[dim]→ ContextBuilder...[/dim]")
+    
+    context_result = build_context(intent_data, debug_trace=debug_trace)
+    
+    if context_result.get('status') == 'NO_RESULTS':
+        if debug_mode:
+            console.print(f"[yellow]HARDFAIL: {context_result.get('reason')}[/yellow]")
+        return {
+            "status": "NO_RESULTS",
+            "reason": context_result.get('reason'),
+            "suggestion": context_result.get('suggestion'),
+            "report": "",
+            "sources": [],
+            "gaps": ["Inga dokument hittades"]
+        }
+    
+    if debug_mode:
+        stats = context_result.get('stats', {})
+        debug_content = f"[bold]Lake:[/bold] {stats.get('lake_hits', 0)} träffar\n"
+        debug_content += f"[bold]Vektor:[/bold] {stats.get('vector_hits', 0)} träffar\n"
+        debug_content += f"[bold]Efter dedup:[/bold] {stats.get('after_dedup', 0)} kandidater"
+        debug_panel("2. CONTEXT", debug_content, style="green", debug_mode=debug_mode)
+    
+    # Fas 3: Planner (AI)
+    if debug_mode:
+        console.print("[dim]→ Planner...[/dim]")
+    
+    report_result = create_report(context_result, intent_data, debug_trace=debug_trace)
+    
+    if report_result.get('status') in ['ERROR', 'NO_CANDIDATES']:
+        if debug_mode:
+            console.print(f"[yellow]Planner-fel: {report_result.get('reason')}[/yellow]")
+        return {
+            "status": "ERROR",
+            "reason": report_result.get('reason'),
+            "report": "",
+            "sources": [],
+            "gaps": report_result.get('gaps', [])
+        }
+    
+    if debug_mode:
+        debug_content = f"[bold]Använda källor:[/bold] {len(report_result.get('sources_used', []))}\n"
+        debug_content += f"[bold]Luckor:[/bold] {report_result.get('gaps', [])}\n"
+        debug_content += f"[bold]Confidence:[/bold] {report_result.get('confidence', 0)}"
+        debug_panel("3. PLANNER", debug_content, style="blue", debug_mode=debug_mode)
+    
+    # Spara timing
+    if debug_trace is not None:
+        debug_trace['pipeline_duration'] = round(time.time() - start_time, 2)
+    
+    return {
+        "status": "OK",
+        "report": report_result.get('report', ''),
+        "sources": report_result.get('sources_used', []),
+        "gaps": report_result.get('gaps', []),
+        "confidence": report_result.get('confidence', 0)
+    }
+
+
 # --- PROCESS QUERY (API) ---
-def process_query(query: str, chat_history: list = None, collect_debug: bool = False) -> dict:
+def process_query(query: str, chat_history: list = None, collect_debug: bool = False, use_v6: bool = True) -> dict:
     """
     Bearbetar en fråga och returnerar ett strukturerat svar.
     
@@ -420,47 +530,92 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
         query: Användarens fråga
         chat_history: Lista med tidigare meddelanden [{"role": "user/assistant", "content": "..."}]
         collect_debug: Om True, samla debug-information i svaret
+        use_v6: Om True, använd Pipeline v6.0 (default). Om False, använd legacy v5.2.
     
     Returns:
         dict: {
             "answer": "Svaret från Gemini...",
             "sources": ["fil1.md", "fil2.md"],
-            "debug_trace": {
-                "plan_data": {...},
-                "hits_hunter": 2,
-                "hits_vector": 5,
-                "judge_data": {...},
-                ...
-            }
+            "debug_trace": {...}
         }
     """
     if chat_history is None:
         chat_history = []
     
     debug_trace = {} if collect_debug else None
+    start_time = time.time()
     
-    # Kör sökpipelinen
-    context_docs = execute_pipeline(query, chat_history, debug_mode=False, debug_trace=debug_trace)
-    
-    if not context_docs:
-        return {
-            "answer": "Hittade ingen relevant information för att besvara frågan.",
-            "sources": [],
-            "debug_trace": debug_trace if collect_debug else {}
-        }
-    
-    # Syntes
-    synthesizer_template = PROMPTS['synthesizer']['instruction']
-    system_prompt = synthesizer_template.format(context_docs="\n".join(context_docs))
-    
-    contents = []
-    for msg in chat_history:
-        role = "model" if msg['role'] == "assistant" else "user"
-        contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
+    if use_v6:
+        # === PIPELINE v6.0 ===
+        pipeline_result = execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=debug_trace)
         
-    full_message = f"{system_prompt}\n\nFRÅGA: {query}"
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=full_message)]))
+        if pipeline_result.get('status') == 'NO_RESULTS':
+            return {
+                "answer": f"Hittade ingen relevant information. {pipeline_result.get('suggestion', '')}",
+                "sources": [],
+                "debug_trace": debug_trace if collect_debug else {}
+            }
+        
+        if pipeline_result.get('status') == 'ERROR':
+            return {
+                "answer": f"Ett fel uppstod: {pipeline_result.get('reason', 'Okänt fel')}",
+                "sources": [],
+                "debug_trace": debug_trace if collect_debug else {}
+            }
+        
+        # Syntes med rapport istället för råa dokument
+        report = pipeline_result.get('report', '')
+        sources = pipeline_result.get('sources', [])
+        gaps = pipeline_result.get('gaps', [])
+        
+        # Ny synthesizer-prompt för v6.0 (tar rapport, inte dokument)
+        synth_prompt = f"""Svara på användarens fråga baserat på följande rapport.
 
+RAPPORT (sammanställd från källdokument):
+{report}
+
+IDENTIFIERADE LUCKOR:
+{gaps if gaps else "Inga kända luckor"}
+
+INSTRUKTIONER:
+1. Ge ett koncist och användbart svar baserat på rapporten
+2. Om rapporten saknar information, var tydlig med det
+3. Hänvisa till källor om relevant
+
+FRÅGA: {query}"""
+        
+        contents = []
+        for msg in chat_history:
+            role = "model" if msg['role'] == "assistant" else "user"
+            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
+        
+        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=synth_prompt)]))
+        
+    else:
+        # === LEGACY PIPELINE v5.2 ===
+        context_docs = execute_pipeline(query, chat_history, debug_mode=False, debug_trace=debug_trace)
+        
+        if not context_docs:
+            return {
+                "answer": "Hittade ingen relevant information för att besvara frågan.",
+                "sources": [],
+                "debug_trace": debug_trace if collect_debug else {}
+            }
+        
+        synthesizer_template = PROMPTS['synthesizer']['instruction']
+        system_prompt = synthesizer_template.format(context_docs="\n".join(context_docs))
+        
+        contents = []
+        for msg in chat_history:
+            role = "model" if msg['role'] == "assistant" else "user"
+            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
+            
+        full_message = f"{system_prompt}\n\nFRÅGA: {query}"
+        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=full_message)]))
+        
+        sources = debug_trace.get("sources", []) if debug_trace else []
+
+    # Syntes (gemensam för båda pipelines)
     try:
         ai_client = get_ai_client()
         response = ai_client.models.generate_content(model=MODEL_PRO, contents=contents)
@@ -469,26 +624,30 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
         LOGGER.error(f"Synthesis error: {e}")
         answer = f"Fel vid generering av svar: {e}"
     
-    # Extrahera källor från debug_trace eller kontext
-    sources = debug_trace.get("sources", []) if debug_trace else []
+    # Spara timing
+    if debug_trace is not None:
+        debug_trace['total_duration'] = round(time.time() - start_time, 2)
+        debug_trace['pipeline_version'] = 'v6.0' if use_v6 else 'v5.2'
     
     return {
         "answer": answer,
-        "sources": sources,
+        "sources": sources if not use_v6 else pipeline_result.get('sources', []),
         "debug_trace": debug_trace if collect_debug else {}
     }
 
 
 # --- CHAT LOOP (CLI) ---
-def chat_loop(debug_mode=False):
+def chat_loop(debug_mode=False, use_v6=True):
     """
     Interaktiv chattloop för CLI-användning.
     
     Args:
         debug_mode: Om True, visa debug-paneler under körning
+        use_v6: Om True, använd Pipeline v6.0 (default)
     """
     console.clear()
-    console.print(Panel("[bold white]Digitalist Företagsminne v5.2[/bold white]", style="on blue", box=box.DOUBLE, expand=False))
+    version = "v6.0" if use_v6 else "v5.2"
+    console.print(Panel(f"[bold white]Digitalist Företagsminne {version}[/bold white]", style="on blue", box=box.DOUBLE, expand=False))
     if debug_mode:
         console.print("[dim]Debug Mode: ON[/dim]")
         
@@ -502,26 +661,56 @@ def chat_loop(debug_mode=False):
         # Debug trace för CLI
         debug_trace = {} if debug_mode else None
         
-        # Kör pipelinen (med debug-output om aktiverat)
-        context_docs = execute_pipeline(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
-        
-        if not context_docs:
-            console.print("[red]Hittade ingen information.[/red]")
-            continue
+        if use_v6:
+            # === PIPELINE v6.0 ===
+            pipeline_result = execute_pipeline_v6(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
+            
+            if pipeline_result.get('status') in ['NO_RESULTS', 'ERROR']:
+                console.print(f"[red]{pipeline_result.get('reason', 'Ingen information hittades.')}[/red]")
+                continue
+            
+            report = pipeline_result.get('report', '')
+            sources = pipeline_result.get('sources', [])
+            gaps = pipeline_result.get('gaps', [])
+            
+            # Syntes med rapport
+            synth_prompt = f"""Svara på användarens fråga baserat på följande rapport.
+
+RAPPORT:
+{report}
+
+LUCKOR: {gaps if gaps else "Inga"}
+
+FRÅGA: {query}"""
+            
+            contents = []
+            for msg in chat_history:
+                role = "model" if msg['role'] == "assistant" else "user"
+                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
+            
+            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=synth_prompt)]))
+            
+        else:
+            # === LEGACY PIPELINE v5.2 ===
+            context_docs = execute_pipeline(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
+            
+            if not context_docs:
+                console.print("[red]Hittade ingen information.[/red]")
+                continue
+            
+            synthesizer_template = PROMPTS['synthesizer']['instruction']
+            system_prompt = synthesizer_template.format(context_docs="\n".join(context_docs))
+            
+            contents = []
+            for msg in chat_history:
+                role = "model" if msg['role'] == "assistant" else "user"
+                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
+                
+            full_message = f"{system_prompt}\n\nFRÅGA: {query}"
+            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=full_message)]))
 
         console.print("\n[bold purple]MyMem:[/bold purple]")
         
-        synthesizer_template = PROMPTS['synthesizer']['instruction']
-        system_prompt = synthesizer_template.format(context_docs="\n".join(context_docs))
-        
-        contents = []
-        for msg in chat_history:
-            role = "model" if msg['role'] == "assistant" else "user"
-            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
-            
-        full_message = f"{system_prompt}\n\nFRÅGA: {query}"
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=full_message)]))
-
         collected_text = ""
         try:
             ai_client = get_ai_client()
@@ -540,8 +729,9 @@ def chat_loop(debug_mode=False):
 if __name__ == "__main__":
     args = parse_args()
     DEBUG_MODE = args.debug or CONFIG.get('debug', False)
+    USE_V6 = CONFIG.get('pipeline_version', 'v6') == 'v6'  # Default till v6.0
     
     try:
-        chat_loop(debug_mode=DEBUG_MODE)
+        chat_loop(debug_mode=DEBUG_MODE, use_v6=USE_V6)
     except KeyboardInterrupt:
         print("\nHejdå!")

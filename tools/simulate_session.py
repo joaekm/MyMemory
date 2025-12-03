@@ -236,10 +236,19 @@ def run_simulation(task: dict, max_rounds: int, ai_client) -> dict:
             "duration_seconds": round(duration, 2)
         })
         
-        # Status
-        hits_h = debug_trace.get('hits_hunter', 0)
-        hits_v = debug_trace.get('hits_vector', 0)
-        print(f"✓ ({duration:.1f}s, H:{hits_h} V:{hits_v} S:{len(sources)})")
+        # Status (hanterar både v5.2 och v6.0 format)
+        if debug_trace.get('context_builder'):
+            # V6.0 format
+            stats = debug_trace.get('context_builder', {}).get('stats', {})
+            hits_l = stats.get('lake_hits', 0)
+            hits_v = stats.get('vector_hits', 0)
+            intent = debug_trace.get('intent_router', {}).get('intent', '?')
+            print(f"✓ ({duration:.1f}s, {intent} L:{hits_l} V:{hits_v} S:{len(sources)})")
+        else:
+            # V5.2 format
+            hits_h = debug_trace.get('hits_hunter', 0)
+            hits_v = debug_trace.get('hits_vector', 0)
+            print(f"✓ ({duration:.1f}s, H:{hits_h} V:{hits_v} S:{len(sources)})")
         
         # Kolla om Interrogator är klar eller vill avbryta (efter minst 2 rundor)
         if round_num >= 2:
@@ -511,60 +520,134 @@ class IncrementalLogger:
             lines.append("### DEBUG TRACE")
             lines.append("")
             
-            lines.append("#### 1. PLANERING")
-            lines.append("```")
-            lines.append(f"Nyckelord (hunter_keywords): {dt.get('hunter_keywords', [])}")
-            lines.append(f"Vektorfråga (vector_query): {dt.get('vector_query', '')}")
-            lines.append(f"Rankningskriterier: {dt.get('ranking_criteria', '')}")
-            lines.append(f"Planeringsresonemang: {dt.get('plan_reasoning', '')}")
-            lines.append("```")
+            # Detektera pipeline-version
+            pipeline_version = dt.get('pipeline_version', 'v5.2')
+            lines.append(f"**Pipeline:** {pipeline_version}")
             lines.append("")
             
-            lines.append("#### 2. JÄGAREN (Keyword Search)")
-            lines.append(f"**Träffar:** {dt.get('hits_hunter', 0)}")
-            lines.append("")
-            if dt.get('hunter_files'):
-                lines.append("| Fil | Matchat Nyckelord |")
-                lines.append("|-----|-------------------|")
-                for hf in dt.get('hunter_files', [])[:10]:
-                    lines.append(f"| {hf.get('filename', '')} | {hf.get('matched_keyword', '')} |")
-                if len(dt.get('hunter_files', [])) > 10:
-                    lines.append(f"| ... | (+{len(dt.get('hunter_files', [])) - 10} filer) |")
-                lines.append("")
-            
-            lines.append("#### 3. VEKTORN (Semantic Search)")
-            lines.append(f"**Träffar:** {dt.get('hits_vector', 0)}")
-            lines.append("")
-            if dt.get('vector_files'):
-                lines.append("| Fil | Distans | Duplicate |")
-                lines.append("|-----|---------|-----------|")
-                for vf in dt.get('vector_files', [])[:10]:
-                    dup = "Ja" if vf.get('already_in_candidates') else "Nej"
-                    lines.append(f"| {vf.get('filename', '')} | {vf.get('distance', '')} | {dup} |")
-                lines.append("")
-            
-            lines.append("#### 4. DOMAREN (Re-ranking)")
-            lines.append(f"**Input:** {dt.get('judge_input_count', 0)} dokument")
-            lines.append("")
-            lines.append("**Resonemang:**")
-            lines.append(f"> {dt.get('judge_reasoning', 'Inget resonemang')}")
-            lines.append("")
-            
-            lines.append("#### 5. SYNTES")
-            lines.append("```")
-            lines.append(f"Dokument till AI: {dt.get('docs_selected', 0)}")
-            lines.append(f"Tecken till AI: {dt.get('total_chars', 0)}")
-            lines.append(f"Totala kandidater: {dt.get('total_candidates', 0)}")
-            lines.append(f"Tid: {dt.get('duration_seconds', 0):.2f}s")
-            lines.append("```")
-            lines.append("")
-            
-            if dt.get('pipeline_summary'):
-                lines.append("#### PIPELINE SUMMARY")
-                lines.append("```json")
-                lines.append(json.dumps(dt.get('pipeline_summary', {}), indent=2, ensure_ascii=False))
+            if pipeline_version == 'v6.0' or dt.get('intent_router'):
+                # === V6.0 FORMAT ===
+                
+                # 1. IntentRouter
+                lines.append("#### 1. INTENT ROUTER")
+                ir = dt.get('intent_router', {})
+                lines.append("```")
+                lines.append(f"Intent: {ir.get('intent', 'N/A')}")
+                lines.append(f"Keywords: {ir.get('keywords', [])}")
+                lines.append(f"Vector Query: {ir.get('vector_query', '')}")
+                lines.append(f"Graph Paths: {ir.get('graph_paths', [])}")
+                lines.append(f"Time Filter: {ir.get('time_filter', None)}")
+                lines.append(f"Context Resolved: {ir.get('context_resolved', {})}")
+                lines.append(f"Reasoning: {ir.get('reasoning', '')}")
                 lines.append("```")
                 lines.append("")
+                
+                # 2. ContextBuilder
+                lines.append("#### 2. CONTEXT BUILDER")
+                cb = dt.get('context_builder', {})
+                lines.append("```")
+                lines.append(f"Intent: {cb.get('intent', 'N/A')}")
+                lines.append(f"Original Keywords: {cb.get('keywords_original', [])}")
+                lines.append(f"Expanded Keywords: {cb.get('keywords_expanded', 'N/A')}")
+                if cb.get('stats'):
+                    stats = cb.get('stats', {})
+                    lines.append(f"Lake Hits: {stats.get('lake_hits', 0)}")
+                    lines.append(f"Vector Hits: {stats.get('vector_hits', 0)}")
+                    lines.append(f"After Dedup: {stats.get('after_dedup', 0)}")
+                    lines.append(f"Graph Paths Used: {stats.get('graph_paths_used', [])}")
+                lines.append("```")
+                lines.append("")
+                
+                # Top kandidater
+                if dt.get('context_builder_candidates'):
+                    lines.append("**Top 10 Kandidater:**")
+                    lines.append("| ID | Source | Score |")
+                    lines.append("|-----|--------|-------|")
+                    for c in dt.get('context_builder_candidates', [])[:10]:
+                        lines.append(f"| {c.get('id', '')[:30]} | {c.get('source', '')} | {c.get('score', 0)} |")
+                    lines.append("")
+                
+                # 3. Planner
+                lines.append("#### 3. PLANNER")
+                pr = dt.get('planner_report', {})
+                lines.append("```")
+                lines.append(f"Status: {pr.get('status', 'N/A')}")
+                lines.append(f"Sources Used: {pr.get('sources_used', [])}")
+                lines.append(f"Gaps: {pr.get('gaps', [])}")
+                lines.append(f"Confidence: {pr.get('confidence', 0)}")
+                lines.append(f"Report Length: {pr.get('report_length', 0)} chars")
+                lines.append("```")
+                lines.append("")
+                
+                if dt.get('planner_selected_ids'):
+                    lines.append(f"**Selected IDs:** {dt.get('planner_selected_ids', [])}")
+                    lines.append("")
+                
+                # 4. Timing
+                lines.append("#### 4. TIMING")
+                lines.append("```")
+                lines.append(f"Pipeline Duration: {dt.get('pipeline_duration', 0):.2f}s")
+                lines.append(f"Total Duration: {dt.get('total_duration', 0):.2f}s")
+                lines.append("```")
+                lines.append("")
+                
+            else:
+                # === V5.2 FORMAT (Legacy) ===
+                
+                lines.append("#### 1. PLANERING")
+                lines.append("```")
+                lines.append(f"Nyckelord (hunter_keywords): {dt.get('hunter_keywords', [])}")
+                lines.append(f"Vektorfråga (vector_query): {dt.get('vector_query', '')}")
+                lines.append(f"Rankningskriterier: {dt.get('ranking_criteria', '')}")
+                lines.append(f"Planeringsresonemang: {dt.get('plan_reasoning', '')}")
+                lines.append("```")
+                lines.append("")
+                
+                lines.append("#### 2. JÄGAREN (Keyword Search)")
+                lines.append(f"**Träffar:** {dt.get('hits_hunter', 0)}")
+                lines.append("")
+                if dt.get('hunter_files'):
+                    lines.append("| Fil | Matchat Nyckelord |")
+                    lines.append("|-----|-------------------|")
+                    for hf in dt.get('hunter_files', [])[:10]:
+                        lines.append(f"| {hf.get('filename', '')} | {hf.get('matched_keyword', '')} |")
+                    if len(dt.get('hunter_files', [])) > 10:
+                        lines.append(f"| ... | (+{len(dt.get('hunter_files', [])) - 10} filer) |")
+                    lines.append("")
+                
+                lines.append("#### 3. VEKTORN (Semantic Search)")
+                lines.append(f"**Träffar:** {dt.get('hits_vector', 0)}")
+                lines.append("")
+                if dt.get('vector_files'):
+                    lines.append("| Fil | Distans | Duplicate |")
+                    lines.append("|-----|---------|-----------|")
+                    for vf in dt.get('vector_files', [])[:10]:
+                        dup = "Ja" if vf.get('already_in_candidates') else "Nej"
+                        lines.append(f"| {vf.get('filename', '')} | {vf.get('distance', '')} | {dup} |")
+                    lines.append("")
+                
+                lines.append("#### 4. DOMAREN (Re-ranking)")
+                lines.append(f"**Input:** {dt.get('judge_input_count', 0)} dokument")
+                lines.append("")
+                lines.append("**Resonemang:**")
+                lines.append(f"> {dt.get('judge_reasoning', 'Inget resonemang')}")
+                lines.append("")
+                
+                lines.append("#### 5. SYNTES")
+                lines.append("```")
+                lines.append(f"Dokument till AI: {dt.get('docs_selected', 0)}")
+                lines.append(f"Tecken till AI: {dt.get('total_chars', 0)}")
+                lines.append(f"Totala kandidater: {dt.get('total_candidates', 0)}")
+                lines.append(f"Tid: {dt.get('duration_seconds', 0):.2f}s")
+                lines.append("```")
+                lines.append("")
+                
+                if dt.get('pipeline_summary'):
+                    lines.append("#### PIPELINE SUMMARY")
+                    lines.append("```json")
+                    lines.append(json.dumps(dt.get('pipeline_summary', {}), indent=2, ensure_ascii=False))
+                    lines.append("```")
+                    lines.append("")
         
         lines.append("")
         return "\n".join(lines)

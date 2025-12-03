@@ -144,30 +144,45 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
         1. **Graf-nod för Person**: `canonical_name`, `aliases[]`, `team`, `confidence`.
         2. **Konsolidering**: Fuzzy-matcha namn över dokument, bygg alias-lista.
         3. **Sök-tid**: Slå upp aliases och sök efter ALLA varianter.
+        4. **Explicit feedback:** Användaren kan säga "Cenk = Sänk" direkt i chatten.
     * *Exempel:* Fråga om "Cenk" → söker "Sänk", "Cenk", "Bisgen", "Cenk Bisgen".
+    * *Koppling:* Del av OBJEKT-48 ("Dreaming") – alias-learning är ett specialfall av "synapser".
     * *Se:* Konflikt 42 i `my_mem_koncept_logg.md`
 
-* **OBJEKT-45 (Prio 1 - Insamling):** Implementera **"Context Injection vid Insamling"**.
+* **OBJEKT-45 (Prio 1 - Insamling):** Implementera **"Levande Metadata vid Insamling"**.
     * *Problem:* DocConverter och Transcriber "jobbar i mörkret" – de har ingen kännedom om existerande entiteter.
     * *Bevis (Kodanalys 2025-12-03):*
         - DocConverter laddar taxonomin men använder den BARA för validering av `graph_master_node`.
         - Transcriber har INGEN kontakt med taxonomi eller graf.
         - Båda gissar entiteter fritt → skapar inkonsekvent metadata ("Sänk" vs "Cenk Bisgen").
-    * *Mål:* Ge insamlingsagenterna kontext om existerande kunskap INNAN de genererar metadata.
-    * *Implementation:*
-        1. **Graf-lookup vid start:** Hämta kända personer, projekt och aliases från KùzuDB.
-        2. **Context Injection i prompts:** Ge AI-modellen en lista på kända entiteter.
-        3. **Namn-normalisering:** Om transkribering gissar "Sänk", matcha mot känd alias och skriv "Cenk Bisgen".
-    * *Exempel:*
+        - Summary/keywords saknar specifik fakta (datum, deadlines, aktiviteter).
+    * *Mål:* Ge insamlingsagenterna kontext OCH extrahera rikare metadata.
+    * *Implementation (två delar):*
+        **A. Context Injection:**
+        1. Graf-lookup vid start: Hämta kända personer, projekt och aliases från KùzuDB.
+        2. Context Injection i prompts: Ge AI-modellen en lista på kända entiteter.
+        3. Namn-normalisering: Om transkribering gissar "Sänk", matcha mot känd alias.
+        **B. Rikare Extraktion:**
+        4. Uppdatera prompts för att extrahera: `dates_mentioned`, `actions`, `deadlines`.
+        5. Spara dessa i YAML front matter för Lake-dokument.
+    * *Exempel (Context Injection):*
         ```python
         context = {
-            "known_persons": ["Joakim Ekman", "Cenk Bisgen", "Marie Björkengren"],
-            "known_aliases": {"Sänk": "Cenk Bisgen", "Jocke": "Joakim Ekman"},
-            "active_projects": ["Adda PoC", "MyMemory", "Stacken.ai"]
+            "known_persons": ["Joakim Ekman", "Cenk Bisgen"],
+            "known_aliases": {"Sänk": "Cenk Bisgen"},
+            "active_projects": ["Adda PoC", "MyMemory"]
         }
-        prompt = f"KÄNDA TALARE: {context['known_persons']}..."
         ```
-    * *Förväntad effekt:* Bättre metadata från dag 1, mindre städning i konsolidering.
+    * *Exempel (Rikare Extraktion):*
+        ```yaml
+        dates_mentioned: ["2025-12-10", "2026-01-15"]
+        actions: ["Användartester med kunder"]
+        deadlines:
+          - what: "Användartester"
+            when: "2025-12-10"
+        ```
+    * *Förväntad effekt:* Planner hittar relevant fakta via summaries. Mindre missad information.
+    * *Koppling:* Del av OBJEKT-48 ("Dreaming") – "Drömmen" förbättrar vad som extraheras.
     * *Se:* Konflikt 44 i `my_mem_koncept_logg.md`
 
 * **OBJEKT-47 (Prio 1.5 - DEADLINE):** Migrera till **gemini-embedding-001**.
@@ -184,6 +199,29 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
         - [Gemini Embeddings Documentation](https://ai.google.dev/gemini-api/docs/embeddings)
         - [Model Benchmarks](https://ai.google.dev/gemini-api/docs/models)
     * *Projekt som påverkas:* `gen-lang-client-0582831621`, `gen-lang-client-0704808841`
+
+* **OBJEKT-48 (Prio 0.5 - VISION):** Implementera **"Dreaming"** (Självlärande System).
+    * *Problem:* Metadata genereras vid insamling och förblir statisk. Systemet lär sig inte vad som är viktigt för användaren.
+    * *Bevis (2025-12-03):* Pipeline v6.0 missade "10 december" för användartester eftersom summary/keywords saknade denna info.
+    * *Koncept:* Tre faser inspirerade av hjärnans funktion:
+        1. **VAKEN:** Samla signaler under användning (sökningar, misslyckanden, avbrott)
+        2. **DRÖMMER:** Batch-process vid omstart – skapa "synapser" (graf-relationer, taxonomi-undernoder)
+        3. **VAKNAR:** Systemet är lite bättre anpassat till användaren
+    * *Signalkällor:*
+        1. **Implicit:** Sökbeteende, avbrutna sessioner, follow-ups (lågt förtroende)
+        2. **Explicit:** Användaren säger "Cenk = Sänk" (högt förtroende, omedelbart)
+        3. **Dokument:** Nya inputs via Transcriber/Converter (medium förtroende)
+    * *Implementation:*
+        1. **Signal-loggning:** Spara sessionsdata till `session_signals.json`
+        2. **Dream-agent:** LLM analyserar signaler och genererar "synapser"
+        3. **Synaps-applicering:** Uppdatera Graf, Taxonomi, Insamlings-prioriteringar
+        4. **Explicit feedback:** Kommando i chatten för direkt kunskapsinjicering
+    * *Koppling till andra objekt:*
+        - OBJEKT-44: Entity Resolution är ett specialfall av "synapser"
+        - OBJEKT-45: "Dreaming" förbättrar vad som extraheras vid insamling
+        - OBJEKT-46: Pipeline drar nytta av rikare metadata
+    * *Framgångskriterium:* Systemet presterar mätbart bättre efter varje "dröm"-cykel.
+    * *Se:* Konflikt 46 i `my_mem_koncept_logg.md`
 
 * **OBJEKT-32 (Prio 2):** Implementera **"Quick Save"** (Read/Write) i Chatten.
     * *Mål:* Möjlighet att spara text/tankar direkt till `Assets` inifrån chatten ("Kom ihåg att...").

@@ -80,3 +80,69 @@ Behåll deskriptiva namn som faktiskt beskriver funktionen:
 - ✅ "Jägaren" (keyword search) - acceptabelt
 - ✅ "Domaren" (re-ranker) - acceptabelt
 
+---
+
+## Princip 4: Stanna vid Vägval
+
+**Vid implementation, avbryt och fråga användaren vid:**
+
+1. **Namngivning** - funktioner, variabler, fält
+2. **Prompt-formuleringar** - AI-prompter är känsliga
+3. **Output-format** - JSON-strukturer, API-kontrakt
+4. **Trade-offs** - hastighet vs kvalitet, enkelhet vs flexibilitet
+5. **Oklarheter** - om specifikationen är tvetydig
+
+### Varför?
+
+- Användaren är expert på sin domän
+- Fel beslut tidigt = dyr refaktorering senare
+- Bättre en fråga för mycket än fel antagande
+
+### Exempel:
+
+```
+❌ DÅLIGT: 
+"Jag valde att använda 'FACT' istället för 'STRICT' för intent-klassificering"
+
+✅ BRA:
+"VÄGVAL: Intent-klassificering. Förslag: 'STRICT' vs 'RELAXED'. 
+Vad föredrar du?"
+```
+
+---
+
+## Princip 5: Generella Lösningar på Specifika Problem
+
+**Vid felsökning, sök den generella orsaken - inte den specifika symptomet.**
+
+### Anti-pattern:
+
+```
+Problem: "Systemet tappar datum i svaren"
+❌ DÅLIGT: "Lägg till instruktion i prompten: 'extrahera alltid datum'"
+
+Problem: "Systemet hittar inte 'Cenk' när jag söker"  
+❌ DÅLIGT: "Lägg till 'Cenk' som alias i konfigurationen"
+```
+
+### Rätt approach:
+
+```
+Problem: "Systemet tappar datum i svaren"
+✅ BRA: "Varför tappar vi SPECIFIK information generellt?"
+       → Analysera: Är det Planner som filtrerar bort? 
+       → Är rapporten för kort? Fel urvalskriterier?
+       → Generell lösning: Förbättra fakta-extraktion i Planner
+
+Problem: "Systemet hittar inte 'Cenk' när jag söker"
+✅ BRA: "Varför hittar vi inte varianter av namn generellt?"
+       → Analysera: Saknar vi alias-hantering?
+       → Generell lösning: Entity Resolution (OBJEKT-44)
+```
+
+### Varför?
+
+- Specifika fixar skapar teknisk skuld och underhållskostnader
+- Generella lösningar löser KLASSER av problem, inte instanser
+- "Elegant" = En lösning som löser många problem samtidigt
+
