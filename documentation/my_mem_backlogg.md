@@ -170,6 +170,21 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
     * *Förväntad effekt:* Bättre metadata från dag 1, mindre städning i konsolidering.
     * *Se:* Konflikt 44 i `my_mem_koncept_logg.md`
 
+* **OBJEKT-47 (Prio 1.5 - DEADLINE):** Migrera till **gemini-embedding-001**.
+    * *Notifiering:* Google meddelade 2025-12-03 att `text-embedding-004` fasas ut.
+    * *Deadline:* **2026-01-14** (hård deadline från Google)
+    * *Påverkan:* Alla embeddings i ChromaDB använder nuvarande modell.
+    * *Ny modell:* `gemini-embedding-001` (stable, GA, högre rate limits)
+    * *Migrationsplan:*
+        1. Uppdatera embedding-funktion i `vector_indexer.py`
+        2. Re-embeda ALL data i Lake (kräver full re-indexering)
+        3. Testa sökkvalitet efter migrering
+    * *Risk:* Om inte migrerat före deadline slutar vektorsökning fungera.
+    * *Resurser:*
+        - [Gemini Embeddings Documentation](https://ai.google.dev/gemini-api/docs/embeddings)
+        - [Model Benchmarks](https://ai.google.dev/gemini-api/docs/models)
+    * *Projekt som påverkas:* `gen-lang-client-0582831621`, `gen-lang-client-0704808841`
+
 * **OBJEKT-32 (Prio 2):** Implementera **"Quick Save"** (Read/Write) i Chatten.
     * *Mål:* Möjlighet att spara text/tankar direkt till `Assets` inifrån chatten ("Kom ihåg att...").
 * **OBJEKT-36 (Prio 2):** Kalender-integration.
