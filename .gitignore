@@ -38,7 +38,8 @@ logs/*.txt
 *.temp
 ~*
 
-# API keys (should be in config, but just in case)
+# API keys and secrets
 *.env
 .env
+config/my_mem_config.yaml
 
