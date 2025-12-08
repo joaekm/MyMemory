@@ -76,16 +76,21 @@ synthesizer_v6:
     Svara på användarens fråga baserat på följande rapport.
     
     RAPPORT (sammanställd från källdokument):
-    {report}
+    
     
     IDENTIFIERADE LUCKOR:
     {gaps}
     
-    INSTRUKTIONER:
-    1. Ge ett koncist och användbart svar baserat på rapporten
-    2. Om rapporten saknar information, var tydlig med det
-    3. Hänvisa till källor om relevant
-    4. Anpassa svarslängd efter frågetyp (kort fråga = kort svar)
+    SVARSLÄNGD - ANPASSA EFTER FRÅGAN:
+    - "Var är X?" / "När?" / "Vem?" → 1-2 meningar
+    - "Vad hände på mötet?" → 3-5 bullet points
+    - "Sammanfatta projektet" / "Ge en statusuppdatering" → Strukturerad överblick
+    - Om info saknas: "Inget loggat om X." - PUNKT. Elaborera inte.
+    
+    TONALITET:
+    - Joakim var MED på dessa möten - prata som en kollega, inte en arkivarie
+    - Undvik: "Rapporten anger...", "Baserat på dokumenten..."
+    - Föredra: "På mötet diskuterades...", "Ni beslutade att..."
     
     FRÅGA: {query}
 
@@ -121,6 +126,50 @@ planner_report:
         "sources_used": ["filnamn1.md", "filnamn2.md"],
         "gaps": ["Information som saknas för komplett svar..."],
         "confidence": 0.0-1.0
+    }}
+
+entity_disambiguator:
+  role: "Du analyserar entiteter för att avgöra om de refererar till samma sak och vilken typ de har."
+  instruction: |
+    Du ska avgöra om namn i en grupp refererar till SAMMA entitet eller OLIKA entiteter.
+    Du ska också avgöra vilken TYP av entitet det är.
+    
+    KANDIDAT-GRUPP:
+    {candidate_group}
+    
+    DOKUMENTKONTEXT (exempel på användning):
+    {context_examples}
+    
+    ENTITETSTYPER:
+    - "person": Människor (anställda, kontakter, kunder)
+    - "organization": Företag, myndigheter, organisationer
+    - "project": Projekt, initiativ, uppdrag
+    - "product": Produkter, tjänster, AI-modeller, verktyg
+    - "concept": Abstrakta koncept, metoder, processer
+    
+    UPPGIFT:
+    1. Vilka namn refererar till SAMMA entitet?
+    2. Vilken TYP har varje entitet?
+    3. Vilka är OLIKA entiteter med liknande namn?
+    
+    EXEMPEL:
+    - "Digitalist" och "Digitalist Open Tech AB" → SAMMA, typ: organization
+    - "Gemini Pro" och "Gemini" → SAMMA, typ: product
+    - "Pontus Rosin" och "Pontus Nilsson" → OLIKA personer
+    - "SVT" och "Sveriges Television" → SAMMA, typ: organization
+    
+    Svara JSON:
+    {{
+        "analysis": "Kort analys...",
+        "same_entity_groups": [
+            {{
+                "canonical": "Det mest kompletta namnet",
+                "aliases": ["Kortnamn", "Variant"],
+                "entity_type": "person|organization|project|product|concept",
+                "confidence": 0.0-1.0
+            }}
+        ],
+        "different_entities": ["Entitet A", "Entitet B som är något annat"]
     }}
 
 consolidator:
@@ -382,3 +431,60 @@ interrogator_check:
         "confidence": 1-10,
         "reason": "Kort motivering. Om abort: varför verktyget misslyckades."
     }}
+
+# === DREAMING / KONSOLIDERING ===
+
+conversation_analyzer:
+  role: "Du analyserar konversationer för att hitta lärdomar som systemet ska komma ihåg."
+  instruction: |
+    KONVERSATION:
+    {conversation}
+    
+    KÄNDA ENTITETER:
+    {known_entities}
+    
+    UPPGIFT:
+    Analysera konversationen och hitta explicita eller implicita lärdomar:
+    
+    1. ALIAS - När användaren säger att två namn är samma sak, eller korrigerar ett namn:
+       - 'canonical' = det KORREKTA/FORMELLA/FULLSTÄNDIGA namnet
+       - 'alias' = smeknamn, förkortning, felstavning, eller det felaktiga namnet
+       
+       Exempel på mönster:
+       - "X och Y är samma person" → canonical=Y (det formella), alias=X
+       - "Det finns ingen X, det heter Y" → canonical=Y, alias=X
+       - "Han heter egentligen Y" → canonical=Y, alias=det som refereras
+    
+    2. RELATIONER - När användaren beskriver kopplingar mellan entiteter
+    
+    3. FAKTA - Specifik information att komma ihåg (datum, kontaktuppgifter, etc.)
+    
+    Svara ENDAST med JSON:
+    {{
+        "learnings": [
+            {{
+                "type": "alias|relation|fact",
+                "confidence": 0.0-1.0,
+                "canonical": "Det korrekta/fullständiga namnet",
+                "alias": "Aliaset/smeknamnet/felstavningen (endast för type=alias)",
+                "entity_type": "Person|Aktör|Projekt|Koncept",
+                "subject": "Subjekt (för relationer)",
+                "predicate": "Relation (för relationer)",
+                "object": "Objekt (för relationer)",
+                "evidence": "Citat från konversationen som stödjer detta"
+            }}
+        ]
+    }}
+    
+    Om inga lärdomar hittas, returnera: {{"learnings": []}}
+
+# === SESSION EXPORT ===
+session_export:
+  markdown_template: |
+    # Session {date}
+    
+    Avslutad: {reason}
+    
+    ## Konversation
+    
+    {messages}

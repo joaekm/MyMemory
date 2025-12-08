@@ -7,14 +7,20 @@ Ansvar:
 - Graf-expansion baserat på graph_paths från IntentRouter
 - Viktning baserat på intent (STRICT prioriterar LAKE)
 - Deduplicera och returnera max ~50 kandidater med metadata+summary
+
+ID-format: Alla IDs normaliseras till UUID för korrekt deduplicering
 """
 
 import os
+import re
 import json
 import yaml
 import logging
 import chromadb
 from chromadb.utils import embedding_functions
+
+# UUID-mönster för att extrahera från filnamn
+UUID_PATTERN = re.compile(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', re.IGNORECASE)
 
 # --- CONFIG LOADER ---
 def _load_config():
@@ -132,7 +138,15 @@ def _search_lake(keywords: list) -> dict:
                     matched_keywords.append(kw)
             
             if matched_keywords:
-                doc_id = filename.replace('.md', '')
+                # Extrahera UUID från filnamnet för korrekt deduplicering
+                uuid_match = UUID_PATTERN.search(filename)
+                if uuid_match:
+                    doc_id = uuid_match.group(1).lower()
+                else:
+                    # Fallback till filnamn om UUID inte hittas
+                    doc_id = filename.replace('.md', '')
+                    LOGGER.warning(f"Kunde inte extrahera UUID från {filename}")
+                
                 hits[doc_id] = {
                     "id": doc_id,
                     "filename": filename,
@@ -166,7 +180,9 @@ def _search_vector(query: str, n_results: int = 30) -> dict:
         results = collection.query(query_texts=[query], n_results=n_results)
         
         if results and results['ids'] and results['ids'][0]:
-            for i, doc_id in enumerate(results['ids'][0]):
+            for i, raw_id in enumerate(results['ids'][0]):
+                # Normalisera ID till lowercase för konsekvent matchning med Lake
+                doc_id = raw_id.lower()
                 distance = results['distances'][0][i] if results['distances'] else 1.0
                 metadata = results['metadatas'][0][i] if results['metadatas'] else {}
                 content = results['documents'][0][i] if results['documents'] else ""

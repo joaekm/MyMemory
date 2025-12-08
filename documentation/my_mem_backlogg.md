@@ -223,6 +223,59 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
     * *Framgångskriterium:* Systemet presterar mätbart bättre efter varje "dröm"-cykel.
     * *Se:* Konflikt 46 i `my_mem_koncept_logg.md`
 
+* **OBJEKT-49 (Prio 1 - ARKITEKTUR):** Implementera **"MyMemory Engine"** (API-separation).
+    * *Problem:* `my_mem_chat.py` blandar CLI (presentation) med logik (orchestration) och session-hantering.
+    * *Konsekvens:* Omöjligt att återanvända logiken för mobilapp eller web-klient.
+    * *Nuvarande:*
+        ```
+        my_mem_chat.py
+        ├── CLI (print, input, rich)
+        ├── Orchestration (process_query, execute_pipeline_v6)
+        └── Session-hantering (start_session, end_session)
+        ```
+    * *Mål:* Skiktad arkitektur där klienter (CLI, Mobile, Web) pratar med en central Engine.
+    * *Ny arkitektur:*
+        ```
+        ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+        │   CLI        │    │  Mobile App  │    │  Web App     │
+        └──────┬───────┘    └──────┬───────┘    └──────┬───────┘
+               └───────────────────┼───────────────────┘
+                                   │ HTTP/WebSocket
+                                   ▼
+                      ┌────────────────────────┐
+                      │   MyMemory Engine      │  ← services/engine.py
+                      │   - query(input)       │
+                      │   - save_session()     │
+                      │   - dream()            │
+                      └────────────────────────┘
+        ```
+    * *Princip:* **Session-sparning sker på servern**, inte i klienten.
+    * *Implementation:*
+        1. Skapa `services/engine.py` med `MyMemEngine`-klass
+        2. Flytta `process_query()`, `execute_pipeline_v6()` till Engine
+        3. Refaktorera `my_mem_chat.py` till tunn CLI-klient
+        4. Exponera Engine via HTTP (FastAPI) för mobilapp/web
+    * *Koppling:*
+        - OBJEKT-48: Dreaming körs i Engine, inte klient
+        - OBJEKT-44: Entity Resolution sker server-side
+    * *Framgångskriterium:* CLI-klienten importerar endast `MyMemEngine` och gör `engine.query()`.
+
+* **OBJEKT-50 (Prio 1 - TEKNISK SKULD):** Verifiera och dokumentera **"Självläkande Kedjor"**.
+    * *Bakgrund:* Systemet har två "självläkande" kedjor som inte är dokumenterade:
+        1. **Doc Converter:** Vid omstart skannas Assets → filer som saknas i Lake processas.
+        2. **Graph Builder:** Vid omstart skannas Lake → noder som saknas i Graf skapas.
+    * *Problem:* 
+        - Kedjorna är inte dokumenterade (hur de fungerar, edge cases)
+        - Det ligger stökiga filer i Lake med filnamnstillägg (`.md.md`, `.pdf.md`?) som orsakar dataproblem
+        - "Dreaming"-kedjan (OBJEKT-48) är inte implementerad men refereras
+    * *Uppgifter:*
+        1. Dokumentera självläkande kedjor i `my_mem_arkitektur.md`
+        2. Städa Lake från dubbletter och felaktiga filnamn
+        3. Verifiera att kedjan Assets → Lake → Vector → Graf fungerar helautomatiskt
+        4. Lägg till validering i `tool_validate_system.py` för filnamnsformat
+    * *Koppling:* OBJEKT-48 (Dreaming), OBJEKT-49 (Engine)
+    * *Framgångskriterium:* Systemet kan startas från scratch och bygga alla index automatiskt utan manuella ingrepp.
+
 * **OBJEKT-32 (Prio 2):** Implementera **"Quick Save"** (Read/Write) i Chatten.
     * *Mål:* Möjlighet att spara text/tankar direkt till `Assets` inifrån chatten ("Kom ihåg att...").
 * **OBJEKT-36 (Prio 2):** Kalender-integration.

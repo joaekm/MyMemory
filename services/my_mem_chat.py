@@ -23,19 +23,11 @@ try:
     from services.intent_router import route_intent
     from services.context_builder import build_context
     from services.planner import create_report
-    from services.entity_register import add_alias, get_canonical, get_known_entities
-    from services.session_logger import (
-        start_session, end_session, log_search, log_feedback, log_abort
-    )
 except ImportError:
     # Fallback för direkt körning
     from intent_router import route_intent
     from context_builder import build_context
     from planner import create_report
-    from entity_register import add_alias, get_canonical, get_known_entities
-    from session_logger import (
-        start_session, end_session, log_search, log_feedback, log_abort
-    )
 
 import re
 
@@ -165,20 +157,27 @@ def _parse_learn_command(text: str) -> tuple:
     
     canonical = match.group(1).strip()
     alias = match.group(2).strip()
-    entity_type = match.group(3).lower() if match.group(3) else "persons"
+    entity_type = match.group(3) if match.group(3) else "Person"
     
-    # Normalisera entity_type
+    # Normalisera entity_type till taxonomins kategorier
+    # Användaren kan skriva svenska eller engelska
     type_map = {
-        "person": "persons",
-        "persons": "persons",
-        "projekt": "projects",
-        "project": "projects",
-        "projects": "projects",
-        "koncept": "concepts",
-        "concept": "concepts",
-        "concepts": "concepts"
+        # Svenska (taxonomin)
+        "person": "Person",
+        "aktör": "Aktör",
+        "organisation": "Aktör",
+        "projekt": "Projekt",
+        "teknologi": "Teknologier",
+        "produkt": "Teknologier",
+        "metodik": "Metodik",
+        "koncept": "Metodik",
+        # Engelska alternativ
+        "organization": "Aktör",
+        "project": "Projekt",
+        "product": "Teknologier",
+        "concept": "Metodik"
     }
-    entity_type = type_map.get(entity_type, "persons")
+    entity_type = type_map.get(entity_type.lower(), entity_type)
     
     return canonical, alias, entity_type
 
@@ -212,26 +211,12 @@ def _handle_feedback(canonical: str, alias: str, entity_type: str) -> str:
     """
     Hantera bekräftad feedback genom att spara alias.
     
-    Returns:
-        Bekräftelsemeddelande till användaren
+    NOTE: Entity-learning (OBJEKT-44) är inte implementerat ännu.
+    Returnerar info om att funktionen är inaktiv.
     """
-    try:
-        add_alias(canonical, alias, source="user", entity_type=entity_type)
-        
-        # Logga feedback för Dreaming
-        log_feedback(canonical, alias, entity_type, source="user")
-        
-        type_names = {
-            "persons": "person",
-            "projects": "projekt",
-            "concepts": "koncept"
-        }
-        type_name = type_names.get(entity_type, "entitet")
-        
-        return f"✓ Noterat! Nästa gång jag hör '{alias}' skriver jag '{canonical}' ({type_name})."
-    except Exception as e:
-        LOGGER.error(f"Kunde inte spara alias: {e}")
-        return f"✗ Kunde inte spara aliaset: {e}"
+    # TODO: Implementera via KuzuDB (add_entity_alias i my_mem_graph_builder)
+    LOGGER.info(f"Feedback mottagen men ej sparad (OBJEKT-44 ej klar): {alias} -> {canonical}")
+    return f"⚠️ Alias-learning är inte aktivt ännu. Noterade: '{alias}' = '{canonical}'"
 
 
 # --- STEP 2a: THE HUNTER ---
@@ -562,16 +547,6 @@ def execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=None)
     
     context_result = build_context(intent_data, debug_trace=debug_trace)
     
-    # Logga sökning för Dreaming
-    stats = context_result.get('stats', {})
-    total_hits = stats.get('lake_hits', 0) + stats.get('vector_hits', 0)
-    log_search(
-        query=query,
-        keywords=intent_data.get('keywords', []),
-        hits=total_hits,
-        intent=intent_data.get('intent', 'RELAXED')
-    )
-    
     if context_result.get('status') == 'NO_RESULTS':
         if debug_mode:
             console.print(f"[yellow]HARDFAIL: {context_result.get('reason')}[/yellow]")
@@ -726,7 +701,8 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
     # Syntes (gemensam för båda pipelines)
     try:
         ai_client = get_ai_client()
-        response = ai_client.models.generate_content(model=MODEL_PRO, contents=contents)
+        # Synthesizer använder LITE - rapporten är redan kurerad av Planner (PRO)
+        response = ai_client.models.generate_content(model=MODEL_LITE, contents=contents)
         answer = response.text
     except Exception as e:
         LOGGER.error(f"Synthesis error: {e}")
@@ -744,6 +720,51 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
     }
 
 
+# --- SESSION TILL ASSETS (Fas 1: DocConverter hanterar Lake) ---
+def _save_session_to_assets(chat_history: list, reason: str = "normal") -> str:
+    """
+    Spara session som Markdown i Assets för DocConverter att processa.
+    
+    Args:
+        chat_history: Lista med meddelanden
+        reason: "normal", "interrupted", etc.
+    
+    Returns:
+        Sökväg till sparad fil
+    """
+    if not chat_history:
+        return None
+    
+    # Skapa sessions-mapp i Assets
+    assets_path = os.path.expanduser("~/MyMemory/Assets/sessions")
+    os.makedirs(assets_path, exist_ok=True)
+    
+    # Filnamn med timestamp
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"session_{timestamp}.md"
+    filepath = os.path.join(assets_path, filename)
+    
+    # Bygg meddelanden
+    messages_text = ""
+    for msg in chat_history:
+        role = "**User:**" if msg['role'] == 'user' else "**MyMem:**"
+        messages_text += f"{role} {msg['content']}\n\n"
+    
+    # Hämta mall från config
+    template = PROMPTS.get('session_export', {}).get('markdown_template', '')
+    if not template:
+        raise ValueError("HARDFAIL: session_export.markdown_template saknas i chat_prompts.yaml")
+    
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    content = template.format(date=date_str, reason=reason, messages=messages_text)
+    
+    # Spara filen
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(content)
+    
+    return filepath
+
+
 # --- CHAT LOOP (CLI) ---
 def chat_loop(debug_mode=False, use_v6=True):
     """
@@ -755,116 +776,126 @@ def chat_loop(debug_mode=False, use_v6=True):
     """
     console.clear()
     version = "v6.0" if use_v6 else "v5.2"
-    console.print(Panel(f"[bold white]Digitalist Företagsminne {version}[/bold white]", style="on blue", box=box.DOUBLE, expand=False))
+    product_name = CONFIG.get('system', {}).get('product_name', 'MyMemory')
+    console.print(Panel(f"[bold white]{product_name} {version}[/bold white]", style="on blue", box=box.DOUBLE, expand=False))
     if debug_mode:
         console.print("[dim]Debug Mode: ON[/dim]")
-    
-    # Starta session för signal-loggning
-    start_session()
         
     chat_history = [] 
 
-    while True:
-        query = Prompt.ask("\n[bold green]Du[/bold green]")
-        if query.lower() in ['exit', 'quit', 'sluta']:
-            end_session("normal")
-            break
-        if not query.strip(): continue
+    try:
+        while True:
+            query = Prompt.ask("\n[bold green]Du[/bold green]")
+            if query.lower() in ['exit', 'quit', 'sluta']:
+                # Spara session till Assets (DocConverter hanterar Lake)
+                filepath = _save_session_to_assets(chat_history, "normal")
+                if filepath:
+                    console.print(f"[dim]Session sparad: {os.path.basename(filepath)}[/dim]")
+                break
+            if not query.strip(): continue
 
-        # === HANTERA /learn KOMMANDO ===
-        if query.startswith('/learn'):
-            canonical, alias, entity_type = _parse_learn_command(query)
-            if canonical and alias:
-                result = _handle_feedback(canonical, alias, entity_type)
-                console.print(f"[bold purple]MyMem:[/bold purple] {result}")
-                continue
-            else:
-                console.print("[yellow]Format: /learn NAMN = ALIAS (person|projekt|koncept)[/yellow]")
-                console.print("[dim]Exempel: /learn Cenk Bisgen = Sänk[/dim]")
-                continue
-        
-        # === KOLLA OM DET ÄR NATURLIGT SPRÅK FEEDBACK ===
-        # (Endast om det börjar med typiska feedback-fraser)
-        feedback_phrases = ["är samma", "heter egentligen", "kallas också", "är alias för"]
-        if any(phrase in query.lower() for phrase in feedback_phrases):
-            feedback = _interpret_feedback(query)
-            if feedback.get('is_feedback') and feedback.get('confidence', 0) > 0.7:
-                canonical = feedback.get('canonical')
-                alias = feedback.get('alias')
-                entity_type = feedback.get('entity_type', 'persons')
+            # === HANTERA /learn KOMMANDO ===
+            if query.startswith('/learn'):
+                canonical, alias, entity_type = _parse_learn_command(query)
                 if canonical and alias:
                     result = _handle_feedback(canonical, alias, entity_type)
                     console.print(f"[bold purple]MyMem:[/bold purple] {result}")
                     continue
+                else:
+                    console.print("[yellow]Format: /learn NAMN = ALIAS (Person|Aktör|Projekt)[/yellow]")
+                    console.print("[dim]Exempel: /learn Cenk Bisgen = Sänk[/dim]")
+                    continue
+            
+            # === KOLLA OM DET ÄR NATURLIGT SPRÅK FEEDBACK ===
+            # (Endast om det börjar med typiska feedback-fraser)
+            feedback_phrases = ["är samma", "heter egentligen", "kallas också", "är alias för"]
+            if any(phrase in query.lower() for phrase in feedback_phrases):
+                feedback = _interpret_feedback(query)
+                if feedback.get('is_feedback') and feedback.get('confidence', 0) > 0.7:
+                    canonical = feedback.get('canonical')
+                    alias = feedback.get('alias')
+                    entity_type = feedback.get('entity_type', 'Person')
+                    if canonical and alias:
+                        result = _handle_feedback(canonical, alias, entity_type)
+                        console.print(f"[bold purple]MyMem:[/bold purple] {result}")
+                        continue
 
-        # Debug trace för CLI
-        debug_trace = {} if debug_mode else None
-        
-        if use_v6:
-            # === PIPELINE v6.0 ===
-            pipeline_result = execute_pipeline_v6(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
+            # Debug trace för CLI
+            debug_trace = {} if debug_mode else None
             
-            if pipeline_result.get('status') in ['NO_RESULTS', 'ERROR']:
-                console.print(f"[red]{pipeline_result.get('reason', 'Ingen information hittades.')}[/red]")
-                continue
-            
-            report = pipeline_result.get('report', '')
-            sources = pipeline_result.get('sources', [])
-            gaps = pipeline_result.get('gaps', [])
-            
-            # Syntes med prompt från config
-            synth_template = PROMPTS.get('synthesizer_v6', {}).get('instruction', '')
-            if not synth_template:
-                console.print("[red]HARDFAIL: synthesizer_v6 prompt saknas i config[/red]")
-                continue
-            
-            synth_prompt = synth_template.format(
-                report=report,
-                gaps=gaps if gaps else "Inga kända luckor",
-                query=query
-            )
-            
-            contents = []
-            for msg in chat_history:
-                role = "model" if msg['role'] == "assistant" else "user"
-                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
-            
-            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=synth_prompt)]))
-            
-        else:
-            # === LEGACY PIPELINE v5.2 ===
-            context_docs = execute_pipeline(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
-            
-            if not context_docs:
-                console.print("[red]Hittade ingen information.[/red]")
-                continue
-            
-            synthesizer_template = PROMPTS['synthesizer']['instruction']
-            system_prompt = synthesizer_template.format(context_docs="\n".join(context_docs))
-            
-            contents = []
-            for msg in chat_history:
-                role = "model" if msg['role'] == "assistant" else "user"
-                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
+            if use_v6:
+                # === PIPELINE v6.0 ===
+                pipeline_result = execute_pipeline_v6(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
                 
-            full_message = f"{system_prompt}\n\nFRÅGA: {query}"
-            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=full_message)]))
+                if pipeline_result.get('status') in ['NO_RESULTS', 'ERROR']:
+                    console.print(f"[red]{pipeline_result.get('reason', 'Ingen information hittades.')}[/red]")
+                    continue
+                
+                report = pipeline_result.get('report', '')
+                sources = pipeline_result.get('sources', [])
+                gaps = pipeline_result.get('gaps', [])
+                
+                # Syntes med prompt från config
+                synth_template = PROMPTS.get('synthesizer_v6', {}).get('instruction', '')
+                if not synth_template:
+                    console.print("[red]HARDFAIL: synthesizer_v6 prompt saknas i config[/red]")
+                    continue
+                
+                synth_prompt = synth_template.format(
+                    report=report,
+                    gaps=gaps if gaps else "Inga kända luckor",
+                    query=query
+                )
+                
+                contents = []
+                for msg in chat_history:
+                    role = "model" if msg['role'] == "assistant" else "user"
+                    contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
+                
+                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=synth_prompt)]))
+                
+            else:
+                # === LEGACY PIPELINE v5.2 ===
+                context_docs = execute_pipeline(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
+                
+                if not context_docs:
+                    console.print("[red]Hittade ingen information.[/red]")
+                    continue
+                
+                synthesizer_template = PROMPTS['synthesizer']['instruction']
+                system_prompt = synthesizer_template.format(context_docs="\n".join(context_docs))
+                
+                contents = []
+                for msg in chat_history:
+                    role = "model" if msg['role'] == "assistant" else "user"
+                    contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
+                    
+                full_message = f"{system_prompt}\n\nFRÅGA: {query}"
+                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=full_message)]))
 
-        console.print("\n[bold purple]MyMem:[/bold purple]")
-        
-        collected_text = ""
-        try:
-            ai_client = get_ai_client()
-            response_stream = ai_client.models.generate_content_stream(model=MODEL_PRO, contents=contents)
-            with Live(Markdown(collected_text), console=console, refresh_per_second=10) as live:
-                for chunk in response_stream:
-                    if chunk.text:
-                        collected_text += chunk.text
-                        live.update(Markdown(collected_text))
-            chat_history.append({"role": "user", "content": query})
-            chat_history.append({"role": "assistant", "content": collected_text})
-        except Exception as e:
-            console.print(f"[red]AI-fel: {e}[/red]")
+            console.print("\n[bold purple]MyMem:[/bold purple]")
+            
+            collected_text = ""
+            try:
+                ai_client = get_ai_client()
+                # Synthesizer använder LITE - rapporten är redan kurerad av Planner (PRO)
+                response_stream = ai_client.models.generate_content_stream(model=MODEL_LITE, contents=contents)
+                with Live(Markdown(collected_text), console=console, refresh_per_second=10) as live:
+                    for chunk in response_stream:
+                        if chunk.text:
+                            collected_text += chunk.text
+                            live.update(Markdown(collected_text))
+                chat_history.append({"role": "user", "content": query})
+                chat_history.append({"role": "assistant", "content": collected_text})
+            except Exception as e:
+                console.print(f"[red]AI-fel: {e}[/red]")
+    
+    except KeyboardInterrupt:
+        # Spara session till Assets (DocConverter hanterar Lake)
+        filepath = _save_session_to_assets(chat_history, "interrupted")
+        if filepath:
+            console.print(f"\n[dim]Session sparad: {os.path.basename(filepath)}[/dim]")
+        console.print("Hejdå!")
 
 
 if __name__ == "__main__":
@@ -872,7 +903,4 @@ if __name__ == "__main__":
     DEBUG_MODE = args.debug or CONFIG.get('debug', False)
     USE_V6 = CONFIG.get('pipeline_version', 'v6') == 'v6'  # Default till v6.0
     
-    try:
-        chat_loop(debug_mode=DEBUG_MODE, use_v6=USE_V6)
-    except KeyboardInterrupt:
-        print("\nHejdå!")
+    chat_loop(debug_mode=DEBUG_MODE, use_v6=USE_V6)

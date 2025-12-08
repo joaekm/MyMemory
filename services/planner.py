@@ -46,6 +46,7 @@ LOGGER = logging.getLogger('Planner')
 
 API_KEY = CONFIG['ai_engine']['api_key']
 MODEL_LITE = CONFIG['ai_engine']['models']['model_lite']
+MODEL_PRO = CONFIG['ai_engine']['models']['model_pro']  # För rapportgenerering (större kontext)
 
 # AI Client (lazy init)
 _AI_CLIENT = None
@@ -139,10 +140,11 @@ def _create_report(query: str, intent: str, documents: list) -> dict:
         }
     
     # Formatera dokument för prompten
+    # MODEL_PRO har ~2M kontext - använd 15000 tecken per doc för detaljerad extraktion
     docs_text = ""
     for doc in documents:
         docs_text += f"=== DOKUMENT: {doc['filename']} ===\n"
-        docs_text += f"{doc['content'][:3000]}\n\n"  # Max 3000 tecken per doc
+        docs_text += f"{doc['content'][:15000]}\n\n"
     
     full_prompt = prompt_template.format(
         query=query,
@@ -152,8 +154,9 @@ def _create_report(query: str, intent: str, documents: list) -> dict:
     
     try:
         client = _get_ai_client()
+        # Använd MODEL_PRO för bättre extraktion av specifika fakta
         response = client.models.generate_content(
-            model=MODEL_LITE,
+            model=MODEL_PRO,
             contents=full_prompt
         )
         

@@ -185,3 +185,97 @@ def analyze(text):
     return ai_client.generate(prompt)
 ```
 
+---
+
+## Princip 7: Taxonomin är Master
+
+**`~/MyMemory/Index/my_mem_taxonomy.json` är källan till sanning för kategorier.**
+
+### Regler:
+
+1. **ALDRIG hårdkoda kategorier** i kod (persons, organizations, projects, etc.)
+2. **LÄS alltid** från taxonomin vid uppstart eller vid behov
+3. Taxonomins huvudnoder definierar tillåtna kategorier för:
+   - Entity types i `entity_register.py`
+   - Graph-noder i `my_mem_graph_builder.py`
+   - Metadata-klassificering i alla agenter
+
+### Taxonomins struktur:
+
+```
+~/MyMemory/Index/my_mem_taxonomy.json
+├── Person      → entitetstyp för personer
+├── Aktör       → entitetstyp för organisationer
+├── Projekt     → entitetstyp för projekt
+├── Teknologier → entitetstyp för produkter/verktyg
+├── Erbjudande  → entitetstyp för tjänster
+└── ... (22+ huvudnoder)
+```
+
+### Varför?
+
+- Taxonomin är definierad av användaren, inte av koden
+- Nya kategorier kan läggas till utan kodändringar
+- Konsistens över hela systemet
+- Undviker duplicering av kategoridefinitioner
+
+### Exempel på FEL:
+
+```python
+# ❌ DÅLIGT: Hårdkodade kategorier
+VALID_ENTITY_TYPES = ["persons", "organizations", "projects"]
+```
+
+### Exempel på RÄTT:
+
+```python
+# ✅ BRA: Läs från taxonomin
+TAXONOMY_PATH = os.path.expanduser("~/MyMemory/Index/my_mem_taxonomy.json")
+
+def _load_taxonomy_categories():
+    with open(TAXONOMY_PATH, 'r') as f:
+        return list(json.load(f).keys())
+
+VALID_ENTITY_TYPES = _load_taxonomy_categories()
+```
+
+---
+
+## Princip 8: Config är Sanning för Sökvägar
+
+**ALLA sökvägar ska läsas från `config/my_mem_config.yaml`**, aldrig hårdkodas i kod.
+
+### Varför?
+
+- **En källa till sanning:** Ändra sökväg på ett ställe
+- **Miljöoberoende:** Fungerar på olika maskiner utan kodändringar
+- **Transparens:** Alla sökvägar är dokumenterade och synliga
+
+### Config-sökvägar (my_mem_config.yaml):
+
+```yaml
+paths:
+  drop_folder: "~/Desktop/MemoryDrop"
+  lake_store: "~/MyMemory/Lake"
+  asset_store: "~/MyMemory/Assets"
+  chroma_db: "~/MyMemory/Index/ChromaDB"
+  kuzu_db: "~/MyMemory/Index/KuzuDB"
+  taxonomy_file: "~/MyMemory/Index/my_mem_taxonomy.json"
+```
+
+### Exempel på FEL:
+
+```python
+# ❌ DÅLIGT: Hårdkodad sökväg
+KUZU_PATH = os.path.expanduser("~/MyMemory/Index/my_mem_kuzu")
+LAKE_PATH = "/Users/jekman/MyMemory/Lake"
+```
+
+### Exempel på RÄTT:
+
+```python
+# ✅ BRA: Läs från config
+CONFIG = load_config('my_mem_config.yaml')
+KUZU_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])
+LAKE_PATH = os.path.expanduser(CONFIG['paths']['lake_store'])
+```

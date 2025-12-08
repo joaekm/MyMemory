@@ -673,3 +673,101 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
 * **Slutsats:** Systemet ska inte bara lagra och söka – det ska **lära sig och anpassa sig** till användaren över tid. Taxonomins huvudnoder förblir fasta (för framtida delning), men undernoder och grafen växer organiskt.
 
 * **Backlogg:** OBJEKT-48 (Dreaming / Självlärande System)
+
+---
+
+## Konflikt 47: Engine vs. Client (Skiktad Arkitektur)
+
+**Datum:** 2025-12-03
+
+* **Observation:** Vid implementation av session-sparning (OBJEKT-48) noterades att `my_mem_chat.py` blandar tre ansvarsområden:
+    1. CLI-presentation (Rich, print, input)
+    2. Orchestration (process_query, execute_pipeline_v6)
+    3. Session-hantering (start_session, end_session)
+
+* **Problem:** Om en mobilapp eller web-klient ska använda MyMemory, var ska session-sparningen ske?
+    - **Klient-sidan?** Varje klient måste implementera session-logik. Inkonsekvent.
+    - **Server-sidan?** En central Engine som alla klienter pratar med.
+
+* **Princip:** **Learning sker alltid på servern.**
+    - Mobilappen ska inte köra Dreaming
+    - Mobilappen ska inte spara sessioner lokalt
+    - All kunskapsuppdatering (aliases, graf, taxonomi) sker centralt
+
+* **Nuvarande arkitektur (problematisk):**
+    ```
+    ┌─────────────────────────────────────┐
+    │  my_mem_chat.py                     │
+    │  ├── CLI (print, input)             │
+    │  ├── Orchestration (process_query)  │  ← Allt blandat
+    │  └── Session (save_session)         │
+    └─────────────────────────────────────┘
+    ```
+
+* **Mål-arkitektur (skiktad):**
+    ```
+    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+    │   CLI        │    │  Mobile App  │    │  Web App     │
+    │   (Rich)     │    │  (Flutter?)  │    │  (React?)    │
+    └──────┬───────┘    └──────┬───────┘    └──────┬───────┘
+           │                   │                   │
+           │                   │                   │
+           └───────────────────┼───────────────────┘
+                               │ HTTP / WebSocket
+                               ▼
+              ┌────────────────────────────────────┐
+              │         MyMemory Engine            │
+              │  ┌──────────────────────────────┐  │
+              │  │ query(user_id, input) → dict │  │
+              │  │ save_session()               │  │
+              │  │ dream()                      │  │
+              │  └──────────────────────────────┘  │
+              └────────────────────────────────────┘
+                               │
+              ┌────────────────┴────────────────┐
+              │        Services Layer           │
+              │  (IntentRouter, Planner, etc)   │
+              └────────────────────────────────┘
+    ```
+
+* **Implementation (services/engine.py):**
+    ```python
+    class MyMemEngine:
+        """Central orchestration. Klienter pratar med denna."""
+        
+        def __init__(self, user_id: str):
+            self.user_id = user_id
+            self.session_id = start_session()
+            self.chat_history = []
+        
+        def query(self, user_input: str) -> dict:
+            """Process fråga och returnera svar."""
+            result = execute_pipeline_v6(user_input, self.chat_history)
+            self.chat_history.append({"role": "user", "content": user_input})
+            self.chat_history.append({"role": "assistant", "content": result['answer']})
+            return result
+        
+        def end(self) -> None:
+            """Avsluta session och spara."""
+            end_session("normal", self.chat_history)
+    ```
+
+* **Klient (my_mem_chat.py efter refaktorering):**
+    ```python
+    from services.engine import MyMemEngine
+    
+    engine = MyMemEngine(user_id="joakim.ekman")
+    
+    while True:
+        query = input("Du: ")
+        result = engine.query(query)
+        print(f"MyMem: {result['answer']}")
+    ```
+
+* **Slutsats:** Separera Engine från klient för:
+    1. **Återanvändning:** Samma logik för CLI, Mobile, Web
+    2. **Konsekvens:** Learning sker alltid på samma ställe
+    3. **Skalbarhet:** Engine kan köras som microservice
+    4. **Testbarhet:** Engine kan enhetstestas utan UI
+
+* **Backlogg:** OBJEKT-49 (MyMemory Engine / API-separation)
