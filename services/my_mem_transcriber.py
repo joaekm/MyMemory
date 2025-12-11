@@ -189,11 +189,14 @@ SAMMANFATTNING (Preliminär):
     return header
 
 def _move_to_failed(filväg, filnamn, reason):
-    """Flytta ljudfil till failed-mappen."""
+    """Flytta ljudfil till failed-mappen (utan UUID i filnamnet)."""
     try:
-        dest = os.path.join(FAILED_FOLDER, filnamn)
+        # Ta bort UUID från filnamnet för failed-filer
+        base, ext = os.path.splitext(filnamn)
+        clean_name = UUID_SUFFIX_PATTERN.sub('', base) + ext
+        dest = os.path.join(FAILED_FOLDER, clean_name)
         shutil.move(filväg, dest)
-        LOGGER.warning(f"Flyttade till failed: {filnamn} - {reason}")
+        LOGGER.warning(f"Flyttade till failed: {clean_name} - {reason}")
         return True
     except Exception as e:
         LOGGER.error(f"Kunde inte flytta till failed: {filnamn} - {e}")
@@ -231,13 +234,9 @@ def processa_mediafil(filväg, filnamn):
     
     unit_id = uuid_match.group(1)
     
-    # Nytt filnamn UTAN UUID (behåll resten av namnet)
-    clean_name = UUID_SUFFIX_PATTERN.sub('', base_name)
-    txt_fil = os.path.join(ASSET_STORE, f"{clean_name}.txt")
-    
-    # Kolla också gamla formatet för bakåtkompatibilitet
-    old_txt_fil = os.path.join(ASSET_STORE, f"{base_name}.txt")
-    if os.path.exists(txt_fil) or os.path.exists(old_txt_fil): 
+    # Behåll UUID i filnamnet (DocConverter förväntar sig det)
+    txt_fil = os.path.join(ASSET_STORE, f"{base_name}.txt")
+    if os.path.exists(txt_fil): 
         return
 
     _log("📥", f"{kort_namn} → Upload")
