@@ -812,10 +812,9 @@ def _save_session_to_assets(chat_history: list, learnings: list = None, reason: 
     if not chat_history:
         return None
     
-    # Skapa sessions-mapp i Assets (läs från config)
-    assets_base = CONFIG['paths'].get('asset_store', os.path.expanduser("~/MyMemory/Assets"))
-    assets_path = os.path.join(assets_base, "sessions")
-    os.makedirs(assets_path, exist_ok=True)
+    # Läs sessions-mapp från config
+    sessions_path = os.path.expanduser(CONFIG['paths']['asset_sessions'])
+    os.makedirs(sessions_path, exist_ok=True)
     
     # Generera UUID och timestamp
     unit_id = str(uuid_module.uuid4())
@@ -825,7 +824,7 @@ def _save_session_to_assets(chat_history: list, learnings: list = None, reason: 
     
     # Filnamn: Session_2025-12-11T153000_UUID.md
     filename = f"Session_{timestamp_iso}_{unit_id}.md"
-    filepath = os.path.join(assets_path, filename)
+    filepath = os.path.join(sessions_path, filename)
     
     # Bygg summary (mjuka learnings)
     summary_parts = [f"Chatt-session avslutad ({reason})."]

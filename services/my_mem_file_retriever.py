@@ -25,6 +25,14 @@ DROP_FOLDER = os.path.expanduser(CONFIG['paths']['drop_folder'])
 ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])
 LOG_FILE = os.path.expanduser(CONFIG['logging']['log_file_path'])
 
+# Sub-folders för sortering
+RECORDINGS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_recordings'])
+DOCUMENTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_documents'])
+
+# Extensions för sortering
+AUDIO_EXTENSIONS = CONFIG.get('processing', {}).get('audio_extensions', [])
+DOC_EXTENSIONS = CONFIG.get('processing', {}).get('document_extensions', [])
+
 # --- LOGGING ---
 log_dir = os.path.dirname(LOG_FILE)
 os.makedirs(log_dir, exist_ok=True)
@@ -91,7 +99,20 @@ class MoveHandler(FileSystemEventHandler):
             final_name = f"{clean_base}_{new_uuid}{ext}"
             LOGGER.info(f"Ny UUID: {filnamn} -> {final_name}")
 
-        dest_path = os.path.join(ASSET_STORE, final_name)
+        # Sortera till rätt undermapp baserat på extension
+        ext_lower = ext.lower()
+        if ext_lower in AUDIO_EXTENSIONS:
+            dest_folder = RECORDINGS_FOLDER
+            folder_name = "Recordings"
+        elif ext_lower in DOC_EXTENSIONS:
+            dest_folder = DOCUMENTS_FOLDER
+            folder_name = "Documents"
+        else:
+            dest_folder = DOCUMENTS_FOLDER  # Default: Documents
+            folder_name = "Documents"
+        
+        os.makedirs(dest_folder, exist_ok=True)
+        dest_path = os.path.join(dest_folder, final_name)
         
         if os.path.exists(dest_path):
             LOGGER.warning(f"Dubblett: {final_name}")
@@ -99,15 +120,16 @@ class MoveHandler(FileSystemEventHandler):
 
         try:
             shutil.move(src_path, dest_path)
-            print(f"{_ts()} 📦 DROP: {_kort(filnamn)} → Assets")
-            LOGGER.info(f"Flyttad till Assets: {final_name}")
+            print(f"{_ts()} 📦 DROP: {_kort(filnamn)} → {folder_name}")
+            LOGGER.info(f"Flyttad till {folder_name}: {final_name}")
         except Exception as e:
             print(f"{_ts()} ❌ DROP: {_kort(filnamn)} → FAILED")
             LOGGER.error(f"Flyttfel {filnamn}: {e}")
 
 if __name__ == "__main__":
     os.makedirs(DROP_FOLDER, exist_ok=True)
-    os.makedirs(ASSET_STORE, exist_ok=True)
+    os.makedirs(RECORDINGS_FOLDER, exist_ok=True)
+    os.makedirs(DOCUMENTS_FOLDER, exist_ok=True)
 
     # Kör igenom befintliga filer i Drop vid start
     pending = 0

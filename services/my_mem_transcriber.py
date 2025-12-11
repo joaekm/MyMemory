@@ -47,13 +47,17 @@ except Exception as e:
 
 try:
     ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])
+    RECORDINGS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_recordings'])
+    TRANSCRIPTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_transcripts'])
+    FAILED_FOLDER = os.path.expanduser(CONFIG['paths']['asset_failed'])
     LOG_FILE = os.path.expanduser(CONFIG['logging']['log_file_path'])
 except KeyError as e:
     print(f"[CRITICAL] Konfigurationsfel: {e}")
     exit(1)
 
-# Mapp för misslyckade transkriptioner
-FAILED_FOLDER = os.path.join(ASSET_STORE, "failed")
+# Säkerställ att mapparna finns
+os.makedirs(RECORDINGS_FOLDER, exist_ok=True)
+os.makedirs(TRANSCRIPTS_FOLDER, exist_ok=True)
 os.makedirs(FAILED_FOLDER, exist_ok=True)
 
 API_KEY = CONFIG.get('ai_engine', {}).get('api_key', '')
@@ -238,8 +242,8 @@ def processa_mediafil(filväg, filnamn):
     
     unit_id = uuid_match.group(1)
     
-    # Behåll UUID i filnamnet (DocConverter förväntar sig det)
-    txt_fil = os.path.join(ASSET_STORE, f"{base_name}.txt")
+    # Output till Transcripts-mappen (DocConverter övervakar den)
+    txt_fil = os.path.join(TRANSCRIPTS_FOLDER, f"{base_name}.txt")
     if os.path.exists(txt_fil): 
         return
 
@@ -392,24 +396,26 @@ class AudioHandler(FileSystemEventHandler):
 if __name__ == "__main__":
     clean_ghost_artifacts()
     
-    # Räkna väntande jobb
+    # Räkna väntande jobb i Recordings-mappen
     pending = 0
-    if os.path.exists(ASSET_STORE):
-        for f in os.listdir(ASSET_STORE):
+    if os.path.exists(RECORDINGS_FOLDER):
+        for f in os.listdir(RECORDINGS_FOLDER):
             if os.path.splitext(f)[1].lower() in MEDIA_EXTENSIONS:
                 if not f.startswith("temp_upload_") and UUID_SUFFIX_PATTERN.search(os.path.splitext(f)[0]):
                     base = os.path.splitext(f)[0]
-                    if not os.path.exists(os.path.join(ASSET_STORE, f"{base}.txt")):
+                    # Kolla om transkription redan finns i Transcripts-mappen
+                    if not os.path.exists(os.path.join(TRANSCRIPTS_FOLDER, f"{base}.txt")):
                         pending += 1
-                        EXECUTOR.submit(processa_mediafil, os.path.join(ASSET_STORE, f), f)
+                        EXECUTOR.submit(processa_mediafil, os.path.join(RECORDINGS_FOLDER, f), f)
     
     if pending > 0:
         print(f"{_ts()} ✓ Transcriber online ({pending} väntande)")
     else:
         print(f"{_ts()} ✓ Transcriber online")
 
+    # Övervaka Recordings-mappen
     observer = Observer()
-    observer.schedule(AudioHandler(), ASSET_STORE, recursive=False)
+    observer.schedule(AudioHandler(), RECORDINGS_FOLDER, recursive=False)
     observer.start()
     try:
         while True: time.sleep(1)

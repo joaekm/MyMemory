@@ -74,6 +74,12 @@ except Exception as e:
 # --- PATHS & ID ---
 LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])
+# Undermappar att övervaka för dokument
+TRANSCRIPTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_transcripts'])
+DOCUMENTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_documents'])
+SLACK_FOLDER = os.path.expanduser(CONFIG['paths']['asset_slack'])
+SESSIONS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_sessions'])
+WATCH_FOLDERS = [TRANSCRIPTS_FOLDER, DOCUMENTS_FOLDER, SLACK_FOLDER, SESSIONS_FOLDER]
 TAXONOMY_FILE = os.path.expanduser(CONFIG['paths'].get('taxonomy_file', '~/MyMemory/Index/my_mem_taxonomy.json'))
 LOG_FILE = os.path.expanduser(CONFIG['logging']['log_file_path'])
 
@@ -522,26 +528,33 @@ class DocHandler(FileSystemEventHandler):
              EXECUTOR.submit(processa_dokument, event.src_path, filnamn)
 
 if __name__ == "__main__":
-    # Räkna filer vid start
+    # Säkerställ att undermapparna finns
+    for folder in WATCH_FOLDERS:
+        os.makedirs(folder, exist_ok=True)
+    
+    # Räkna filer vid start - iterera över alla undermappar
     already_done = 0
     pending = 0
     
-    if os.path.exists(ASSET_STORE):
-        for f in os.listdir(ASSET_STORE):
-            ext = os.path.splitext(f)[1].lower()
-            if ext in DOC_EXTENSIONS and not f.startswith('.') and UUID_SUFFIX_PATTERN.search(f):
-                base_name = os.path.splitext(f)[0]
-                if os.path.exists(os.path.join(LAKE_STORE, f"{base_name}.md")):
-                    already_done += 1
-                else:
-                    pending += 1
-                    EXECUTOR.submit(processa_dokument, os.path.join(ASSET_STORE, f), f)
+    for folder in WATCH_FOLDERS:
+        if os.path.exists(folder):
+            for f in os.listdir(folder):
+                ext = os.path.splitext(f)[1].lower()
+                if ext in DOC_EXTENSIONS and not f.startswith('.') and UUID_SUFFIX_PATTERN.search(f):
+                    base_name = os.path.splitext(f)[0]
+                    if os.path.exists(os.path.join(LAKE_STORE, f"{base_name}.md")):
+                        already_done += 1
+                    else:
+                        pending += 1
+                        EXECUTOR.submit(processa_dokument, os.path.join(folder, f), f)
     
     status = f"({already_done} i Lake" + (f", {pending} väntande)" if pending > 0 else ")")
     print(f"{_ts()} ✓ Doc Converter online {status}")
     
+    # Övervaka alla undermappar
     observer = Observer()
-    observer.schedule(DocHandler(), ASSET_STORE, recursive=False)
+    for folder in WATCH_FOLDERS:
+        observer.schedule(DocHandler(), folder, recursive=False)
     observer.start()
     try:
         while True: time.sleep(1)

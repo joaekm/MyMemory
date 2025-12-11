@@ -1,7 +1,7 @@
 
-# Systemarkitektur (v5.0 - Post-Simulering)
+# Systemarkitektur (v6.0 - Strukturerad Assets)
 
-Detta dokument beskriver den tekniska sanningen om systemets implementation, uppdaterad efter första stresstestet (December 2025).
+Detta dokument beskriver den tekniska sanningen om systemets implementation, uppdaterad December 2025.
 
 ## 1. Huvudprinciper
 
@@ -11,20 +11,35 @@ Detta dokument beskriver den tekniska sanningen om systemets implementation, upp
 
 3. **OTS-Modellen:** All kunskap struktureras i grafen enligt taxonomin Operativt - Taktiskt - Strategiskt.
 
-4. **Rich Raw Data:** All insamlad data (Ljud, Slack) mellanlandar som .txt-filer i Assets försedda med en "Rich Header" (tidsstämplar, talare, käll-ID) innan de bearbetas vidare. Detta garanterar spårbarhet.
+4. **Rich Raw Data:** All insamlad data (Ljud, Slack) försedda med en "Rich Header" (tidsstämplar, talare, käll-ID). Garanterar spårbarhet.
 
-5. **Agentic Reasoning:** Chatten är inte längre bara en sökning, utan en process som planerar, väljer källa (Graf vs Vektor) och syntetiserar.
+5. **Agentic Reasoning:** Chatten är en process som planerar, väljer källa (Graf vs Vektor) och syntetiserar.
 
 6. **Idempotens & Självläkning:** Alla agenter hoppar över filer som redan är klara, men fyller automatiskt i "hål" om filer saknas i nästa led.
+
+7. **Validering & Underhåll:** Vid varje uppstart körs systemvalidering och loggrensning (>24h) automatiskt.
 
 ## 2. Datamodell: Trippel Lagring
 
 Systemet använder tre lagringsnivåer för att balansera integritet, prestanda och spårbarhet.
 
 ### "Asset Store" (Lagring 1 - Källan)
-- **Innehåll:** Originalfiler (PDF, Docx) samt genererade .txt-filer från Ljud och Slack.
-- **Namnstandard:** `[Originalnamn]_[UUID].[ext]`.
+
+Strukturerad mappstruktur under `~/MyMemory/Assets/`:
+
+```
+Assets/
+├── Recordings/     # Ljudfiler från MemoryDrop (m4a, mp3, wav)
+├── Transcripts/    # Transkriberade .txt-filer från Transcriber
+├── Documents/      # Dokument från MemoryDrop (pdf, docx, txt)
+├── Slack/          # Daily digests från Slack Collector
+├── Sessions/       # Chat-sessioner med learnings
+└── Failed/         # Misslyckade transkriptioner
+```
+
+- **Namnstandard:** `[Originalnamn]_[UUID].[ext]`
 - **Syfte:** "Sanningen". Här finns rådatan. **Aldrig röra.**
+- **Config:** Alla sökvägar i `my_mem_config.yaml` under `paths.asset_*`
 
 ### "Lake" (Lagring 2 - Mellanlager)
 - **Innehåll:** `.md`-filer med standardiserad YAML-frontmatter (innehållande UUID).
@@ -45,15 +60,21 @@ Hela systemet orkestreras av `start_services.py` (för realtidstjänster) och ma
 
 | Agent | Input | Funktion | Output |
 |-------|-------|----------|--------|
-| **File Retriever** | DropZone | Flyttar filer till Asset Store, tilldelar UUID | Assets |
-| **Slack Archiver** | Slack API | "Daily Digest" - en .txt per kanal/dag | Assets |
+| **File Retriever** | DropZone | Flyttar filer till Assets, tilldelar UUID | `Recordings/` eller `Documents/` |
+| **Slack Collector** | Slack API | "Daily Digest" - en .txt per kanal/dag | `Slack/` |
 
 ### 3.2 Bearbetning (The Core)
 
-| Agent | Bevakar | Modell | Output | Problem (OBJEKT-45) |
-|-------|---------|--------|--------|---------------------|
-| **Transcriber** | Assets (ljud) | Gemini Pro | `.txt` i Assets | Jobbar "i mörkret" - ingen kontext om kända personer |
-| **Doc Converter** | Assets (dok) | Gemini Flash | `.md` i Lake | Laddar taxonomi men använder den bara för validering |
+| Agent | Bevakar | Modell | Output |
+|-------|---------|--------|--------|
+| **Transcriber** | `Recordings/` | Flash (transkribering) + Pro (analys & QC) | `.txt` i `Transcripts/` |
+| **Doc Converter** | `Transcripts/`, `Documents/`, `Slack/`, `Sessions/` | Gemini Flash | `.md` i Lake |
+
+**Transcriber-flöde (v6.0):**
+1. Flash transkriberar ljudfil ordagrant
+2. Pro gör sanity check (kvalitetskontroll)
+3. Pro identifierar talare och formaterar
+4. Misslyckade filer flyttas till `Failed/`
 
 ### 3.3 Indexering (Delad Arkitektur)
 
@@ -132,10 +153,30 @@ All styrning sker via konfigurationsfiler:
 | Fil | Syfte |
 |-----|-------|
 | `my_mem_config.yaml` | Sökvägar, API-nycklar, Slack-kanaler, AI-modeller |
-| `my_mem_taxonomy.json` | Masternoder (OTS) |
+| `my_mem_taxonomy.json` | Masternoder (OTS) - 26 huvudnoder |
 | `chat_prompts.yaml` | System-prompter för chatten |
 | `services_prompts.yaml` | Prompter för insamlingsagenter |
 | `.cursorrules` | **Utvecklingsregler** (HARDFAIL, Ingen AI-cringe) |
+
+### Sökvägar i my_mem_config.yaml
+
+```yaml
+paths:
+  drop_folder: "~/Desktop/MemoryDrop"
+  lake_store: "~/MyMemory/Lake"
+  asset_store: "~/MyMemory/Assets"
+  # Asset sub-folders
+  asset_recordings: "~/MyMemory/Assets/Recordings"
+  asset_transcripts: "~/MyMemory/Assets/Transcripts"
+  asset_documents: "~/MyMemory/Assets/Documents"
+  asset_slack: "~/MyMemory/Assets/Slack"
+  asset_sessions: "~/MyMemory/Assets/Sessions"
+  asset_failed: "~/MyMemory/Assets/Failed"
+  # Index
+  chroma_db: "~/MyMemory/Index/ChromaDB"
+  kuzu_db: "~/MyMemory/Index/KuzuDB"
+  taxonomy_file: "~/MyMemory/Index/my_mem_taxonomy.json"
+```
 
 ## 6. Tech Stack & Beroenden
 

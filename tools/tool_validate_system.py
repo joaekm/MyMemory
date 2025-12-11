@@ -28,6 +28,14 @@ CONFIG = ladda_yaml('my_mem_config.yaml')
 
 LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])
+# Asset sub-folders
+RECORDINGS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_recordings'])
+TRANSCRIPTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_transcripts'])
+DOCUMENTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_documents'])
+SLACK_FOLDER = os.path.expanduser(CONFIG['paths']['asset_slack'])
+SESSIONS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_sessions'])
+ASSET_SUBFOLDERS = [RECORDINGS_FOLDER, TRANSCRIPTS_FOLDER, DOCUMENTS_FOLDER, SLACK_FOLDER, SESSIONS_FOLDER]
+
 CHROMA_PATH = os.path.expanduser(CONFIG['paths']['chroma_db'])
 KUZU_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])
 LOG_FILE = os.path.expanduser(CONFIG['logging']['log_file_path'])
@@ -58,7 +66,17 @@ def get_lake_ids():
 def validera_filer():
     print_header("1. FILSYSTEMS-AUDIT (Strict Mode)")
     
-    all_assets = [f for f in os.listdir(ASSET_STORE) if not f.startswith('.')]
+    # Samla alla filer från undermapparna
+    all_assets = []
+    folder_counts = {}
+    
+    for folder in ASSET_SUBFOLDERS:
+        if os.path.exists(folder):
+            folder_name = os.path.basename(folder)
+            files = [f for f in os.listdir(folder) if not f.startswith('.') and os.path.isfile(os.path.join(folder, f))]
+            folder_counts[folder_name] = len(files)
+            all_assets.extend(files)
+    
     doc_files = [f for f in all_assets if os.path.splitext(f)[1].lower() in DOC_EXTS]
     lake_files = [f for f in os.listdir(LAKE_STORE) if f.endswith('.md') and not f.startswith('.')]
     
@@ -69,11 +87,15 @@ def validera_filer():
             invalid_names.append(f)
 
     print(f"📦 Assets Totalt:     {len(all_assets)} st")
+    for folder_name, count in folder_counts.items():
+        print(f"   - {folder_name}: {count} st")
     
     if invalid_names:
-        print(f"❌ [VARNING] Hittade {len(invalid_names)} filer i Assets som bryter mot namnstandarden!")
-        for bad in invalid_names:
+        print(f"❌ [VARNING] Hittade {len(invalid_names)} filer som bryter mot namnstandarden!")
+        for bad in invalid_names[:10]:  # Visa max 10
             print(f"   - {bad}")
+        if len(invalid_names) > 10:
+            print(f"   ... och {len(invalid_names) - 10} till")
     else:
         print("✅ Alla filer i Assets följer standarden [Namn]_[UUID].")
 
@@ -82,25 +104,26 @@ def validera_filer():
     
     # 1.2 INTEGRITETS-CHECK (Lake vs Assets)
     # Filerna i Lake ska ha EXAKT samma basnamn som dokumenten i Assets.
-    # Ex: Assets: "Rapport_123.pdf" -> Lake: "Rapport_123.md"
     
     asset_bases = {os.path.splitext(f)[0] for f in doc_files}
     lake_bases = {os.path.splitext(f)[0] for f in lake_files}
     
     missing_in_lake = asset_bases - lake_bases
-    zombies_in_lake = lake_bases - asset_bases # Filer i sjön som inte har en källa
+    zombies_in_lake = lake_bases - asset_bases
 
     if len(lake_files) == len(doc_files) and not missing_in_lake:
         print(f"\n✅ BALANS: {len(lake_files)} filer i Sjön matchar antalet källdokument.")
     else:
         if missing_in_lake:
             print(f"\n❌ SAKNAS I LAKE: {len(missing_in_lake)} dokument har inte konverterats!")
-            for m in sorted(missing_in_lake):
+            for m in sorted(list(missing_in_lake)[:10]):
                 print(f"   - {m}")
+            if len(missing_in_lake) > 10:
+                print(f"   ... och {len(missing_in_lake) - 10} till")
         
         if zombies_in_lake:
             print(f"\n⚠️ ZOMBIES I LAKE: {len(zombies_in_lake)} filer i Sjön saknar källfil i Assets:")
-            for z in sorted(zombies_in_lake):
+            for z in sorted(list(zombies_in_lake)[:10]):
                 print(f"   - {z}")
 
     return len(lake_files)

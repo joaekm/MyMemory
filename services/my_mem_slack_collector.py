@@ -32,7 +32,7 @@ except Exception as e:
     print(f"[CRITICAL] HARDFAIL: Ogiltig timezone '{TZ_NAME}': {e}")
     exit(1)
 
-ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])
+SLACK_FOLDER = os.path.expanduser(CONFIG['paths']['asset_slack'])
 LOG_FILE = os.path.expanduser(CONFIG['logging']['log_file_path'])
 SLACK_CONF = CONFIG.get('slack', {})
 BOT_TOKEN = SLACK_CONF.get('bot_token')
@@ -107,7 +107,7 @@ def archive_day(channel_id, target_date):
     date_str = target_date.strftime('%Y-%m-%d')
     ch_name = get_channel_name(channel_id)
     
-    existing_files = os.listdir(ASSET_STORE)
+    existing_files = os.listdir(SLACK_FOLDER)
     base_pattern = f"Slack_{ch_name}_{date_str}_"
     for f in existing_files:
         if f.startswith(base_pattern) and f.endswith(".txt"): return False 
@@ -136,7 +136,7 @@ def archive_day(channel_id, target_date):
 
     unit_id = str(uuid.uuid4())
     filnamn = f"Slack_{ch_name}_{date_str}_{unit_id}.txt" 
-    ut_sokvag = os.path.join(ASSET_STORE, filnamn)
+    ut_sokvag = os.path.join(SLACK_FOLDER, filnamn)
     participants_list = "\n- ".join(sorted(list(participants)))
     content = "\n".join(full_transcript)
     
@@ -168,12 +168,12 @@ Innehåller {len(messages)} huvuddiskussioner.
 {content}
 """
     with open(ut_sokvag, 'w', encoding='utf-8') as f: f.write(header)
-    print(f"{_ts()} ✅ SLACK: #{ch_name} {date_str} → Assets")
+    print(f"{_ts()} ✅ SLACK: #{ch_name} {date_str} → Slack")
     LOGGER.info(f"Sparad: {filnamn}")
     return True
 
 if __name__ == "__main__":
-    os.makedirs(ASSET_STORE, exist_ok=True)
+    os.makedirs(SLACK_FOLDER, exist_ok=True)
     POLL_INTERVAL = 3600
     
     print(f"{_ts()} ✓ Slack Collector online ({len(CHANNELS)} kanaler)")
