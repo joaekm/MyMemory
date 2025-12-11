@@ -70,15 +70,6 @@ def _get_ai_client():
             raise RuntimeError(f"HARDFAIL: Kunde inte initiera AI-klient: {e}") from e
     return _AI_CLIENT
 
-# --- GRAPH BUILDER IMPORT ---
-try:
-    from services.my_mem_graph_builder import add_entity_alias
-except ImportError:
-    try:
-        from my_mem_graph_builder import add_entity_alias
-    except ImportError as e:
-        raise ImportError("HARDFAIL: my_mem_graph_builder.py saknas") from e
-
 # --- TAXONOMY ---
 def _load_taxonomy_types() -> list:
     """Läs giltiga entity types (huvudnoder) från taxonomin."""
@@ -158,22 +149,11 @@ def end_session(chat_history: list = None) -> dict:
     }
     
     # Extrahera lärdomar från chat_history om tillgänglig
+    # Learnings returneras för att sparas i sessions-filen
+    # DocConverter skriver sedan till grafen vid processning
     learnings = []
     if chat_history and len(chat_history) > 0:
         learnings = _extract_learnings(chat_history)
-        
-        # Skriv lärdomar direkt till graf
-        for learning in learnings:
-            try:
-                success = add_entity_alias(
-                    learning['canonical'],
-                    learning['alias'],
-                    learning['type']
-                )
-                if success:
-                    LOGGER.info(f"Lärdom sparad: {learning['alias']} -> {learning['canonical']}")
-            except Exception as e:
-                LOGGER.error(f"Kunde inte spara lärdom: {e}")
     
     LOGGER.info(f"Session avslutad: {session_id} ({duration}s, {len(learnings)} lärdomar)")
     

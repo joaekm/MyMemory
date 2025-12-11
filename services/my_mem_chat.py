@@ -790,17 +790,25 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
 
 
 # --- SESSION TILL ASSETS (Fas 1: DocConverter hanterar Lake) ---
-def _save_session_to_assets(chat_history: list, reason: str = "normal") -> str:
+def _save_session_to_assets(chat_history: list, learnings: list = None, reason: str = "normal") -> str:
     """
     Spara session som Markdown i Assets för DocConverter att processa.
     
+    Struktur:
+    - YAML frontmatter (metadata, inkl. summary med mjuka learnings)
+    - ## Learnings (YAML-block med hårda learnings)
+    - ## Konversation (chatthistorik)
+    
     Args:
         chat_history: Lista med meddelanden
+        learnings: Lista med extraherade lärdomar [{canonical, alias, type, confidence, evidence}]
         reason: "normal", "interrupted", etc.
     
     Returns:
         Sökväg till sparad fil
     """
+    import uuid as uuid_module
+    
     if not chat_history:
         return None
     
@@ -809,29 +817,68 @@ def _save_session_to_assets(chat_history: list, reason: str = "normal") -> str:
     assets_path = os.path.join(assets_base, "sessions")
     os.makedirs(assets_path, exist_ok=True)
     
-    # Filnamn med timestamp
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"session_{timestamp}.md"
+    # Generera UUID och timestamp
+    unit_id = str(uuid_module.uuid4())
+    now = datetime.datetime.now()
+    timestamp_iso = now.strftime("%Y-%m-%dT%H%M%S")  # Utan kolon för filnamn
+    timestamp_full = now.isoformat()
+    
+    # Filnamn: Session_2025-12-11T153000_UUID.md
+    filename = f"Session_{timestamp_iso}_{unit_id}.md"
     filepath = os.path.join(assets_path, filename)
     
-    # Bygg meddelanden
+    # Bygg summary (mjuka learnings)
+    summary_parts = [f"Chatt-session avslutad ({reason})."]
+    if learnings:
+        summary_parts.append(f"{len(learnings)} alias-kopplingar identifierade.")
+    summary = " ".join(summary_parts)
+    
+    # Extrahera keywords och entities från chat_history
+    keywords = []
+    entities = []
+    if learnings:
+        for l in learnings:
+            if l.get('canonical') and l['canonical'] not in entities:
+                entities.append(l['canonical'])
+            if l.get('alias') and l['alias'] not in keywords:
+                keywords.append(l['alias'])
+    
+    # Bygg YAML frontmatter
+    frontmatter = {
+        "unit_id": unit_id,
+        "owner_id": CONFIG.get("owner", {}).get("id", "default"),
+        "source_type": "Session",
+        "timestamp_created": timestamp_full,
+        "summary": summary,
+        "keywords": keywords,
+        "entities": entities,
+        "graph_master_node": "Händelser",
+        "context_id": "SESSION"
+    }
+    
+    # Bygg ## Learnings sektion (hårda learnings som YAML)
+    learnings_section = ""
+    if learnings:
+        learnings_yaml = yaml.dump({"aliases": learnings}, allow_unicode=True, sort_keys=False)
+        learnings_section = f"## Learnings\n\n```yaml\n{learnings_yaml}```\n\n"
+    
+    # Bygg ## Konversation sektion
     messages_text = ""
     for msg in chat_history:
         role = "**User:**" if msg['role'] == 'user' else "**MyMem:**"
         messages_text += f"{role} {msg['content']}\n\n"
     
-    # Hämta mall från config
-    template = PROMPTS.get('session_export', {}).get('markdown_template', '')
-    if not template:
-        raise ValueError("HARDFAIL: session_export.markdown_template saknas i chat_prompts.yaml")
+    conversation_section = f"## Konversation\n\n{messages_text}"
     
-    date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    content = template.format(date=date_str, reason=reason, messages=messages_text)
+    # Bygg komplett fil
+    frontmatter_yaml = yaml.dump(frontmatter, allow_unicode=True, sort_keys=False)
+    content = f"---\n{frontmatter_yaml}---\n\n{learnings_section}{conversation_section}"
     
     # Spara filen
     with open(filepath, 'w', encoding='utf-8') as f:
         f.write(content)
     
+    LOGGER.info(f"Session sparad: {filename} ({len(learnings or [])} learnings)")
     return filepath
 
 
@@ -857,10 +904,14 @@ def chat_loop(debug_mode=False, use_v6=True):
         while True:
             query = Prompt.ask("\n[bold green]Du[/bold green]")
             if query.lower() in ['exit', 'quit', 'sluta']:
-                # Spara session till Assets (DocConverter hanterar Lake)
-                filepath = _save_session_to_assets(chat_history, "normal")
+                # Extrahera learnings och spara session till Assets
+                session_result = end_session(chat_history)
+                learnings = session_result.get('learnings', [])
+                filepath = _save_session_to_assets(chat_history, learnings, "normal")
                 if filepath:
                     console.print(f"[dim]Session sparad: {os.path.basename(filepath)}[/dim]")
+                    if learnings:
+                        console.print(f"[dim]{len(learnings)} lärdomar extraherade[/dim]")
                 break
             if not query.strip(): continue
 
@@ -963,10 +1014,14 @@ def chat_loop(debug_mode=False, use_v6=True):
                 raise RuntimeError(f"HARDFAIL: AI-syntes misslyckades: {e}") from e
     
     except KeyboardInterrupt:
-        # Spara session till Assets (DocConverter hanterar Lake)
-        filepath = _save_session_to_assets(chat_history, "interrupted")
+        # Extrahera learnings och spara session till Assets
+        session_result = end_session(chat_history)
+        learnings = session_result.get('learnings', [])
+        filepath = _save_session_to_assets(chat_history, learnings, "interrupted")
         if filepath:
             console.print(f"\n[dim]Session sparad: {os.path.basename(filepath)}[/dim]")
+            if learnings:
+                console.print(f"[dim]{len(learnings)} lärdomar extraherade[/dim]")
         console.print("Hejdå!")
 
 

@@ -381,6 +381,83 @@ def get_best_timestamp(filepath, text_content):
         LOGGER.error(f"HARDFAIL: Kunde inte läsa filens tidsstämpel: {e}")
         raise RuntimeError(f"HARDFAIL: Kunde inte läsa tidsstämpel för {filepath}") from e
 
+# --- SESSION FILE PROCESSING ---
+def _parse_session_learnings(content: str) -> list:
+    """
+    Parsa ## Learnings-sektionen från en sessions-fil.
+    
+    Args:
+        content: Filinnehållet (inklusive frontmatter)
+    
+    Returns:
+        Lista med learnings [{canonical, alias, type, confidence, evidence}]
+    """
+    import re as re_module
+    
+    # Hitta ## Learnings-sektionen
+    learnings_match = re_module.search(r'## Learnings\s*```yaml\s*(.*?)```', content, re_module.DOTALL)
+    if not learnings_match:
+        return []
+    
+    learnings_yaml = learnings_match.group(1).strip()
+    
+    try:
+        data = yaml.safe_load(learnings_yaml)
+        return data.get('aliases', [])
+    except Exception as e:
+        LOGGER.error(f"Kunde inte parsa learnings YAML: {e}")
+        return []
+
+
+def _process_session_file(filväg: str, filnamn: str, unit_id: str) -> bool:
+    """
+    Processa en sessions-fil: parsa learnings och kopiera till Lake.
+    
+    Sessions-filer har redan frontmatter och behöver inte AI-analys.
+    Learnings extraheras och skrivs till grafen.
+    
+    Args:
+        filväg: Sökväg till filen
+        filnamn: Filnamn
+        unit_id: UUID från filnamnet
+    
+    Returns:
+        True om framgångsrik
+    """
+    base_name = os.path.splitext(filnamn)[0]
+    sjö_fil = os.path.join(LAKE_STORE, f"{base_name}.md")
+    
+    # Läs fil
+    with open(filväg, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Parsa learnings och skriv till graf
+    learnings = _parse_session_learnings(content)
+    learnings_count = 0
+    
+    for learning in learnings:
+        canonical = learning.get('canonical')
+        alias = learning.get('alias')
+        entity_type = learning.get('type', 'Person')
+        
+        if canonical and alias:
+            try:
+                success = add_entity_alias(canonical, alias, entity_type)
+                if success:
+                    learnings_count += 1
+                    LOGGER.info(f"Session lärdom: {alias} -> {canonical}")
+            except Exception as e:
+                LOGGER.error(f"Kunde inte spara session-lärdom: {e}")
+    
+    # Kopiera filen till Lake (behåll befintligt innehåll)
+    with open(sjö_fil, 'w', encoding='utf-8') as f:
+        f.write(content)
+    
+    print(f"{_ts()} ✅ SESSION: {_kort(filnamn)} → Lake ({learnings_count} learnings)")
+    LOGGER.info(f"Session processad: {filnamn} ({learnings_count} learnings)")
+    return True
+
+
 # --- MAIN PROCESSING ---
 def processa_dokument(filväg, filnamn):
     with PROCESS_LOCK:
@@ -400,6 +477,11 @@ def processa_dokument(filväg, filnamn):
     
     # Skippa redan konverterade filer tyst
     if os.path.exists(sjö_fil): return
+
+    # Kolla om det är en sessions-fil (har redan frontmatter och learnings)
+    if filnamn.startswith("Session_"):
+        _process_session_file(filväg, filnamn, unit_id)
+        return
 
     raw_text = extract_text(filväg, ext)
     if not raw_text or len(raw_text) < 5: return
