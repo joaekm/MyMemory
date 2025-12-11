@@ -373,6 +373,67 @@ def get_all_entities() -> list:
         return []
 
 
+def upgrade_canonical(old_canonical: str, new_canonical: str) -> bool:
+    """
+    Uppgradera canonical name för en Entity.
+    
+    Det gamla canonical-namnet flyttas till aliases[].
+    Alla befintliga aliases behålls.
+    
+    Args:
+        old_canonical: Nuvarande canonical name (id)
+        new_canonical: Nytt, bättre canonical name
+    
+    Returns:
+        True om lyckad
+    
+    Exempel:
+        Före:  id="Cenk", aliases=["Sänk"]
+        Efter: id="Cenk Bisgen", aliases=["Cenk", "Sänk"]
+    """
+    try:
+        _, conn = _get_db_connection()
+        
+        # Hämta befintlig entity
+        result = conn.execute(
+            "MATCH (e:Entity {id: $id}) RETURN e.type, e.aliases",
+            {"id": old_canonical}
+        )
+        
+        entity_type = None
+        existing_aliases = []
+        while result.has_next():
+            row = result.get_next()
+            entity_type = row[0]
+            existing_aliases = row[1] or []
+        
+        if entity_type is None:
+            LOGGER.warning(f"Entity '{old_canonical}' finns inte - kan inte uppgradera")
+            return False
+        
+        # Bygg ny alias-lista: gamla canonical + befintliga aliases
+        new_aliases = [old_canonical] + [a for a in existing_aliases if a != new_canonical]
+        
+        # Ta bort gamla entity
+        conn.execute(
+            "MATCH (e:Entity {id: $id}) DELETE e",
+            {"id": old_canonical}
+        )
+        
+        # Skapa ny entity med uppgraderat id
+        conn.execute(
+            "CREATE (e:Entity {id: $id, type: $type, aliases: $aliases})",
+            {"id": new_canonical, "type": entity_type, "aliases": new_aliases}
+        )
+        
+        LOGGER.info(f"Uppgraderade canonical: '{old_canonical}' -> '{new_canonical}'")
+        return True
+        
+    except Exception as e:
+        LOGGER.error(f"upgrade_canonical error: {e}")
+        return False
+
+
 if __name__ == "__main__":
     print("--- MyMem Graph Builder (v4.1 - Explicit Tagging) ---")
     process_lake_batch()

@@ -28,16 +28,27 @@ except ImportError as e:
         "Kör: pip install google-genai"
     ) from e
 
-# Entity Register för context injection (OBJEKT-44)
+# Entity Register för context injection (OBJEKT-44) - Använder graph_builder direkt
 try:
-    from services.entity_register import get_known_entities, get_canonical
+    from services.my_mem_graph_builder import (
+        get_all_entities as get_known_entities,
+        get_canonical_from_graph as get_canonical,
+        add_entity_alias,
+        get_entity,
+        upgrade_canonical
+    )
 except ImportError:
     try:
-        from entity_register import get_known_entities, get_canonical
+        from my_mem_graph_builder import (
+            get_all_entities as get_known_entities,
+            get_canonical_from_graph as get_canonical,
+            add_entity_alias,
+            get_entity,
+            upgrade_canonical
+        )
     except ImportError as e:
         raise ImportError(
-            "HARDFAIL: entity_register.py saknas. "
-            "Skapa modulen enligt OBJEKT-44 i backloggen."
+            "HARDFAIL: my_mem_graph_builder.py saknas eller har fel."
         ) from e
 
 # --- CONFIG LOADER ---
@@ -170,18 +181,26 @@ def extract_text(filväg, ext):
 def _build_entity_context():
     """Bygg context-sträng med kända entiteter för prompt injection."""
     try:
-        known = get_known_entities()
+        entities = get_known_entities()  # Lista med {id, type, aliases}
         context_parts = []
         
-        if known.get('persons'):
-            context_parts.append(f"KÄNDA PERSONER: {', '.join(known['persons'][:30])}")
-        if known.get('projects'):
-            context_parts.append(f"KÄNDA PROJEKT: {', '.join(known['projects'][:20])}")
-        if known.get('aliases'):
-            # Visa alias-mappningar som hjälp
-            alias_examples = [f"'{a}' = '{c}'" for a, c in list(known['aliases'].items())[:10]]
-            if alias_examples:
-                context_parts.append(f"KÄNDA ALIAS: {', '.join(alias_examples)}")
+        # Extrahera personer
+        persons = [e['id'] for e in entities if e.get('type') == 'Person']
+        if persons:
+            context_parts.append(f"KÄNDA PERSONER: {', '.join(persons[:30])}")
+        
+        # Extrahera projekt
+        projects = [e['id'] for e in entities if e.get('type') == 'Projekt']
+        if projects:
+            context_parts.append(f"KÄNDA PROJEKT: {', '.join(projects[:20])}")
+        
+        # Extrahera alias-mappningar
+        alias_mappings = []
+        for e in entities:
+            for alias in (e.get('aliases') or []):
+                alias_mappings.append(f"'{alias}' = '{e['id']}'")
+        if alias_mappings:
+            context_parts.append(f"KÄNDA ALIAS: {', '.join(alias_mappings[:10])}")
         
         return "\n".join(context_parts) if context_parts else ""
     except Exception as e:
@@ -201,6 +220,87 @@ def _normalize_entities(entities):
             if entity not in normalized:
                 normalized.append(entity)
     return normalized
+
+
+def _process_potential_aliases(potential_aliases: list) -> list:
+    """
+    Processa potentiella alias från AI-analys.
+    
+    Validerar mot grafen och lägger till/uppgraderar alias.
+    
+    Args:
+        potential_aliases: Lista med {name_variant, likely_refers_to, entity_type, confidence}
+    
+    Returns:
+        Lista med processade alias (för loggning)
+    """
+    processed = []
+    
+    for alias_data in (potential_aliases or []):
+        name_variant = alias_data.get('name_variant')
+        likely_refers_to = alias_data.get('likely_refers_to')
+        entity_type = alias_data.get('entity_type', 'Person')
+        confidence = alias_data.get('confidence', 'low')
+        
+        if not name_variant or not likely_refers_to:
+            continue
+        
+        # Endast processa medium/high confidence
+        if confidence == 'low':
+            LOGGER.debug(f"Skippar låg-confidence alias: {name_variant} -> {likely_refers_to}")
+            continue
+        
+        try:
+            # Kolla om det redan finns en entity för likely_refers_to
+            existing = get_entity(likely_refers_to)
+            
+            if existing:
+                # Entity finns - lägg till alias om det inte redan finns
+                existing_aliases = existing.get('aliases') or []
+                if name_variant not in existing_aliases:
+                    success = add_entity_alias(likely_refers_to, name_variant, entity_type)
+                    if success:
+                        processed.append({
+                            'action': 'added_alias',
+                            'canonical': likely_refers_to,
+                            'alias': name_variant,
+                            'type': entity_type
+                        })
+                        LOGGER.info(f"Alias tillagt: {name_variant} -> {likely_refers_to}")
+            else:
+                # Kolla om name_variant är ett känt alias för något annat
+                canonical_for_variant = get_canonical(name_variant)
+                
+                if canonical_for_variant:
+                    # name_variant är redan ett alias - kolla om likely_refers_to är bättre
+                    # (t.ex. fullständigt namn istället för förnamn)
+                    if len(likely_refers_to) > len(canonical_for_variant):
+                        # likely_refers_to verkar vara ett mer komplett namn - uppgradera
+                        success = upgrade_canonical(canonical_for_variant, likely_refers_to)
+                        if success:
+                            processed.append({
+                                'action': 'upgraded_canonical',
+                                'old_canonical': canonical_for_variant,
+                                'new_canonical': likely_refers_to,
+                                'type': entity_type
+                            })
+                            LOGGER.info(f"Uppgraderade canonical: {canonical_for_variant} -> {likely_refers_to}")
+                else:
+                    # Ny entity - skapa den med alias
+                    success = add_entity_alias(likely_refers_to, name_variant, entity_type)
+                    if success:
+                        processed.append({
+                            'action': 'created_entity',
+                            'canonical': likely_refers_to,
+                            'alias': name_variant,
+                            'type': entity_type
+                        })
+                        LOGGER.info(f"Ny entity skapad: {likely_refers_to} (alias: {name_variant})")
+                        
+        except Exception as e:
+            LOGGER.error(f"Fel vid alias-processning: {e}")
+    
+    return processed
 
 
 def generera_metadata(text, filnamn):
@@ -247,6 +347,12 @@ def generera_metadata(text, filnamn):
         if data.get("graph_master_node") not in valid_nodes:
             LOGGER.warning(f"AI gissade ogiltig nod '{data.get('graph_master_node')}'. Fallback till 'Okategoriserat'.")
             data["graph_master_node"] = "Okategoriserat"
+        
+        # Processa potentiella alias och skriv till graf
+        if data.get("potential_aliases"):
+            processed = _process_potential_aliases(data["potential_aliases"])
+            if processed:
+                LOGGER.info(f"Processade {len(processed)} alias från {filnamn}")
             
         return data
 

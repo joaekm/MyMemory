@@ -54,6 +54,13 @@ doc_converter:
     Om texten nämner en person eller ett projekt som finns i listan KÄNDA PERSONER/PROJEKT,
     använd EXAKT det namnet. Gissa INTE egna varianter.
     
+    ALIAS-DETEKTION:
+    Om texten innehåller namnvarianter som troligen refererar till samma entitet,
+    rapportera dessa som "potential_aliases". Exempel:
+    - "Sänk" nämns i samma kontext som "Cenk" → potential alias
+    - "Adda-grejen" och "Adda PoC" → potential alias
+    - Smeknamn, förkortningar, felstavningar
+    
     OUTPUT KRAV (Returnera ENDAST denna JSON):
     {
       "summary": "Kort sammanfattning på svenska. INKLUDERA viktiga datum och aktiviteter.",
@@ -66,6 +73,9 @@ doc_converter:
       "actions": ["Aktiviteter som nämns (t.ex. 'Användartester', 'Demo', 'Möte')"],
       "deadlines": [
         {"what": "Vad som ska ske", "when": "YYYY-MM-DD"}
+      ],
+      "potential_aliases": [
+        {"name_variant": "Smeknamn/variant", "likely_refers_to": "Formellt namn", "entity_type": "Person|Aktör|Projekt", "confidence": "low|medium|high"}
       ]
     }
 

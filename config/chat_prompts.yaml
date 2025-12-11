@@ -478,6 +478,41 @@ conversation_analyzer:
     
     Om inga lärdomar hittas, returnera: {{"learnings": []}}
 
+# === SESSION LEARNINGS ===
+session_learnings_extractor:
+  role: "Du analyserar chatt-sessioner för att extrahera alias-kopplingar."
+  instruction: |
+    Analysera denna chatt-session och identifiera alias-kopplingar.
+    
+    ALIAS-MÖNSTER ATT LETA EFTER:
+    - "X och Y är samma person/projekt"
+    - "X heter egentligen Y"
+    - "X kallas också Y"
+    - "Det finns ingen X, det heter Y"
+    - Användaren korrigerar ett namn
+    
+    GILTIGA ENTITY TYPES: {valid_types}
+    
+    VIKTIGT:
+    - 'canonical' = det KORREKTA/FORMELLA/FULLSTÄNDIGA namnet
+    - 'alias' = smeknamn, förkortning, felstavning
+    - Endast extrahera om du är säker (confidence > 0.7)
+    
+    Returnera JSON:
+    {{
+      "learned_aliases": [
+        {{
+          "canonical": "Det formella namnet",
+          "alias": "Smeknamnet/varianten",
+          "type": "Person|Aktör|Projekt|etc",
+          "confidence": 0.0-1.0,
+          "evidence": "Citat från konversationen"
+        }}
+      ]
+    }}
+    
+    Om inga alias-kopplingar hittas, returnera: {{"learned_aliases": []}}
+
 # === SESSION EXPORT ===
 session_export:
   markdown_template: |

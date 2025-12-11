@@ -32,17 +32,23 @@ except ImportError:
     except ImportError as e:
         raise ImportError(f"HARDFAIL: Kan inte importera pipeline-moduler: {e}") from e
 
-# Entity Register (OBJEKT-44) - ännu ej implementerat
-# HARDFAIL: Dessa moduler måste skapas innan chatten kan köras
+# Entity Register (OBJEKT-44) - Använder graph_builder direkt
 try:
-    from services.entity_register import add_alias, get_canonical, get_known_entities
+    from services.my_mem_graph_builder import (
+        add_entity_alias as add_alias,
+        get_canonical_from_graph as get_canonical,
+        get_all_entities as get_known_entities
+    )
 except ImportError:
     try:
-        from entity_register import add_alias, get_canonical, get_known_entities
+        from my_mem_graph_builder import (
+            add_entity_alias as add_alias,
+            get_canonical_from_graph as get_canonical,
+            get_all_entities as get_known_entities
+        )
     except ImportError as e:
         raise ImportError(
-            "HARDFAIL: entity_register.py saknas. "
-            "Skapa modulen enligt OBJEKT-44 i backloggen."
+            "HARDFAIL: my_mem_graph_builder.py saknas eller har fel."
         ) from e
 
 # Session Logger (OBJEKT-48) - ännu ej implementerat
@@ -243,7 +249,7 @@ def _handle_feedback(canonical: str, alias: str, entity_type: str) -> str:
         Bekräftelsemeddelande till användaren
     """
     try:
-        add_alias(canonical, alias, source="user", entity_type=entity_type)
+        add_alias(canonical, alias, entity_type)
         
         # Logga feedback för Dreaming
         log_feedback(canonical, alias, entity_type, source="user")
