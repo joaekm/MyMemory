@@ -3,7 +3,13 @@ import yaml
 import chromadb
 import kuzu
 import re
+import datetime
+import logging
 from chromadb.utils import embedding_functions
+
+# Enkel loggning för CLI-verktyg
+logging.basicConfig(level=logging.WARNING, format='%(levelname)s - %(message)s')
+LOGGER = logging.getLogger('SystemValidator')
 
 # --- CONFIG LOADER ---
 def ladda_yaml(filnamn):
@@ -24,6 +30,7 @@ LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])
 CHROMA_PATH = os.path.expanduser(CONFIG['paths']['chroma_db'])
 KUZU_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])
+LOG_FILE = os.path.expanduser(CONFIG['logging']['log_file_path'])
 
 # Hämta extensions
 DOC_EXTS = CONFIG.get('processing', {}).get('document_extensions', [])
@@ -126,6 +133,7 @@ def validera_chroma(expected_count, lake_ids):
                 print(f"\n   ⚠️ Föräldralösa i Vector ({len(orphans_in_vector)} st) - finns ej i Lake")
 
     except Exception as e:
+        LOGGER.error(f"Kunde inte läsa ChromaDB: {e}")
         print(f"❌ KRITISKT FEL: Kunde inte läsa ChromaDB: {e}")
 
 def validera_kuzu(expected_count, lake_ids):
@@ -165,10 +173,63 @@ def validera_kuzu(expected_count, lake_ids):
         del db
 
     except Exception as e:
+        LOGGER.error(f"Kunde inte läsa KuzuDB: {e}")
         print(f"❌ KRITISKT FEL: Kunde inte läsa KuzuDB: {e}")
 
+def rensa_gammal_logg():
+    """Rensar loggfilen på rader äldre än 24 timmar."""
+    print_header("4. LOGG-RENSNING")
+    
+    if not os.path.exists(LOG_FILE):
+        print(f"⚠️ Loggfil finns inte: {LOG_FILE}")
+        return
+    
+    try:
+        now = datetime.datetime.now()
+        cutoff = now - datetime.timedelta(hours=24)
+        
+        # Läs alla rader
+        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        original_count = len(lines)
+        kept_lines = []
+        
+        # Logg-format: "2025-12-11 14:06:33,526 - TRANS - INFO - ..."
+        timestamp_pattern = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})')
+        
+        for line in lines:
+            match = timestamp_pattern.match(line)
+            if match:
+                try:
+                    line_time = datetime.datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+                    if line_time >= cutoff:
+                        kept_lines.append(line)
+                except ValueError as e:
+                    # Kunde inte parsa tidsstämpel, behåll raden
+                    LOGGER.debug(f"Kunde inte parsa tidsstämpel: {e}")
+                    kept_lines.append(line)
+            else:
+                # Rad utan tidsstämpel (t.ex. fortsättning av felmeddelande), behåll
+                kept_lines.append(line)
+        
+        removed_count = original_count - len(kept_lines)
+        
+        if removed_count > 0:
+            # Skriv tillbaka de kvarvarande raderna
+            with open(LOG_FILE, 'w', encoding='utf-8') as f:
+                f.writelines(kept_lines)
+            print(f"🧹 Rensade {removed_count} rader äldre än 24h")
+            print(f"   Innan: {original_count} rader → Efter: {len(kept_lines)} rader")
+        else:
+            print(f"✅ Ingen rensning behövdes ({original_count} rader, alla inom 24h)")
+            
+    except Exception as e:
+        LOGGER.error(f"Fel vid loggrensning: {e}")
+        print(f"❌ Fel vid loggrensning: {e}")
+
 if __name__ == "__main__":
-    print("=== MyMem System Validator (v3.0 - Diff Details) ===")
+    print("=== MyMem System Validator (v3.1 - Logg Cleanup) ===")
     lake_c = validera_filer()
     if lake_c > 0:
         lake_ids = get_lake_ids()
@@ -176,3 +237,6 @@ if __name__ == "__main__":
         validera_kuzu(lake_c, lake_ids)
     else:
         print("\nIngen data att validera i databaserna.")
+    
+    # Alltid rensa gammal logg
+    rensa_gammal_logg()
