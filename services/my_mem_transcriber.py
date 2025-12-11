@@ -68,7 +68,8 @@ if not TARGET_MODEL:
 MAX_WORKERS = 5 
 EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 PROCESSED_FILES = set()
-PROCESS_LOCK = threading.Lock() 
+PROCESS_LOCK = threading.Lock()
+UPLOAD_LOCK = threading.Lock()  # Förhindrar samtidiga uploads som hänger API:et
 UUID_SUFFIX_PATTERN = re.compile(r'_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$')
 
 log_dir = os.path.dirname(LOG_FILE)
@@ -131,19 +132,22 @@ def fa_fil_skapad_datum(filväg):
         raise RuntimeError(f"HARDFAIL: Kunde inte läsa tidsstämpel för {filväg}") from e
 
 def safe_upload(filväg, original_namn):
+    """Upload med sekventiell begränsning för att undvika API-blockering."""
     safe_path = None
-    try:
-        safe_name = f"temp_upload_{int(time.time())}_{threading.get_ident()}{os.path.splitext(filväg)[1]}"
-        safe_path = os.path.join(os.path.dirname(filväg), safe_name)
-        try: os.symlink(filväg, safe_path)
-        except OSError: shutil.copy2(filväg, safe_path)
-        upload_file = AI_CLIENT.files.upload(file=safe_path, config={'display_name': original_namn})
-        if os.path.exists(safe_path): os.remove(safe_path)
-        return upload_file
-    except Exception as e:
-        LOGGER.error(f"Upload-fel för {original_namn}: {e}")
-        if safe_path and os.path.exists(safe_path): os.remove(safe_path)
-        return None
+    with UPLOAD_LOCK:  # Endast en upload åt gången
+        time.sleep(1)  # Andrum mellan uploads
+        try:
+            safe_name = f"temp_upload_{int(time.time())}_{threading.get_ident()}{os.path.splitext(filväg)[1]}"
+            safe_path = os.path.join(os.path.dirname(filväg), safe_name)
+            try: os.symlink(filväg, safe_path)
+            except OSError: shutil.copy2(filväg, safe_path)
+            upload_file = AI_CLIENT.files.upload(file=safe_path, config={'display_name': original_namn})
+            if os.path.exists(safe_path): os.remove(safe_path)
+            return upload_file
+        except Exception as e:
+            LOGGER.error(f"Upload-fel för {original_namn}: {e}")
+            if safe_path and os.path.exists(safe_path): os.remove(safe_path)
+            return None
 
 def stada_och_parsa_json(text_response):
     try:
@@ -304,27 +308,42 @@ def processa_mediafil(filväg, filnamn):
         _log("⚡", f"{kort_namn} → Flash OK ({flash_time}s)")
 
         # --- STEG 2: ANALYS + SANITY CHECK + KORRIGERING (PRO) ---
-        analysis_context = raw_transcript[:100000]
+        analysis_context = raw_transcript[:2000000]  # 2M tecken, Gemini Pro klarar det
         analysis_prompt = PROMPTS['transcriber']['analysis_prompt']
 
-        try:
-            response_analysis = AI_CLIENT.models.generate_content(
-                model=MODEL_SMART,
-                contents=[types.Content(role="user", parts=[
-                    types.Part.from_text(text=f"{analysis_prompt}\n\nTRANSCRIPT TO ANALYZE:\n{analysis_context}")])],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    safety_settings=SAFETY_SETTINGS
+        # Retry-loop för PRO (samma mönster som Flash)
+        result = None
+        for attempt in range(5):
+            try:
+                response_analysis = AI_CLIENT.models.generate_content(
+                    model=MODEL_SMART,
+                    contents=[types.Content(role="user", parts=[
+                        types.Part.from_text(text=f"{analysis_prompt}\n\nTRANSCRIPT TO ANALYZE:\n{analysis_context}")])],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        safety_settings=SAFETY_SETTINGS
+                    )
                 )
-            )
-            result = stada_och_parsa_json(response_analysis.text)
-            _log("🧠", f"{kort_namn} → Pro OK")
-        except ValueError as e:
-            LOGGER.error(f"HARDFAIL: JSON-parsing misslyckades för {filnamn}: {e}")
-            raise
-        except Exception as e:
-            LOGGER.error(f"HARDFAIL: Metadata-analys misslyckades för {filnamn}: {e}")
-            raise RuntimeError(f"HARDFAIL: Metadata-analys misslyckades") from e
+                result = stada_och_parsa_json(response_analysis.text)
+                _log("🧠", f"{kort_namn} → Pro OK")
+                break
+            except ValueError as e:
+                # JSON-parsing fel - ingen retry
+                LOGGER.error(f"HARDFAIL: JSON-parsing misslyckades för {filnamn}: {e}")
+                raise
+            except Exception as e:
+                error_str = str(e)
+                if "503" in error_str or "429" in error_str or "overloaded" in error_str.lower():
+                    wait_time = 5 * (2 ** attempt)
+                    print(f"{_ts()} ⚠️ TRANS: {kort_namn} → Pro Retry {attempt+1}/5 ({wait_time}s)")
+                    LOGGER.warning(f"PRO API överbelastad för {filnamn}. Försök {attempt+1}/5. Väntar {wait_time}s")
+                    time.sleep(wait_time)
+                else:
+                    LOGGER.error(f"HARDFAIL: Metadata-analys misslyckades för {filnamn}: {e}")
+                    raise RuntimeError(f"HARDFAIL: Metadata-analys misslyckades") from e
+        
+        if not result:
+            raise Exception("PRO genererade inget resultat efter 5 försök.")
         
         # Validera resultat
         if not result or not isinstance(result, dict):
