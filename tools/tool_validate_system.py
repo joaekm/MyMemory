@@ -72,8 +72,8 @@ def validera_filer():
     
     if invalid_names:
         print(f"❌ [VARNING] Hittade {len(invalid_names)} filer i Assets som bryter mot namnstandarden!")
-        for bad in invalid_names[:3]: print(f"   - {bad} (Saknar _[UUID])")
-        if len(invalid_names) > 3: print("   ... (och fler)")
+        for bad in invalid_names:
+            print(f"   - {bad}")
     else:
         print("✅ Alla filer i Assets följer standarden [Namn]_[UUID].")
 
@@ -94,11 +94,14 @@ def validera_filer():
         print(f"\n✅ BALANS: {len(lake_files)} filer i Sjön matchar antalet källdokument.")
     else:
         if missing_in_lake:
-            print(f"\n❌ SAKNAS: {len(missing_in_lake)} dokument har inte konverterats!")
-            for m in list(missing_in_lake)[:3]: print(f"   - {m} (Finns ej i Sjön)")
+            print(f"\n❌ SAKNAS I LAKE: {len(missing_in_lake)} dokument har inte konverterats!")
+            for m in sorted(missing_in_lake):
+                print(f"   - {m}")
         
         if zombies_in_lake:
-             print(f"\n⚠️ ZOMBIES: {len(zombies_in_lake)} filer i Sjön saknar källfil i Assets (gammalt skräp?).")
+            print(f"\n⚠️ ZOMBIES I LAKE: {len(zombies_in_lake)} filer i Sjön saknar källfil i Assets:")
+            for z in sorted(zombies_in_lake):
+                print(f"   - {z}")
 
     return len(lake_files)
 
@@ -228,15 +231,59 @@ def rensa_gammal_logg():
         LOGGER.error(f"Fel vid loggrensning: {e}")
         print(f"❌ Fel vid loggrensning: {e}")
 
-if __name__ == "__main__":
-    print("=== MyMem System Validator (v3.1 - Logg Cleanup) ===")
+def run_startup_checks():
+    """
+    Kör alla valideringar och returnerar health_info för auto_repair.
+    Används av start_services.py vid uppstart.
+    """
+    print("=== MyMem System Validator ===")
+    
     lake_c = validera_filer()
+    lake_ids = get_lake_ids() if lake_c > 0 else {}
+    
+    # Hämta counts för health_info
+    vector_count = 0
+    graph_count = 0
+    
     if lake_c > 0:
-        lake_ids = get_lake_ids()
-        validera_chroma(lake_c, lake_ids)
-        validera_kuzu(lake_c, lake_ids)
+        # Chroma
+        try:
+            client = chromadb.PersistentClient(path=CHROMA_PATH)
+            coll = client.get_collection(name="dfm_knowledge_base")
+            vector_count = coll.count()
+            validera_chroma(lake_c, lake_ids)
+        except Exception as e:
+            LOGGER.error(f"Kunde inte läsa ChromaDB: {e}")
+            print(f"❌ KRITISKT FEL: Kunde inte läsa ChromaDB: {e}")
+        
+        # Kuzu
+        try:
+            db = kuzu.Database(KUZU_PATH)
+            conn = kuzu.Connection(db)
+            res = conn.execute("MATCH (u:Unit) RETURN count(u)").get_next()
+            graph_count = res[0]
+            del conn
+            del db
+            validera_kuzu(lake_c, lake_ids)
+        except Exception as e:
+            LOGGER.error(f"Kunde inte läsa KuzuDB: {e}")
+            print(f"❌ KRITISKT FEL: Kunde inte läsa KuzuDB: {e}")
     else:
         print("\nIngen data att validera i databaserna.")
     
-    # Alltid rensa gammal logg
+    # Rensa gammal logg
     rensa_gammal_logg()
+    
+    # Returnera health_info för auto_repair
+    return {
+        'lake_count': lake_c,
+        'vector_count': vector_count,
+        'graph_count': graph_count,
+        'lake_store': LAKE_STORE,
+        'chroma_path': CHROMA_PATH,
+        'kuzu_path': KUZU_PATH,
+        'lake_ids': lake_ids
+    }
+
+if __name__ == "__main__":
+    run_startup_checks()

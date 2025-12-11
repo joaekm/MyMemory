@@ -4,8 +4,15 @@ import time
 import os
 import signal
 import datetime
-import re
 import yaml
+import logging
+
+# Loggning
+logging.basicConfig(level=logging.WARNING, format='%(levelname)s - %(message)s')
+LOGGER = logging.getLogger('StartServices')
+
+# Import validering från tool_validate_system
+from tools.tool_validate_system import run_startup_checks
 
 # Tjänsterna som ska startas
 SERVICES = [
@@ -18,9 +25,6 @@ SERVICES = [
 
 processes = []
 
-# Regex för UUID i filnamn
-UUID_MD_PATTERN = re.compile(r'_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.md$')
-
 def _ts():
     return datetime.datetime.now().strftime("[%H:%M:%S]")
 
@@ -32,88 +36,6 @@ def _load_config():
             return yaml.safe_load(f)
     return None
 
-def _get_lake_files(lake_store):
-    """Returnerar dict med {uuid: (filnamn, filepath)} för alla filer i Lake"""
-    lake_files = {}
-    if os.path.exists(lake_store):
-        for f in os.listdir(lake_store):
-            if f.endswith('.md') and not f.startswith('.'):
-                match = UUID_MD_PATTERN.search(f)
-                if match:
-                    lake_files[match.group(1)] = (f, os.path.join(lake_store, f))
-    return lake_files
-
-def quick_health_check():
-    """Snabb hälsokontroll av systemets dataflöde"""
-    config = _load_config()
-    if not config:
-        return
-    
-    asset_store = os.path.expanduser(config['paths']['asset_store'])
-    lake_store = os.path.expanduser(config['paths']['lake_store'])
-    chroma_path = os.path.expanduser(config['paths']['chroma_db'])
-    kuzu_path = os.path.expanduser(config['paths']['kuzu_db'])
-    
-    uuid_pattern = re.compile(r'_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.[a-zA-Z0-9]+$')
-    
-    # Räkna Assets
-    assets_total = 0
-    assets_invalid = 0
-    if os.path.exists(asset_store):
-        for f in os.listdir(asset_store):
-            if not f.startswith('.'):
-                assets_total += 1
-                if not uuid_pattern.search(f):
-                    assets_invalid += 1
-    
-    # Räkna Lake
-    lake_count = 0
-    if os.path.exists(lake_store):
-        lake_count = len([f for f in os.listdir(lake_store) if f.endswith('.md') and not f.startswith('.')])
-    
-    # Räkna ChromaDB
-    vector_count = 0
-    vector_status = "?"
-    try:
-        import chromadb
-        client = chromadb.PersistentClient(path=chroma_path)
-        coll = client.get_collection(name="dfm_knowledge_base")
-        vector_count = coll.count()
-        vector_status = "✓" if vector_count == lake_count else f"⚠️ diff {abs(vector_count - lake_count)}"
-    except:
-        vector_status = "offline"
-    
-    # Räkna KuzuDB
-    graph_count = 0
-    graph_status = "?"
-    try:
-        import kuzu
-        db = kuzu.Database(kuzu_path)
-        conn = kuzu.Connection(db)
-        res = conn.execute("MATCH (u:Unit) RETURN count(u)").get_next()
-        graph_count = res[0]
-        graph_status = "✓" if graph_count == lake_count else f"⚠️ diff {abs(graph_count - lake_count)}"
-        del conn
-        del db
-    except:
-        graph_status = "offline"
-    
-    # Bygg statusrad
-    assets_status = "✓" if assets_invalid == 0 else f"⚠️ {assets_invalid} ogiltiga"
-    
-    print(f"📊 HEALTH: Assets {assets_total} ({assets_status}) | Lake {lake_count} | Vector {vector_count} ({vector_status}) | Graf {graph_count} ({graph_status})")
-    print()
-    
-    # Returnera info för repair
-    return {
-        'lake_count': lake_count,
-        'vector_count': vector_count,
-        'graph_count': graph_count,
-        'lake_store': lake_store,
-        'chroma_path': chroma_path,
-        'kuzu_path': kuzu_path
-    }
-
 def auto_repair(health_info):
     """Reparerar saknade filer i Vector och Graf"""
     if not health_info:
@@ -124,6 +46,7 @@ def auto_repair(health_info):
     graph_count = health_info['graph_count']
     lake_store = health_info['lake_store']
     chroma_path = health_info['chroma_path']
+    lake_ids_dict = health_info.get('lake_ids', {})
     
     repaired = False
     
@@ -133,20 +56,20 @@ def auto_repair(health_info):
             import chromadb
             from chromadb.utils import embedding_functions
             
-            lake_files = _get_lake_files(lake_store)
-            lake_ids = set(lake_files.keys())
+            lake_id_set = set(lake_ids_dict.keys())
             
             client = chromadb.PersistentClient(path=chroma_path)
             emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
             coll = client.get_or_create_collection(name="dfm_knowledge_base", embedding_function=emb_fn)
             vector_ids = set(coll.get()['ids'])
             
-            missing = lake_ids - vector_ids
+            missing = lake_id_set - vector_ids
             if missing:
                 print(f"{_ts()} 🔧 REPAIR: Indexerar {len(missing)} saknade filer i Vector...")
                 
                 for uid in missing:
-                    filename, filepath = lake_files[uid]
+                    filename = lake_ids_dict.get(uid, f"{uid}.md")
+                    filepath = os.path.join(lake_store, filename)
                     try:
                         with open(filepath, 'r', encoding='utf-8') as f:
                             content = f.read()
@@ -172,12 +95,14 @@ def auto_repair(health_info):
                             metadatas=[{"context": context_id, "timestamp": timestamp, "filename": filename}]
                         )
                     except Exception as e:
+                        LOGGER.warning(f"Kunde inte indexera {filename}: {e}")
                         print(f"{_ts()} ⚠️ Kunde inte indexera {filename}: {e}")
                 
                 print(f"{_ts()} ✅ REPAIR: Vector klar")
                 repaired = True
                 
         except Exception as e:
+            LOGGER.error(f"Vector repair misslyckades: {e}")
             print(f"{_ts()} ❌ Vector repair misslyckades: {e}")
     
     # --- GRAPH REPAIR ---
@@ -196,18 +121,20 @@ def auto_repair(health_info):
             else:
                 print(f"{_ts()} ⚠️ Graph builder avslutade med fel")
         except subprocess.TimeoutExpired:
+            LOGGER.warning("Graph builder timeout (120s)")
             print(f"{_ts()} ⚠️ Graph builder timeout (120s)")
         except Exception as e:
+            LOGGER.error(f"Graph repair misslyckades: {e}")
             print(f"{_ts()} ❌ Graph repair misslyckades: {e}")
     
     if repaired:
         print()
 
 def start_all():
-    print(f"\n--- MyMem Services (v5.0) ---\n")
+    print(f"\n--- MyMem Services (v6.0) ---\n")
     
-    # Kör hälsokontroll och auto-repair
-    health_info = quick_health_check()
+    # Kör validering (inkl. loggrensning) och auto-repair
+    health_info = run_startup_checks()
     auto_repair(health_info)
     
     python_exec = sys.executable
@@ -223,6 +150,7 @@ def start_all():
             processes.append(p)
             time.sleep(0.8)  # Låt tjänsten starta och skriva sin egen output
         except Exception as e:
+            LOGGER.error(f"Kunde inte starta {service['name']}: {e}")
             print(f"{_ts()} ❌ {service['name']}: {e}")
 
     print(f"\n--- Ready ---\n")
@@ -232,7 +160,8 @@ def stop_all(signum, frame):
     for p in processes:
         try:
             p.terminate()
-        except: pass
+        except Exception as e:
+            LOGGER.debug(f"Process redan avslutad: {e}")
     sys.exit(0)
 
 if __name__ == "__main__":
