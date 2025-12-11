@@ -51,17 +51,24 @@ TAXONOMY_FILE = os.path.expanduser(CONFIG['paths'].get('taxonomy_file', '~/MyMem
 
 
 def _load_taxonomy_nodes() -> list:
-    """Ladda huvudnoder från taxonomin."""
-    try:
-        if os.path.exists(TAXONOMY_FILE):
-            with open(TAXONOMY_FILE, 'r', encoding='utf-8') as f:
-                taxonomy = json.load(f)
-            return list(taxonomy.keys())
-    except Exception as e:
-        LOGGER.warning(f"Kunde inte ladda taxonomi: {e}")
+    """Ladda huvudnoder från taxonomin. HARDFAIL om det misslyckas."""
+    if not os.path.exists(TAXONOMY_FILE):
+        raise FileNotFoundError(
+            f"HARDFAIL: Taxonomifil saknas: {TAXONOMY_FILE}. "
+            "Skapa filen enligt Princip 7 i projektreglerna."
+        )
     
-    # Fallback om taxonomin inte finns
-    return ["Okategoriserat", "Händelser", "Projekt", "Administration", "Person", "Aktör"]
+    try:
+        with open(TAXONOMY_FILE, 'r', encoding='utf-8') as f:
+            taxonomy = json.load(f)
+        nodes = list(taxonomy.keys())
+        if not nodes:
+            raise ValueError("HARDFAIL: Taxonomin är tom")
+        return nodes
+    except json.JSONDecodeError as e:
+        raise ValueError(f"HARDFAIL: Kunde inte parsa taxonomi-JSON: {e}") from e
+    except Exception as e:
+        raise RuntimeError(f"HARDFAIL: Kunde inte ladda taxonomi: {e}") from e
 
 
 TAXONOMY_NODES = _load_taxonomy_nodes()
@@ -119,17 +126,7 @@ def route_intent(query: str, chat_history: list = None, debug_trace: dict = None
     prompt_template = PROMPTS.get('intent_router', {}).get('instruction', '')
     if not prompt_template:
         LOGGER.error("HARDFAIL: intent_router prompt saknas i chat_prompts.yaml")
-        return {
-            "status": "ERROR",
-            "reason": "intent_router prompt saknas i chat_prompts.yaml",
-            "intent": "RELAXED",
-            "keywords": [],
-            "vector_query": query,
-            "time_filter": None,
-            "context_resolved": {},
-            "graph_paths": [],
-            "reasoning": "Fallback pga saknad prompt"
-        }
+        raise ValueError("HARDFAIL: intent_router prompt saknas i chat_prompts.yaml")
     
     # Bygg prompt
     today = datetime.date.today()
@@ -189,31 +186,11 @@ def route_intent(query: str, chat_history: list = None, debug_trace: dict = None
         
     except json.JSONDecodeError as e:
         LOGGER.error(f"HARDFAIL: IntentRouter JSON parse error: {e}")
-        return {
-            "status": "ERROR",
-            "reason": f"JSON parse error: {e}",
-            "intent": "RELAXED",
-            "keywords": [],
-            "vector_query": query,
-            "time_filter": None,
-            "context_resolved": {},
-            "graph_paths": [],
-            "reasoning": "Fallback pga parse-fel"
-        }
+        raise ValueError(f"HARDFAIL: IntentRouter kunde inte parsa AI-svar: {e}") from e
         
     except Exception as e:
         LOGGER.error(f"HARDFAIL: IntentRouter error: {e}")
-        return {
-            "status": "ERROR",
-            "reason": str(e),
-            "intent": "RELAXED",
-            "keywords": [],
-            "vector_query": query,
-            "time_filter": None,
-            "context_resolved": {},
-            "graph_paths": [],
-            "reasoning": "Fallback pga fel"
-        }
+        raise RuntimeError(f"HARDFAIL: IntentRouter misslyckades: {e}") from e
 
 
 # --- TEST ---

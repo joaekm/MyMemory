@@ -1,13 +1,9 @@
 import os
-import sys
 import yaml
 import chromadb
+import kuzu
 import re
 from chromadb.utils import embedding_functions
-
-# Lägg till services i path för import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from services.my_mem_graph_builder import KuzuSession
 
 # --- CONFIG LOADER ---
 def ladda_yaml(filnamn):
@@ -135,36 +131,39 @@ def validera_chroma(expected_count, lake_ids):
 def validera_kuzu(expected_count, lake_ids):
     print_header("3. GRAF-AUDIT (KUZU)")
     try:
-        with KuzuSession(KUZU_PATH, timeout=30, caller="tool_validate_system") as conn:
-            res = conn.execute("MATCH (u:Unit) RETURN count(u)").get_next()
-            unit_count = res[0]
-            print(f"🕸️  Graf-noder (Units): {unit_count} st")
+        db = kuzu.Database(KUZU_PATH)
+        conn = kuzu.Connection(db)
+        
+        res = conn.execute("MATCH (u:Unit) RETURN count(u)").get_next()
+        unit_count = res[0]
+        print(f"🕸️  Graf-noder (Units): {unit_count} st")
+        
+        if unit_count == expected_count:
+            print("✅ SYNKAD: Grafen matchar Sjön.")
+        else:
+            print(f"❌ OSYNKAD: Grafen diffar med {abs(expected_count - unit_count)} noder.")
             
-            if unit_count == expected_count:
-                print("✅ SYNKAD: Grafen matchar Sjön.")
-            else:
-                print(f"❌ OSYNKAD: Grafen diffar med {abs(expected_count - unit_count)} noder.")
-                
-                # Hämta alla ID från grafen
-                graph_ids = set()
-                result = conn.execute("MATCH (u:Unit) RETURN u.id")
-                while result.has_next():
-                    graph_ids.add(result.get_next()[0])
-                
-                lake_id_set = set(lake_ids.keys())
-                
-                missing_in_graph = lake_id_set - graph_ids
-                if missing_in_graph:
-                    print(f"\n   Saknas i Graf ({len(missing_in_graph)} st):")
-                    for uid in missing_in_graph:
-                        filename = lake_ids.get(uid, uid)
-                        # Visa namn utan UUID för läsbarhet
-                        display_name = filename.rsplit('_', 1)[0] if '_' in filename else filename
-                        print(f"   - {display_name}")
-                    print(f"\n   Tips: Kör 'python services/my_mem_graph_builder.py' för att synka")
+            # Hämta alla ID från grafen
+            graph_ids = set()
+            result = conn.execute("MATCH (u:Unit) RETURN u.id")
+            while result.has_next():
+                graph_ids.add(result.get_next()[0])
+            
+            lake_id_set = set(lake_ids.keys())
+            
+            missing_in_graph = lake_id_set - graph_ids
+            if missing_in_graph:
+                print(f"\n   Saknas i Graf ({len(missing_in_graph)} st):")
+                for uid in missing_in_graph:
+                    filename = lake_ids.get(uid, uid)
+                    # Visa namn utan UUID för läsbarhet
+                    display_name = filename.rsplit('_', 1)[0] if '_' in filename else filename
+                    print(f"   - {display_name}")
+                print(f"\n   Tips: Kör 'python services/my_mem_graph_builder.py' för att synka")
+        
+        del conn
+        del db
 
-    except TimeoutError as e:
-        print(f"❌ TIMEOUT: Kuzu låst för länge: {e}")
     except Exception as e:
         print(f"❌ KRITISKT FEL: Kunde inte läsa KuzuDB: {e}")
 

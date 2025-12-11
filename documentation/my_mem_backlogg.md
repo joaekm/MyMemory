@@ -140,13 +140,22 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
     * *Problem:* Transkribering skapar felstavade namn ("Sänk" istället för "Cenk Bisgen"). Systemet kan inte koppla ihop varianter.
     * *Insikt:* Med aggregerad data från flera dokument kan systemet lära sig att "Sänk" = "Cenk Bisgen".
     * *Princip:* Assets orörda, Lake stabil, **Graf lär sig över tid**.
+    * *Nyckelkoncept – Flytande Canonical:*
+        - **Canonical är inte statisk** – den är "bästa kunskapen just nu"
+        - Systemet kan börja med "Jocke" → lära sig "Joakim" → uppgradera till "Joakim Ekman"
+        - **Swap-mekanism:** Nya canonical blir `id`, gamla `id` flyttas till `aliases[]`
+        - Inget extra internt ID behövs – canonical *är* id, men kan bytas
     * *Implementation:*
-        1. **Graf-nod för Person**: `canonical_name`, `aliases[]`, `team`, `confidence`.
-        2. **Konsolidering**: Fuzzy-matcha namn över dokument, bygg alias-lista.
-        3. **Sök-tid**: Slå upp aliases och sök efter ALLA varianter.
-        4. **Explicit feedback:** Användaren kan säga "Cenk = Sänk" direkt i chatten.
-    * *Exempel:* Fråga om "Cenk" → söker "Sänk", "Cenk", "Bisgen", "Cenk Bisgen".
-    * *Koppling:* Del av OBJEKT-48 ("Dreaming") – alias-learning är ett specialfall av "synapser".
+        1. **Entity-tabell i Graf:** `id` (canonical), `type`, `aliases[]`
+        2. **Sök-tid:** Slå upp aliases och sök efter ALLA varianter
+        3. **Lärdom via sessioner:** Se OBJEKT-48 – sessioner extraherar alias-kopplingar
+        4. **LLM bedömer trovärdighet:** Ingen hårdkodad källranking – LLM resonerar i lärdomsögonblicket
+    * *Exempel (swap):*
+        ```
+        Före:  id="Jocke", aliases=["Joakim"]
+        Efter: id="Joakim Ekman", aliases=["Jocke", "Joakim"]
+        ```
+    * *Koppling:* Del av OBJEKT-48 – lärdomar extraheras från sessioner som dokument.
     * *Se:* Konflikt 42 i `my_mem_koncept_logg.md`
 
 * **OBJEKT-45 (Prio 1 - Insamling):** Implementera **"Levande Metadata vid Insamling"**.
@@ -200,27 +209,36 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
         - [Model Benchmarks](https://ai.google.dev/gemini-api/docs/models)
     * *Projekt som påverkas:* `gen-lang-client-0582831621`, `gen-lang-client-0704808841`
 
-* **OBJEKT-48 (Prio 0.5 - VISION):** Implementera **"Dreaming"** (Självlärande System).
+* **OBJEKT-48 (Prio 0.5 - VISION):** Implementera **"Sessioner som Lärdomar"** (Självlärande System).
     * *Problem:* Metadata genereras vid insamling och förblir statisk. Systemet lär sig inte vad som är viktigt för användaren.
     * *Bevis (2025-12-03):* Pipeline v6.0 missade "10 december" för användartester eftersom summary/keywords saknade denna info.
-    * *Koncept:* Tre faser inspirerade av hjärnans funktion:
-        1. **VAKEN:** Samla signaler under användning (sökningar, misslyckanden, avbrott)
-        2. **DRÖMMER:** Batch-process vid omstart – skapa "synapser" (graf-relationer, taxonomi-undernoder)
-        3. **VAKNAR:** Systemet är lite bättre anpassat till användaren
-    * *Signalkällor:*
-        1. **Implicit:** Sökbeteende, avbrutna sessioner, follow-ups (lågt förtroende)
-        2. **Explicit:** Användaren säger "Cenk = Sänk" (högt förtroende, omedelbart)
-        3. **Dokument:** Nya inputs via Transcriber/Converter (medium förtroende)
-    * *Implementation:*
-        1. **Signal-loggning:** Spara sessionsdata till `session_signals.json`
-        2. **Dream-agent:** LLM analyserar signaler och genererar "synapser"
-        3. **Synaps-applicering:** Uppdatera Graf, Taxonomi, Insamlings-prioriteringar
-        4. **Explicit feedback:** Kommando i chatten för direkt kunskapsinjicering
+    * *Nyckelinsikt:* **Sessioner är bara dokument.** Samma flöde som allt annat – ingen speciallösning.
+    * *Flöde:*
+        1. **Session avslutas** → sparas som Lake-dokument
+        2. **LLM extraherar lärdomar** till YAML-header (entities, aliases, kopplingar)
+        3. **Graf-builder indexerar** → systemet har lärt sig
+    * *Header-format för lärdomar:*
+        ```yaml
+        learned_entities:
+          - canonical: "Joakim Ekman"
+            aliases: ["Jocke", "Joakim"]
+            type: "Person"
+            confidence: high
+            reason: "Användaren angav fullständigt namn"
+        ```
+    * *LLM bedömer trovärdighet:*
+        - Ingen hårdkodad källranking
+        - LLM har kontexten (källa, namnformat, befintlig kunskap)
+        - LLM resonerar: "Fullständigt namn från intern Slack-kanal = hög trovärdighet"
+    * *Vad som INTE behövs:*
+        - ~~`session_signals.json`~~ – sessioner är dokument i Lake
+        - ~~Separat signal-loggning~~ – allt går genom samma pipeline
+        - ~~Hårdkodade regler för källtrovärdighet~~ – LLM bedömer
     * *Koppling till andra objekt:*
-        - OBJEKT-44: Entity Resolution är ett specialfall av "synapser"
-        - OBJEKT-45: "Dreaming" förbättrar vad som extraheras vid insamling
+        - OBJEKT-44: Entity Resolution – canonical swap baserat på lärdomar
+        - OBJEKT-45: Context Injection – kända entiteter injiceras vid insamling
         - OBJEKT-46: Pipeline drar nytta av rikare metadata
-    * *Framgångskriterium:* Systemet presterar mätbart bättre efter varje "dröm"-cykel.
+    * *Framgångskriterium:* Systemet lär sig alias-kopplingar från sessioner utan manuell input.
     * *Se:* Konflikt 46 i `my_mem_koncept_logg.md`
 
 * **OBJEKT-49 (Prio 1 - ARKITEKTUR):** Implementera **"MyMemory Engine"** (API-separation).
@@ -259,22 +277,6 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
         - OBJEKT-48: Dreaming körs i Engine, inte klient
         - OBJEKT-44: Entity Resolution sker server-side
     * *Framgångskriterium:* CLI-klienten importerar endast `MyMemEngine` och gör `engine.query()`.
-
-* **OBJEKT-50 (Prio 1 - TEKNISK SKULD):** Verifiera och dokumentera **"Självläkande Kedjor"**.
-    * *Bakgrund:* Systemet har två "självläkande" kedjor som inte är dokumenterade:
-        1. **Doc Converter:** Vid omstart skannas Assets → filer som saknas i Lake processas.
-        2. **Graph Builder:** Vid omstart skannas Lake → noder som saknas i Graf skapas.
-    * *Problem:* 
-        - Kedjorna är inte dokumenterade (hur de fungerar, edge cases)
-        - Det ligger stökiga filer i Lake med filnamnstillägg (`.md.md`, `.pdf.md`?) som orsakar dataproblem
-        - "Dreaming"-kedjan (OBJEKT-48) är inte implementerad men refereras
-    * *Uppgifter:*
-        1. Dokumentera självläkande kedjor i `my_mem_arkitektur.md`
-        2. Städa Lake från dubbletter och felaktiga filnamn
-        3. Verifiera att kedjan Assets → Lake → Vector → Graf fungerar helautomatiskt
-        4. Lägg till validering i `tool_validate_system.py` för filnamnsformat
-    * *Koppling:* OBJEKT-48 (Dreaming), OBJEKT-49 (Engine)
-    * *Framgångskriterium:* Systemet kan startas från scratch och bygga alla index automatiskt utan manuella ingrepp.
 
 * **OBJEKT-32 (Prio 2):** Implementera **"Quick Save"** (Read/Write) i Chatten.
     * *Mål:* Möjlighet att spara text/tankar direkt till `Assets` inifrån chatten ("Kom ihåg att...").

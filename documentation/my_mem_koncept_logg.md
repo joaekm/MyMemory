@@ -422,17 +422,23 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
     ┌─────────────────────────────────────────────────────────┐
     │ INDEX/GRAF (levande - lär sig över tid)                │
     │                                                         │
-    │  Person: Cenk Bisgen                                   │
-    │  ├── canonical_name: "Cenk Bisgen"                     │
-    │  ├── aliases: ["Sänk", "Cenk", "Bisgen", "Senk"]      │
-    │  ├── team: Drive                                       │
-    │  ├── confidence: 0.95                                  │
-    │  └── learned_from: [doc1, doc2, doc3...]              │
+    │  Entity: id="Cenk Bisgen", type="Person"               │
+    │  └── aliases: ["Sänk", "Cenk", "Bisgen", "Senk"]      │
     │                                                         │
     └─────────────────────────────────────────────────────────┘
     ```
 
 * **Insikt:** Grafen är det enda lagret som ska "lära sig" över tid. Assets och Lake förblir stabila.
+
+* **Flytande Canonical (2025-12-11):**
+    - Canonical är INTE statisk – den är "bästa kunskapen just nu"
+    - Systemet kan börja med "Jocke" → lära sig "Joakim" → uppgradera till "Joakim Ekman"
+    - **Swap-mekanism:** Nya canonical blir `id`, gamla `id` flyttas till `aliases[]`
+    - Inget extra internt ID behövs
+    ```
+    Före:  id="Jocke", aliases=["Joakim"]
+    Efter: id="Joakim Ekman", aliases=["Jocke", "Joakim"]
+    ```
 
 * **Användningsfall vid sökning:**
     1. Användaren frågar: "Vad sa Cenk på mötet?"
@@ -622,42 +628,45 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
     ```
     Alla dessa borde förstärka varandra i en **levande cykel**.
 
-* **Konceptet "Dreaming" (Hjärnmetafor):**
+* **Nyckelinsikt (2025-12-11): Sessioner är bara dokument.**
+    
+    Ingen separat `session_signals.json`. Sessioner går genom samma flöde som allt annat:
     ```
     ┌─────────────────────────────────────────────────────────────┐
-    │ VAKEN (Användande)                                          │
+    │ Session avslutas                                            │
     ├─────────────────────────────────────────────────────────────┤
-    │ Systemet samlar "signaler":                                │
-    │ • Vilka sökningar gjordes?                                 │
-    │ • Vilka dokument hittades/missades?                        │
-    │ • Vilka sessioner avbröts (frustration)?                   │
-    │ • Vilka entiteter refererades ofta?                        │
+    │ Sparas som Lake-dokument med YAML-header                   │
     └─────────────────────────────────────────────────────────────┘
                               ↓
     ┌─────────────────────────────────────────────────────────────┐
-    │ DRÖMMER (Vid omstart / schemalagt)                         │
+    │ LLM extraherar lärdomar till header                        │
     ├─────────────────────────────────────────────────────────────┤
-    │ LLM processar signalerna och skapar "synapser":            │
-    │ • Nya kopplingar i grafen (aliases, relationer)            │
-    │ • Förfinade undernoder i taxonomin                         │
-    │ • Justerade prioriteringar för metadata-extraktion         │
-    │ • Flaggade dokument för re-indexering                      │
+    │ learned_entities:                                          │
+    │   - canonical: "Joakim Ekman"                              │
+    │     aliases: ["Jocke", "Joakim"]                           │
+    │     confidence: high                                        │
+    │     reason: "Användaren angav fullständigt namn"           │
     └─────────────────────────────────────────────────────────────┘
                               ↓
     ┌─────────────────────────────────────────────────────────────┐
-    │ VAKNAR (Nästa session)                                     │
+    │ Graf-builder indexerar                                      │
     ├─────────────────────────────────────────────────────────────┤
-    │ Systemet är lite bättre anpassat till användaren:          │
-    │ • Graf har nya relationer                                  │
-    │ • Taxonomi har relevanta undernoder                        │
-    │ • Insamling vet vad som är viktigt                         │
+    │ • Systemet har lärt sig                                    │
+    │ • Canonical kan uppgraderas (swap)                         │
+    │ • Aliases läggs till                                        │
     └─────────────────────────────────────────────────────────────┘
     ```
 
-* **Tre signalkällor:**
-    1. **Implicit (observation):** Sökbeteende, avbrott, follow-ups – lågt förtroende, kräver mönster
-    2. **Explicit (direkt feedback):** Användaren säger "Cenk och Sänk är samma person" – högt förtroende, omedelbart
-    3. **Dokument (nya inputs):** Transkriptioner, Slack, dokument – medium förtroende
+* **Flytande Canonical (OBJEKT-44):**
+    - Canonical är inte statisk – den är "bästa kunskapen just nu"
+    - "Jocke" → "Joakim" → "Joakim Ekman"
+    - **Swap:** Nya canonical blir `id`, gamla `id` flyttas till `aliases[]`
+    - Inget extra internt ID behövs
+
+* **LLM bedömer trovärdighet:**
+    - Ingen hårdkodad källranking
+    - LLM har kontexten: källa, namnformat, befintlig kunskap från graf
+    - LLM resonerar: "Fullständigt namn från intern Slack-kanal = hög trovärdighet"
 
 * **Explicit feedback i chatten:**
     ```
@@ -666,13 +675,13 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
     ```
 
 * **Koppling till andra objekt:**
-    - **OBJEKT-45 (Insamling):** "Dreaming" förbättrar vad som extraheras vid nästa insamling
-    - **OBJEKT-46 (Användande):** Pipeline v6.0 drar nytta av rikare metadata
-    - **OBJEKT-44 (Lärande):** Entity Resolution är ett specialfall av "synapser"
+    - **OBJEKT-44 (Lärande):** Entity Resolution med flytande canonical
+    - **OBJEKT-45 (Insamling):** Context Injection – kända entiteter injiceras vid insamling
+    - **OBJEKT-46 (Användande):** Pipeline drar nytta av rikare metadata
 
-* **Slutsats:** Systemet ska inte bara lagra och söka – det ska **lära sig och anpassa sig** till användaren över tid. Taxonomins huvudnoder förblir fasta (för framtida delning), men undernoder och grafen växer organiskt.
+* **Slutsats:** Systemet lär sig genom att behandla sessioner som dokument. Samma pipeline, ingen speciallösning. Grafen växer organiskt.
 
-* **Backlogg:** OBJEKT-48 (Dreaming / Självlärande System)
+* **Backlogg:** OBJEKT-48 (Sessioner som Lärdomar)
 
 ---
 

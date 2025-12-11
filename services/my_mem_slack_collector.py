@@ -25,11 +25,12 @@ def ladda_yaml(filnamn, strict=True):
 
 CONFIG = ladda_yaml('my_mem_config.yaml', strict=True)
 
+TZ_NAME = CONFIG.get('system', {}).get('timezone', 'UTC')
 try:
-    TZ_NAME = CONFIG.get('system', {}).get('timezone', 'UTC')
     SYSTEM_TZ = zoneinfo.ZoneInfo(TZ_NAME)
 except Exception as e:
-    SYSTEM_TZ = datetime.timezone.utc
+    print(f"[CRITICAL] HARDFAIL: Ogiltig timezone '{TZ_NAME}': {e}")
+    exit(1)
 
 ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])
 LOG_FILE = os.path.expanduser(CONFIG['logging']['log_file_path'])
@@ -98,7 +99,9 @@ def fetch_replies(channel_id, thread_ts):
     try:
         result = CLIENT.conversations_replies(channel=channel_id, ts=thread_ts)
         return result["messages"][1:] if len(result["messages"]) > 0 else []
-    except: return []
+    except Exception as e:
+        LOGGER.error(f"HARDFAIL: Kunde inte hämta trådsvar för {thread_ts}: {e}")
+        raise RuntimeError(f"HARDFAIL: Kunde inte hämta trådsvar") from e
 
 def archive_day(channel_id, target_date):
     date_str = target_date.strftime('%Y-%m-%d')
@@ -181,7 +184,12 @@ if __name__ == "__main__":
             for i in range(1, HISTORY_DAYS + 1):
                 target_date = today - datetime.timedelta(days=i)
                 for channel in CHANNELS:
-                    try: archive_day(channel, target_date)
-                    except: pass
+                    try: 
+                        archive_day(channel, target_date)
+                    except Exception as e:
+                        LOGGER.error(f"HARDFAIL: Arkivering misslyckades för {channel} {target_date}: {e}")
+                        raise
             time.sleep(POLL_INTERVAL)
-    except KeyboardInterrupt: pass
+    except KeyboardInterrupt:
+        print(f"\n{_ts()} Slack Collector avslutad.")
+        LOGGER.info("Slack Collector avslutad av användare")

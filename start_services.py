@@ -83,16 +83,19 @@ def quick_health_check():
     except:
         vector_status = "offline"
     
-    # Räkna KuzuDB (använder KuzuSession för säker stängning)
+    # Räkna KuzuDB
     graph_count = 0
     graph_status = "?"
     try:
-        from services.my_mem_graph_builder import KuzuSession
-        with KuzuSession(kuzu_path, timeout=10, caller="health_check") as conn:
-            res = conn.execute("MATCH (u:Unit) RETURN count(u)").get_next()
-            graph_count = res[0]
-            graph_status = "✓" if graph_count == lake_count else f"⚠️ diff {abs(graph_count - lake_count)}"
-    except Exception:
+        import kuzu
+        db = kuzu.Database(kuzu_path)
+        conn = kuzu.Connection(db)
+        res = conn.execute("MATCH (u:Unit) RETURN count(u)").get_next()
+        graph_count = res[0]
+        graph_status = "✓" if graph_count == lake_count else f"⚠️ diff {abs(graph_count - lake_count)}"
+        del conn
+        del db
+    except:
         graph_status = "offline"
     
     # Bygg statusrad

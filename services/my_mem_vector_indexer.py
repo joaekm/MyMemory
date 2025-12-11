@@ -46,11 +46,12 @@ LOG_FILE = CONFIG['logging']['log_file_path']
 UUID_SUFFIX_PATTERN = re.compile(r'_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.md$')
 
 # Tidszon
+TZ_NAME = CONFIG.get('system', {}).get('timezone', 'UTC')
 try:
-    TZ_NAME = CONFIG.get('system', {}).get('timezone', 'UTC')
     SYSTEM_TZ = zoneinfo.ZoneInfo(TZ_NAME)
-except:
-    SYSTEM_TZ = datetime.timezone.utc
+except Exception as e:
+    print(f"[CRITICAL] HARDFAIL: Ogiltig timezone '{TZ_NAME}': {e}")
+    exit(1)
 
 # Logging (endast till fil, tight logging till konsol)
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)

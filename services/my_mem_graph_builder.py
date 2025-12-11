@@ -46,68 +46,19 @@ LOGGER.addHandler(logging.StreamHandler())
 
 UUID_SUFFIX_PATTERN = re.compile(r'_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.md$')
 
-import gc
-
-# === KUZU SESSION (Context Manager för säker DB-access) ===
-
-class KuzuSession:
-    """
-    Context manager för säker Kuzu-access.
-    
-    Principer:
-    - Den som öppnar stänger också. ALLTID.
-    - Kort session - håll låset så kort tid som möjligt.
-    - Timeout med hardfail om låst för länge.
-    - Loggar öppning/stängning för debugging.
-    
-    Användning:
-        with KuzuSession(KUZU_PATH, caller="health_check") as conn:
-            result = conn.execute("MATCH (u:Unit) RETURN count(u)")
-    """
-    
-    def __init__(self, path=None, timeout=30, caller="unknown"):
-        self.path = path or KUZU_PATH
-        self.timeout = timeout
-        self.caller = caller
-        self.db = None
-        self.conn = None
-    
-    def __enter__(self):
-        start = time.time()
-        while True:
-            try:
-                self.db = kuzu.Database(self.path)
-                self.conn = kuzu.Connection(self.db)
-                LOGGER.info(f"Kuzu ÖPPNAD av [{self.caller}]")
-                return self.conn
-            except Exception as e:
-                elapsed = time.time() - start
-                if elapsed > self.timeout:
-                    LOGGER.error(f"HARDFAIL: Kuzu låst i {self.timeout}s. Caller: {self.caller}. Error: {e}")
-                    raise TimeoutError(f"HARDFAIL: Kuzu låst i {self.timeout}s. Caller: {self.caller}. Error: {e}")
-                LOGGER.warning(f"Kuzu låst, väntar... ({self.caller}, {elapsed:.1f}s)")
-                time.sleep(1)
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.conn:
-            del self.conn
-            self.conn = None
-        if self.db:
-            del self.db
-            self.db = None
-        gc.collect()
-        LOGGER.info(f"Kuzu STÄNGD av [{self.caller}]")
-        return False  # Propagera exceptions
-
-
 # --- GRAPH ENGINE ---
 
 def process_lake_batch():
     """Huvudloop för grafbyggande - Nu med DIRECT LINKING (v4.1)"""
     
-    os.makedirs(os.path.dirname(KUZU_PATH), exist_ok=True)
+    db = None
+    conn = None
     
-    with KuzuSession(caller="GraphBuilder.process_lake_batch") as conn:
+    try:
+        os.makedirs(os.path.dirname(KUZU_PATH), exist_ok=True)
+        db = kuzu.Database(KUZU_PATH)
+        conn = kuzu.Connection(db)
+        
         _init_schema(conn)
         
         files_processed = 0
@@ -175,36 +126,111 @@ def process_lake_batch():
 
         print(f"✅ Klar. {files_processed} filer bearbetade. {relations_created} master-kopplingar skapade.")
 
+    except Exception as main_e:
+        LOGGER.error(f"Kritiskt fel i Graf-loopen: {main_e}")
+
+    finally:
+        try:
+            if conn: del conn
+            if db: del db
+            import gc
+            gc.collect()
+        except Exception as e:
+            LOGGER.error(f"HARDFAIL: Kunde inte städa upp databasanslutning: {e}")
+            raise RuntimeError(f"HARDFAIL: Kunde inte städa upp databasanslutning: {e}") from e
+
+def _safe_create_table(conn, create_statement: str, table_name: str):
+    """
+    Skapa tabell om den inte finns. Hardfail vid andra fel.
+    
+    Kuzu kastar exception om tabellen redan finns - detta är OK.
+    Alla ANDRA fel ska hardfaila.
+    """
+    try:
+        conn.execute(create_statement)
+        LOGGER.info(f"Skapade tabell: {table_name}")
+    except Exception as e:
+        error_str = str(e).lower()
+        # Kända "OK"-fel: tabellen finns redan
+        if "already exists" in error_str or "duplicate" in error_str or "catalog exception" in error_str:
+            LOGGER.debug(f"Tabell finns redan: {table_name}")
+        else:
+            LOGGER.error(f"HARDFAIL: Kunde inte skapa tabell {table_name}: {e}")
+            raise RuntimeError(f"HARDFAIL: Kunde inte skapa tabell {table_name}: {e}") from e
+
+
 def _init_schema(conn):
     # Befintliga tabeller
-    try: conn.execute("CREATE NODE TABLE Unit(id STRING, timestamp STRING, type STRING, summary STRING, PRIMARY KEY (id))")
-    except: pass
-    try: conn.execute("CREATE NODE TABLE Concept(id STRING, PRIMARY KEY (id))")
-    except: pass
-    try: conn.execute("CREATE NODE TABLE Person(id STRING, PRIMARY KEY (id))")
-    except: pass
+    _safe_create_table(conn, 
+        "CREATE NODE TABLE Unit(id STRING, timestamp STRING, type STRING, summary STRING, PRIMARY KEY (id))",
+        "Unit")
+    _safe_create_table(conn,
+        "CREATE NODE TABLE Concept(id STRING, PRIMARY KEY (id))",
+        "Concept")
+    _safe_create_table(conn,
+        "CREATE NODE TABLE Person(id STRING, PRIMARY KEY (id))",
+        "Person")
     
     # NY: Entity-tabell med aliases (för alla entitetstyper)
     # type: Kategori från taxonomin (Person, Aktör, Projekt, etc.)
     # aliases: Lista med alternativa namn (smeknamn, förkortningar, felstavningar)
-    try: conn.execute("CREATE NODE TABLE Entity(id STRING, type STRING, aliases STRING[], PRIMARY KEY (id))")
-    except: pass
+    _safe_create_table(conn,
+        "CREATE NODE TABLE Entity(id STRING, type STRING, aliases STRING[], PRIMARY KEY (id))",
+        "Entity")
     
     # Befintliga relationer
-    try: conn.execute("CREATE REL TABLE DEALS_WITH(FROM Unit TO Concept)")
-    except: pass
-    try: conn.execute("CREATE REL TABLE PART_OF(FROM Unit TO Concept)")
-    except: pass
-    try: conn.execute("CREATE REL TABLE CREATED_BY(FROM Unit TO Person)")
-    except: pass
+    _safe_create_table(conn,
+        "CREATE REL TABLE DEALS_WITH(FROM Unit TO Concept)",
+        "DEALS_WITH")
+    _safe_create_table(conn,
+        "CREATE REL TABLE PART_OF(FROM Unit TO Concept)",
+        "PART_OF")
+    _safe_create_table(conn,
+        "CREATE REL TABLE CREATED_BY(FROM Unit TO Person)",
+        "CREATED_BY")
     
     # NY: Relationer för Entity
-    try: conn.execute("CREATE REL TABLE UNIT_MENTIONS(FROM Unit TO Entity)")
-    except: pass
+    _safe_create_table(conn,
+        "CREATE REL TABLE UNIT_MENTIONS(FROM Unit TO Entity)",
+        "UNIT_MENTIONS")
 
 
 # === ENTITY FUNCTIONS (Aliases i grafen) ===
-# Använder KuzuSession för säker DB-access (ingen singleton!)
+
+# Singleton för databas-anslutning (KRITISKT: Undvik att öppna/stänga konstant)
+_DB_INSTANCE = None
+_CONN_INSTANCE = None
+_SCHEMA_INITIALIZED = False
+
+def _get_db_connection():
+    """Singleton-anslutning till KuzuDB. Återanvänds för alla queries."""
+    global _DB_INSTANCE, _CONN_INSTANCE, _SCHEMA_INITIALIZED
+    
+    if _CONN_INSTANCE is not None:
+        return _DB_INSTANCE, _CONN_INSTANCE
+    
+    _DB_INSTANCE = kuzu.Database(KUZU_PATH)
+    _CONN_INSTANCE = kuzu.Connection(_DB_INSTANCE)
+    
+    if not _SCHEMA_INITIALIZED:
+        _init_schema(_CONN_INSTANCE)
+        _SCHEMA_INITIALIZED = True
+    
+    return _DB_INSTANCE, _CONN_INSTANCE
+
+
+def close_db_connection():
+    """Stäng databas-anslutningen explicit. Anropas vid shutdown."""
+    global _DB_INSTANCE, _CONN_INSTANCE, _SCHEMA_INITIALIZED
+    if _CONN_INSTANCE:
+        del _CONN_INSTANCE
+        _CONN_INSTANCE = None
+    if _DB_INSTANCE:
+        del _DB_INSTANCE
+        _DB_INSTANCE = None
+    _SCHEMA_INITIALIZED = False
+    import gc; gc.collect()
+
 
 def get_entity(canonical: str) -> dict:
     """
@@ -213,7 +239,9 @@ def get_entity(canonical: str) -> dict:
     Returns:
         dict med id, type, aliases eller None
     """
-    with KuzuSession(caller="get_entity") as conn:
+    try:
+        _, conn = _get_db_connection()
+        
         result = conn.execute(
             "MATCH (e:Entity {id: $id}) RETURN e.id, e.type, e.aliases",
             {"id": canonical}
@@ -227,6 +255,9 @@ def get_entity(canonical: str) -> dict:
                 "aliases": row[2] or []
             }
         return None
+    except Exception as e:
+        LOGGER.error(f"get_entity error: {e}")
+        return None
 
 
 def get_canonical_from_graph(variant: str) -> str:
@@ -239,7 +270,9 @@ def get_canonical_from_graph(variant: str) -> str:
     Returns:
         Canonical name eller None
     """
-    with KuzuSession(caller="get_canonical_from_graph") as conn:
+    try:
+        _, conn = _get_db_connection()
+        
         # Kolla om det är ett alias
         result = conn.execute(
             "MATCH (e:Entity) WHERE list_contains(e.aliases, $variant) RETURN e.id",
@@ -259,6 +292,9 @@ def get_canonical_from_graph(variant: str) -> str:
             return result.get_next()[0]
         
         return None
+    except Exception as e:
+        LOGGER.error(f"get_canonical_from_graph error: {e}")
+        return None
 
 
 def add_entity_alias(canonical: str, alias: str, entity_type: str) -> bool:
@@ -274,7 +310,9 @@ def add_entity_alias(canonical: str, alias: str, entity_type: str) -> bool:
     Returns:
         True om lyckad
     """
-    with KuzuSession(caller="add_entity_alias") as conn:
+    try:
+        _, conn = _get_db_connection()
+        
         # Kolla om Entity finns
         result = conn.execute(
             "MATCH (e:Entity {id: $id}) RETURN e.aliases",
@@ -303,6 +341,9 @@ def add_entity_alias(canonical: str, alias: str, entity_type: str) -> bool:
             LOGGER.info(f"Skapade Entity '{canonical}' med alias '{alias}'")
         
         return True
+    except Exception as e:
+        LOGGER.error(f"add_entity_alias error: {e}")
+        return False
 
 
 def get_all_entities() -> list:
@@ -312,7 +353,9 @@ def get_all_entities() -> list:
     Returns:
         Lista med {id, type, aliases}
     """
-    with KuzuSession(caller="get_all_entities") as conn:
+    try:
+        _, conn = _get_db_connection()
+        
         result = conn.execute("MATCH (e:Entity) RETURN e.id, e.type, e.aliases")
         
         entities = []
@@ -325,8 +368,11 @@ def get_all_entities() -> list:
             })
         
         return entities
+    except Exception as e:
+        LOGGER.error(f"get_all_entities error: {e}")
+        return []
 
 
 if __name__ == "__main__":
-    print("--- MyMem Graph Builder (v4.2 - KuzuSession) ---")
+    print("--- MyMem Graph Builder (v4.1 - Explicit Tagging) ---")
     process_lake_batch()

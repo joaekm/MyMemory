@@ -24,10 +24,42 @@ try:
     from services.context_builder import build_context
     from services.planner import create_report
 except ImportError:
-    # Fallback för direkt körning
-    from intent_router import route_intent
-    from context_builder import build_context
-    from planner import create_report
+    # Direkt körning - försök importera utan services-prefix
+    try:
+        from intent_router import route_intent
+        from context_builder import build_context
+        from planner import create_report
+    except ImportError as e:
+        raise ImportError(f"HARDFAIL: Kan inte importera pipeline-moduler: {e}") from e
+
+# Entity Register (OBJEKT-44) - ännu ej implementerat
+# HARDFAIL: Dessa moduler måste skapas innan chatten kan köras
+try:
+    from services.entity_register import add_alias, get_canonical, get_known_entities
+except ImportError:
+    try:
+        from entity_register import add_alias, get_canonical, get_known_entities
+    except ImportError as e:
+        raise ImportError(
+            "HARDFAIL: entity_register.py saknas. "
+            "Skapa modulen enligt OBJEKT-44 i backloggen."
+        ) from e
+
+# Session Logger (OBJEKT-48) - ännu ej implementerat
+try:
+    from services.session_logger import (
+        start_session, end_session, log_search, log_feedback, log_abort
+    )
+except ImportError:
+    try:
+        from session_logger import (
+            start_session, end_session, log_search, log_feedback, log_abort
+        )
+    except ImportError as e:
+        raise ImportError(
+            "HARDFAIL: session_logger.py saknas. "
+            "Skapa modulen enligt OBJEKT-48 i backloggen."
+        ) from e
 
 import re
 
@@ -63,12 +95,10 @@ CONFIG = hitta_och_ladda_config()
 
 # --- PROMPT LOADER ---
 def ladda_chat_prompts():
-    user_path = os.path.expanduser("/Users/jekman/Projects/MyMemory/config/chat_prompts.yaml")
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
-        user_path,
+        os.path.join(script_dir, '..', 'config', 'chat_prompts.yaml'),
         os.path.join(script_dir, 'config', 'chat_prompts.yaml'),
-        os.path.join(script_dir, '..', 'config', 'chat_prompts.yaml')
     ]
     for p in paths:
         if os.path.exists(p):
@@ -76,10 +106,8 @@ def ladda_chat_prompts():
                 with open(p, 'r', encoding='utf-8') as f:
                     return yaml.safe_load(f)
             except Exception as e:
-                print(f"[Chat] ERROR loading prompts from {p}: {e}")
-                break
-    print("[Chat] CRITICAL: Could not load chat_prompts.yaml")
-    exit(1)
+                raise RuntimeError(f"HARDFAIL: Kunde inte ladda prompts från {p}: {e}") from e
+    raise FileNotFoundError("HARDFAIL: chat_prompts.yaml hittades inte")
 
 PROMPTS = ladda_chat_prompts()
 
@@ -211,12 +239,29 @@ def _handle_feedback(canonical: str, alias: str, entity_type: str) -> str:
     """
     Hantera bekräftad feedback genom att spara alias.
     
-    NOTE: Entity-learning (OBJEKT-44) är inte implementerat ännu.
-    Returnerar info om att funktionen är inaktiv.
+    Returns:
+        Bekräftelsemeddelande till användaren
     """
-    # TODO: Implementera via KuzuDB (add_entity_alias i my_mem_graph_builder)
-    LOGGER.info(f"Feedback mottagen men ej sparad (OBJEKT-44 ej klar): {alias} -> {canonical}")
-    return f"⚠️ Alias-learning är inte aktivt ännu. Noterade: '{alias}' = '{canonical}'"
+    try:
+        add_alias(canonical, alias, source="user", entity_type=entity_type)
+        
+        # Logga feedback för Dreaming
+        log_feedback(canonical, alias, entity_type, source="user")
+        
+        # Mappa taxonomins kategorier till läsbara svenska namn
+        type_names = {
+            "Person": "person",
+            "Aktör": "organisation",
+            "Projekt": "projekt",
+            "Teknologier": "produkt",
+            "Metodik": "koncept"
+        }
+        type_name = type_names.get(entity_type, "entitet")
+        
+        return f"✓ Noterat! Nästa gång jag hör '{alias}' skriver jag '{canonical}' ({type_name})."
+    except Exception as e:
+        LOGGER.error(f"Kunde inte spara alias: {e}")
+        return f"✗ Kunde inte spara aliaset: {e}"
 
 
 # --- STEP 2a: THE HUNTER ---
@@ -227,7 +272,9 @@ def search_lake(keywords):
     
     try:
         files = [f for f in os.listdir(LAKE_PATH) if f.endswith('.md')]
-    except: return {}
+    except Exception as e:
+        LOGGER.error(f"HARDFAIL: Kunde inte lista filer i Lake: {e}")
+        raise RuntimeError(f"HARDFAIL: Kunde inte lista filer i Lake: {e}") from e
     
     for filename in files:
         filepath = os.path.join(LAKE_PATH, filename)
@@ -241,7 +288,9 @@ def search_lake(keywords):
                     try:
                         summary_part = content.split("summary:")[1].split("\n")[0].strip()
                         if len(summary_part) > 5: summary = summary_part
-                    except: pass
+                    except Exception as e:
+                        LOGGER.error(f"HARDFAIL: Kunde inte parsa summary i {filename}: {e}")
+                        raise RuntimeError(f"HARDFAIL: Kunde inte parsa summary i {filename}") from e
 
                 for kw in keywords:
                     if kw.lower() in content_lower:
@@ -259,7 +308,9 @@ def search_lake(keywords):
                             "score": 1.0
                         }
                         break 
-        except: continue
+        except Exception as e:
+            LOGGER.error(f"HARDFAIL: Kunde inte läsa fil {filename}: {e}")
+            raise RuntimeError(f"HARDFAIL: Kunde inte läsa fil {filename}") from e
     return hits
 
 # --- STEP 1: PLANERING ---
@@ -469,7 +520,9 @@ def execute_pipeline(query, chat_history, debug_mode=False, debug_trace=None):
              try:
                  with open(os.path.join(LAKE_PATH, doc['filename']), 'r') as f:
                      content = f.read()
-             except: pass
+             except Exception as e:
+                 LOGGER.error(f"HARDFAIL: Kunde inte läsa fil {doc['filename']}: {e}")
+                 raise RuntimeError(f"HARDFAIL: Kunde inte läsa fil {doc['filename']}") from e
         
         entry = f"--- DOKUMENT ({doc['source']}) ---\nID: {uid}\nFIL: {doc['filename']}\nINNEHÅLL:\n{content}\n"
         
@@ -531,8 +584,8 @@ def execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=None)
     intent_data = route_intent(query, chat_history, debug_trace=debug_trace)
     
     if intent_data.get('status') == 'ERROR':
-        LOGGER.error(f"IntentRouter HARDFAIL: {intent_data.get('reason')}")
-        # Fortsätt ändå med fallback-värden
+        LOGGER.error(f"HARDFAIL: IntentRouter misslyckades: {intent_data.get('reason')}")
+        raise RuntimeError(f"HARDFAIL: IntentRouter misslyckades: {intent_data.get('reason')}")
     
     if debug_mode:
         debug_content = f"[bold]Intent:[/bold] {intent_data.get('intent')}\n"
@@ -546,6 +599,16 @@ def execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=None)
         console.print("[dim]→ ContextBuilder...[/dim]")
     
     context_result = build_context(intent_data, debug_trace=debug_trace)
+    
+    # Logga sökning för Dreaming
+    stats = context_result.get('stats', {})
+    total_hits = stats.get('lake_hits', 0) + stats.get('vector_hits', 0)
+    log_search(
+        query=query,
+        keywords=intent_data.get('keywords', []),
+        hits=total_hits,
+        intent=intent_data.get('intent', 'RELAXED')
+    )
     
     if context_result.get('status') == 'NO_RESULTS':
         if debug_mode:
@@ -735,8 +798,9 @@ def _save_session_to_assets(chat_history: list, reason: str = "normal") -> str:
     if not chat_history:
         return None
     
-    # Skapa sessions-mapp i Assets
-    assets_path = os.path.expanduser("~/MyMemory/Assets/sessions")
+    # Skapa sessions-mapp i Assets (läs från config)
+    assets_base = CONFIG['paths'].get('asset_store', os.path.expanduser("~/MyMemory/Assets"))
+    assets_path = os.path.join(assets_base, "sessions")
     os.makedirs(assets_path, exist_ok=True)
     
     # Filnamn med timestamp
@@ -888,7 +952,9 @@ def chat_loop(debug_mode=False, use_v6=True):
                 chat_history.append({"role": "user", "content": query})
                 chat_history.append({"role": "assistant", "content": collected_text})
             except Exception as e:
+                LOGGER.error(f"HARDFAIL: AI-syntes misslyckades: {e}")
                 console.print(f"[red]AI-fel: {e}[/red]")
+                raise RuntimeError(f"HARDFAIL: AI-syntes misslyckades: {e}") from e
     
     except KeyboardInterrupt:
         # Spara session till Assets (DocConverter hanterar Lake)

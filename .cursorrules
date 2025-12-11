@@ -1,6 +1,27 @@
 # MyMemory Development Rules
 
-## Princip 1: HARDFAIL > Silent Fallback
+## Princip 1: Kör Validator Efter Varje Ändring
+
+**Efter VARJE kodändring ska `tools/validate_rules.py` köras på den ändrade filen.**
+
+### Kommando:
+```bash
+python tools/validate_rules.py services/<ändrad_fil>.py
+```
+
+### Regler:
+1. **0 violations** krävs innan nästa fil får ändras
+2. **Validatorn får ALDRIG ändras** utan explicit tillåtelse från användaren
+3. Validatorn enforcerar automatiskt: P2 (fallbacks), P7 (promptar), P8 (taxonomi), P9 (sökvägar)
+
+### Varför?
+- Regler utan enforcement är önskemål
+- Deterministisk kod kan inte "glömma" regler
+- AI:n som skriver koden får inte ändra reglerna
+
+---
+
+## Princip 2: HARDFAIL > Silent Fallback
 
 **Inga tysta fallbacks.** Om en operation misslyckas ska systemet:
 
@@ -62,7 +83,7 @@ if not results:
 
 ---
 
-## Princip 2: Fail Fast, Fail Loud
+## Princip 3: Fail Fast, Fail Loud
 
 - Validera input tidigt
 - Kasta exceptions istället för att returnera None
@@ -70,7 +91,7 @@ if not results:
 
 ---
 
-## Princip 3: Ingen AI-cringe
+## Princip 4: Ingen AI-cringe
 
 Undvik töntiga metafornamn i kod och dokumentation:
 - ❌ "Trädgårdsmästaren", "Bibliotekarien", "Portvakten"
@@ -82,7 +103,7 @@ Behåll deskriptiva namn som faktiskt beskriver funktionen:
 
 ---
 
-## Princip 4: Stanna vid Vägval
+## Princip 5: Stanna vid Vägval
 
 **Vid implementation, avbryt och fråga användaren vid:**
 
@@ -111,7 +132,7 @@ Vad föredrar du?"
 
 ---
 
-## Princip 5: Generella Lösningar på Specifika Problem
+## Princip 6: Generella Lösningar på Specifika Problem
 
 **Vid felsökning, sök den generella orsaken - inte den specifika symptomet.**
 
@@ -148,7 +169,7 @@ Problem: "Systemet hittar inte 'Cenk' när jag söker"
 
 ---
 
-## Princip 6: Inga Hårdkodade Promptar
+## Princip 7: Inga Hårdkodade Promptar
 
 **ALLA AI-promptar ska ligga i config-filer**, aldrig i Python-kod.
 
@@ -187,7 +208,7 @@ def analyze(text):
 
 ---
 
-## Princip 7: Taxonomin är Master
+## Princip 8: Taxonomin är Master
 
 **`~/MyMemory/Index/my_mem_taxonomy.json` är källan till sanning för kategorier.**
 
@@ -241,7 +262,7 @@ VALID_ENTITY_TYPES = _load_taxonomy_categories()
 
 ---
 
-## Princip 8: Config är Sanning för Sökvägar
+## Princip 9: Config är Sanning för Sökvägar
 
 **ALLA sökvägar ska läsas från `config/my_mem_config.yaml`**, aldrig hårdkodas i kod.
 

@@ -38,11 +38,12 @@ CONFIG = ladda_yaml('my_mem_config.yaml', strict=True)
 PROMPTS = ladda_yaml('services_prompts.yaml', strict=True)
 
 # --- TIDSZON ---
+TZ_NAME = CONFIG.get('system', {}).get('timezone', 'UTC')
 try:
-    TZ_NAME = CONFIG.get('system', {}).get('timezone', 'UTC')
     SYSTEM_TZ = zoneinfo.ZoneInfo(TZ_NAME)
 except Exception as e:
-    SYSTEM_TZ = datetime.timezone.utc
+    print(f"[CRITICAL] HARDFAIL: Ogiltig timezone '{TZ_NAME}': {e}")
+    exit(1)
 
 try:
     ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])
@@ -97,15 +98,23 @@ if not API_KEY:
 AI_CLIENT = genai.Client(api_key=API_KEY)
 
 def clean_ghost_artifacts():
-    base_mem = os.path.expanduser("~/MyMemory")
+    """Städar bort gamla artefakter från tidigare versioner."""
+    # Läs base path från config
+    base_mem = os.path.dirname(ASSET_STORE)  # ~/MyMemory/Assets -> ~/MyMemory
     ghost_drop = os.path.join(base_mem, "DropZone")
     ghost_log = os.path.join(base_mem, "Logs", "dfm_system.log")
     if os.path.exists(ghost_drop):
-        try: shutil.rmtree(ghost_drop)
-        except: pass
+        try: 
+            shutil.rmtree(ghost_drop)
+            LOGGER.info(f"Städade bort gammal DropZone: {ghost_drop}")
+        except Exception as e:
+            LOGGER.warning(f"Kunde inte ta bort {ghost_drop}: {e}")
     if os.path.exists(ghost_log) and ghost_log != LOG_FILE:
-        try: os.remove(ghost_log)
-        except: pass
+        try: 
+            os.remove(ghost_log)
+            LOGGER.info(f"Städade bort gammal loggfil: {ghost_log}")
+        except Exception as e:
+            LOGGER.warning(f"Kunde inte ta bort {ghost_log}: {e}")
 
 def fa_fil_skapad_datum(filväg):
     try:
@@ -113,8 +122,9 @@ def fa_fil_skapad_datum(filväg):
         timestamp = stat.st_birthtime if hasattr(stat, 'st_birthtime') else stat.st_mtime
         dt = datetime.datetime.fromtimestamp(timestamp, SYSTEM_TZ)
         return dt.isoformat()
-    except:
-        return datetime.datetime.now(SYSTEM_TZ).isoformat()
+    except Exception as e:
+        LOGGER.error(f"HARDFAIL: Kunde inte läsa tidsstämpel för {filväg}: {e}")
+        raise RuntimeError(f"HARDFAIL: Kunde inte läsa tidsstämpel för {filväg}") from e
 
 def safe_upload(filväg, original_namn):
     safe_path = None
@@ -138,11 +148,11 @@ def stada_och_parsa_json(text_response):
         if match:
             text = match.group(0)
             return json.loads(text)
-        # Fallback: Försök parsa hela texten om regex missar
+        # Försök parsa hela texten om regex missar
         return json.loads(text_response)
     except Exception as e:
-        # Returnera None så att anroparen kan logga raw text
-        return None
+        LOGGER.error(f"HARDFAIL: Kunde inte parsa JSON: {e}")
+        raise ValueError(f"HARDFAIL: Kunde inte parsa JSON-svar") from e
 
 def skapa_rich_header(filnamn, skapelsedatum, model, data):
     now = datetime.datetime.now(SYSTEM_TZ).isoformat()
@@ -282,15 +292,18 @@ def processa_mediafil(filväg, filnamn):
                 )
             )
             metadata = stada_och_parsa_json(response_analysis.text)
-            if not metadata:
-                LOGGER.warning(f"JSON-parsing misslyckades för {filnamn}. RAW: {response_analysis.text[:200]}")
-            else:
-                _log("🧠", f"{kort_namn} → Pro OK")
+            _log("🧠", f"{kort_namn} → Pro OK")
+        except ValueError as e:
+            LOGGER.error(f"HARDFAIL: JSON-parsing misslyckades för {filnamn}: {e}")
+            raise
         except Exception as e:
-            LOGGER.warning(f"Metadata-analys misslyckades för {filnamn}: {e}")
-
-        if not metadata:
-            metadata = {"summary": "Analys misslyckades.", "speakers": [], "entities": []}
+            LOGGER.error(f"HARDFAIL: Metadata-analys misslyckades för {filnamn}: {e}")
+            raise RuntimeError(f"HARDFAIL: Metadata-analys misslyckades") from e
+        
+        # Validera att metadata har nödvändiga fält
+        if not metadata or not isinstance(metadata, dict):
+            LOGGER.error(f"HARDFAIL: Metadata är ogiltigt för {filnamn}")
+            raise ValueError(f"HARDFAIL: Metadata är ogiltigt för {filnamn}")
 
         # --- STEG 3: SPARA ---
         skapelsedatum = fa_fil_skapad_datum(filväg)

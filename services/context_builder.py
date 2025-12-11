@@ -125,8 +125,9 @@ def _search_lake(keywords: list) -> dict:
                     yaml_content = content[3:yaml_end]
                     metadata = yaml.safe_load(yaml_content)
                     summary = metadata.get('summary', '')[:200]
-                except:
-                    pass
+                except Exception as e:
+                    LOGGER.error(f"HARDFAIL: Kunde inte parsa YAML-header i {filename}: {e}")
+                    raise ValueError(f"HARDFAIL: Kunde inte parsa YAML-header i {filename}") from e
             
             if not summary:
                 summary = content[:200].replace("\n", " ")
