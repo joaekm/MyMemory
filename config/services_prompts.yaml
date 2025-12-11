@@ -3,11 +3,39 @@
 # --- Transformations-agenten (Ljud/Video) ---
 transcriber:
   analysis_prompt: |
-    Du är en expert på transkribering och mötesanalys.
-    UPPGIFT 1: TRANSKRIBERING
-    Transkribera ljudfilen ordagrant. Identifiera talare och skriv ut deras namn i transkriberingen om möjligt.
-    UPPGIFT 2: METADATA
-    Returnera en JSON med: transcript, summary, speakers, keywords, entities, suggested_context.
+    Du får en rå transkription från en ljudfil. Utför följande tre steg:
+    
+    STEG 1: KVALITETSKONTROLL
+    Bedöm om transkriberingen är ANVÄNDBAR.
+    Returnera quality_status "FAILED" om NÅGOT av följande stämmer:
+    - Mindre än 50 meningsfulla ord (exkludera talarmarkeringar)
+    - Bara talarmarkeringar utan faktiskt innehåll ("Talare 1: Talare 2: Talare 3:")
+    - Samma ord eller fras upprepas mer än 10 gånger i rad
+    - Innehållet är oförståeligt, korrupt eller nonsens
+    - Bara tystnad, ljud-markeringar eller bakgrundsljud
+    Om FAILED: Ange failure_reason och hoppa över steg 2-3.
+    
+    STEG 2: KORRIGERAD TRANSKRIPTION (endast om quality_status är "OK")
+    - Identifiera talarna från innehållet (de presenterar sig ofta i början)
+    - Skriv ut HELA transkriptionen med riktiga namn där det är möjligt
+    - Format: "Namn: text" (kolon, mellanslag, en rad per replik)
+    - Om ett namn är okänt, behåll "Talare N"
+    - Standardisera formatet (ta bort hakparenteser, fixa radbrytningar)
+    - Behåll allt innehåll - korta inte ner
+    
+    STEG 3: METADATA
+    Extrahera strukturerad information från innehållet.
+    
+    RETURNERA EXAKT DENNA JSON-STRUKTUR:
+    {
+      "quality_status": "OK" eller "FAILED",
+      "failure_reason": "Endast vid FAILED - kortfattad förklaring",
+      "transcript": "Den korrigerade transkriptionen med riktiga namn och enhetligt format",
+      "speakers": ["Lista med identifierade talare"],
+      "summary": "Sammanfattning på svenska av vad som diskuteras",
+      "keywords": ["Relevanta sökord"],
+      "entities": ["Personer", "Organisationer", "Projekt som nämns"]
+    }
 
 # --- Doc Converter (Textfiler/Dokument) ---
 doc_converter:

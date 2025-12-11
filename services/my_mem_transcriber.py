@@ -52,6 +52,10 @@ except KeyError as e:
     print(f"[CRITICAL] Konfigurationsfel: {e}")
     exit(1)
 
+# Mapp för misslyckade transkriptioner
+FAILED_FOLDER = os.path.join(ASSET_STORE, "failed")
+os.makedirs(FAILED_FOLDER, exist_ok=True)
+
 API_KEY = CONFIG.get('ai_engine', {}).get('api_key', '')
 MEDIA_EXTENSIONS = CONFIG.get('processing', {}).get('audio_extensions', []) 
 MODELS = CONFIG.get('ai_engine', {}).get('models', {})
@@ -154,18 +158,20 @@ def stada_och_parsa_json(text_response):
         LOGGER.error(f"HARDFAIL: Kunde inte parsa JSON: {e}")
         raise ValueError(f"HARDFAIL: Kunde inte parsa JSON-svar") from e
 
-def skapa_rich_header(filnamn, skapelsedatum, model, data):
+def skapa_rich_header(filnamn, skapelsedatum, model, data, unit_id=None):
     now = datetime.datetime.now(SYSTEM_TZ).isoformat()
     speakers = "\n- ".join(data.get('speakers', [])) or "- Inga identifierade"
     entities = "\n- ".join(data.get('entities', [])) or "- Inga identifierade"
     summary = data.get('summary', 'Ingen sammanfattning tillgänglig.')
     
-    # HÄR ÄR ÄNDRINGEN: DATUM_TID istället för INSPELAT
+    # UUID sparas i header för spårbarhet (tas bort från filnamn)
+    unit_id_line = f"UNIT_ID:       {unit_id}\n" if unit_id else ""
+    
     header = f"""================================================================================
 METADATA FRÅN TRANSKRIBERING (MyMem)
 ================================================================================
 FILNAMN:       {filnamn}
-DATUM_TID:     {skapelsedatum}
+{unit_id_line}DATUM_TID:     {skapelsedatum}
 TRANSKRIBERAT: {now}
 MODELL:        {model}
 --------------------------------------------------------------------------------
@@ -181,6 +187,18 @@ SAMMANFATTNING (Preliminär):
 
 """
     return header
+
+def _move_to_failed(filväg, filnamn, reason):
+    """Flytta ljudfil till failed-mappen."""
+    try:
+        dest = os.path.join(FAILED_FOLDER, filnamn)
+        shutil.move(filväg, dest)
+        LOGGER.warning(f"Flyttade till failed: {filnamn} - {reason}")
+        return True
+    except Exception as e:
+        LOGGER.error(f"Kunde inte flytta till failed: {filnamn} - {e}")
+        return False
+
 
 def processa_mediafil(filväg, filnamn):
     # MODELLER FRÅN CONFIG (inga hårdkodade versionsnummer)
@@ -203,14 +221,24 @@ def processa_mediafil(filväg, filnamn):
     base_name = os.path.splitext(filnamn)[0]
     kort_namn = _kort(filnamn)
     
-    if not UUID_SUFFIX_PATTERN.search(base_name):
+    # Extrahera UUID från filnamnet
+    uuid_match = UUID_SUFFIX_PATTERN.search(base_name)
+    if not uuid_match:
         LOGGER.warning(f"Skippar fil utan UUID: {filnamn}")
         with PROCESS_LOCK:
             PROCESSED_FILES.discard(filnamn)
         return
-
-    txt_fil = os.path.join(ASSET_STORE, f"{base_name}.txt")
-    if os.path.exists(txt_fil): return
+    
+    unit_id = uuid_match.group(1)
+    
+    # Nytt filnamn UTAN UUID (behåll resten av namnet)
+    clean_name = UUID_SUFFIX_PATTERN.sub('', base_name)
+    txt_fil = os.path.join(ASSET_STORE, f"{clean_name}.txt")
+    
+    # Kolla också gamla formatet för bakåtkompatibilitet
+    old_txt_fil = os.path.join(ASSET_STORE, f"{base_name}.txt")
+    if os.path.exists(txt_fil) or os.path.exists(old_txt_fil): 
+        return
 
     _log("📥", f"{kort_namn} → Upload")
     upload_file = None
@@ -235,7 +263,7 @@ def processa_mediafil(filväg, filnamn):
 
         # --- STEG 1: TRANSKRIBERING (FLASH) ---
         flash_start = time.time()
-        transcript_text = ""
+        raw_transcript = ""
         transcribe_prompt = "Transkribera ljudfilen ordagrant på svenska. Markera talare (Talare 1 osv) om du kan urskilja dem. Svara ENBART med transkriberad text."
 
         # Retry-loop för Flash
@@ -253,7 +281,7 @@ def processa_mediafil(filväg, filnamn):
                 )
                 # Robust kontroll av svaret
                 try:
-                    transcript_text = response.text
+                    raw_transcript = response.text
                 except Exception:
                     finish_reason = "Unknown"
                     if response.candidates:
@@ -270,15 +298,14 @@ def processa_mediafil(filväg, filnamn):
                 else:
                     raise e
 
-        if not transcript_text:
+        if not raw_transcript:
             raise Exception("Flash genererade ingen text.")
         
         flash_time = int(time.time() - flash_start)
         _log("⚡", f"{kort_namn} → Flash OK ({flash_time}s)")
 
-        # --- STEG 2: ANALYS (PRO) ---
-        metadata = {}
-        analysis_context = transcript_text[:100000]
+        # --- STEG 2: ANALYS + SANITY CHECK + KORRIGERING (PRO) ---
+        analysis_context = raw_transcript[:100000]
         analysis_prompt = PROMPTS['transcriber']['analysis_prompt']
 
         try:
@@ -291,7 +318,7 @@ def processa_mediafil(filväg, filnamn):
                     safety_settings=SAFETY_SETTINGS
                 )
             )
-            metadata = stada_och_parsa_json(response_analysis.text)
+            result = stada_och_parsa_json(response_analysis.text)
             _log("🧠", f"{kort_namn} → Pro OK")
         except ValueError as e:
             LOGGER.error(f"HARDFAIL: JSON-parsing misslyckades för {filnamn}: {e}")
@@ -300,18 +327,31 @@ def processa_mediafil(filväg, filnamn):
             LOGGER.error(f"HARDFAIL: Metadata-analys misslyckades för {filnamn}: {e}")
             raise RuntimeError(f"HARDFAIL: Metadata-analys misslyckades") from e
         
-        # Validera att metadata har nödvändiga fält
-        if not metadata or not isinstance(metadata, dict):
-            LOGGER.error(f"HARDFAIL: Metadata är ogiltigt för {filnamn}")
-            raise ValueError(f"HARDFAIL: Metadata är ogiltigt för {filnamn}")
+        # Validera resultat
+        if not result or not isinstance(result, dict):
+            LOGGER.error(f"HARDFAIL: Resultat är ogiltigt för {filnamn}")
+            raise ValueError(f"HARDFAIL: Resultat är ogiltigt för {filnamn}")
+
+        # --- SANITY CHECK ---
+        quality_status = result.get('quality_status', 'OK')
+        if quality_status == 'FAILED':
+            failure_reason = result.get('failure_reason', 'Okänd anledning')
+            _log("🚫", f"{kort_namn} → FAILED: {failure_reason}")
+            _move_to_failed(filväg, filnamn, failure_reason)
+            with PROCESS_LOCK:
+                PROCESSED_FILES.discard(filnamn)
+            return
 
         # --- STEG 3: SPARA ---
+        # Använd PRO:s korrigerade transkription (med riktiga talarnamn)
+        final_transcript = result.get('transcript', raw_transcript)
+        
         skapelsedatum = fa_fil_skapad_datum(filväg)
         model_info = f"{MODEL_FAST} (Audio) + {MODEL_SMART} (Analysis)"
-        header = skapa_rich_header(filnamn, skapelsedatum, model_info, metadata)
+        header = skapa_rich_header(filnamn, skapelsedatum, model_info, result, unit_id)
 
         with open(txt_fil, 'w', encoding='utf-8') as f:
-            f.write(header + transcript_text)
+            f.write(header + final_transcript)
 
         total_time = int(time.time() - start_time)
         _log("✅", f"{kort_namn} → Klar ({total_time}s)")
