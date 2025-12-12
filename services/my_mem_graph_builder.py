@@ -92,28 +92,37 @@ def process_lake_batch():
 
                 # 2. Skapa Relationer baserat på EXPLICIT DATA (Inte gissningar)
                 
-                # A. MASTER NODE (Taxonomi) - The Critical Fix!
-                master_node = metadata.get('graph_master_node')
-                if master_node and master_node != "Okategoriserat":
-                    # Skapa Koncept-noden om den inte finns
-                    conn.execute(f'MERGE (c:Concept {{id: "{master_node}"}})')
-                    # Skapa relationen
-                    conn.execute(f'MATCH (u:Unit {{id: "{unit_id}"}}), (c:Concept {{id: "{master_node}"}}) MERGE (u)-[:DEALS_WITH]->(c)')
-                    relations_created += 1
+                # A. GRAPH_NODES (Ny struktur med viktade koncept och typade entiteter)
+                graph_nodes = metadata.get('graph_nodes', {})
+                
+                # Hantera legacy-format (graph_master_node/graph_sub_node)
+                if not graph_nodes:
+                    master_node = metadata.get('graph_master_node')
+                    if master_node:
+                        graph_nodes[master_node] = 1.0
+                    sub_node = metadata.get('graph_sub_node')
+                    if sub_node:
+                        graph_nodes[sub_node] = 0.5
+                
+                for node_key, node_value in graph_nodes.items():
+                    # Abstrakt koncept (masternode) - värde är float
+                    if isinstance(node_value, (int, float)):
+                        conn.execute(f'MERGE (c:Concept {{id: "{node_key}"}})')
+                        conn.execute(f'MATCH (u:Unit {{id: "{unit_id}"}}), (c:Concept {{id: "{node_key}"}}) MERGE (u)-[:DEALS_WITH]->(c)')
+                        relations_created += 1
+                    
+                    # Typad entitet - värde är dict med namn -> relevans
+                    elif isinstance(node_value, dict):
+                        entity_type = node_key  # Typ från taxonomin
+                        for entity_name, relevance in node_value.items():
+                            # Escape quotes i entity_name
+                            safe_name = entity_name.replace('"', '\\"')
+                            # Skapa Entity-nod om den inte finns
+                            conn.execute(f'MERGE (e:Entity {{id: "{safe_name}"}}) SET e.type = "{entity_type}"')
+                            # Skapa relation Unit -> Entity
+                            conn.execute(f'MATCH (u:Unit {{id: "{unit_id}"}}), (e:Entity {{id: "{safe_name}"}}) MERGE (u)-[:UNIT_MENTIONS]->(e)')
 
-                # B. SUB NODE (Finlir)
-                sub_node = metadata.get('graph_sub_node')
-                if sub_node:
-                    conn.execute(f'MERGE (c:Concept {{id: "{sub_node}"}})')
-                    conn.execute(f'MATCH (u:Unit {{id: "{unit_id}"}}), (c:Concept {{id: "{sub_node}"}}) MERGE (u)-[:DEALS_WITH]->(c)')
-
-                # C. CONTEXT ID (Projekt/Samling)
-                context_id = metadata.get('context_id')
-                if context_id and context_id != "INKORG":
-                    conn.execute(f'MERGE (c:Concept {{id: "{context_id}"}})')
-                    conn.execute(f'MATCH (u:Unit {{id: "{unit_id}"}}), (c:Concept {{id: "{context_id}"}}) MERGE (u)-[:PART_OF]->(c)')
-
-                # D. PERSON (Ägare)
+                # C. PERSON (Ägare)
                 owner = metadata.get('owner_id')
                 if owner:
                     conn.execute(f'MERGE (p:Person {{id: "{owner}"}})')
@@ -182,9 +191,6 @@ def _init_schema(conn):
     _safe_create_table(conn,
         "CREATE REL TABLE DEALS_WITH(FROM Unit TO Concept)",
         "DEALS_WITH")
-    _safe_create_table(conn,
-        "CREATE REL TABLE PART_OF(FROM Unit TO Concept)",
-        "PART_OF")
     _safe_create_table(conn,
         "CREATE REL TABLE CREATED_BY(FROM Unit TO Person)",
         "CREATED_BY")

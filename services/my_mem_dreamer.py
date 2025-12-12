@@ -1,0 +1,405 @@
+"""
+MyMem Dreamer - Konsoliderar grafens synapser till taxonomin.
+
+Analogin: Grafen är synapserna, Dreaming konsoliderar dem.
+Läser inte om Lake (råa minnen), utan arbetar på den redan abstraherade representationen.
+
+Körs vid uppstart om >24h sedan senaste körning.
+"""
+
+import os
+import json
+import yaml
+import logging
+import datetime
+import zoneinfo
+import time
+from typing import Optional
+from google import genai
+from google.genai import types
+
+# --- CONFIG LOADER ---
+def _load_config():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    paths_to_check = [
+        os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
+        os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
+    ]
+    for p in paths_to_check:
+        if os.path.exists(p):
+            with open(p, 'r') as f:
+                config = yaml.safe_load(f)
+            for k, v in config['paths'].items():
+                config['paths'][k] = os.path.expanduser(v)
+            config['logging']['log_file_path'] = os.path.expanduser(config['logging']['log_file_path'])
+            return config
+    raise RuntimeError("HARDFAIL: Config not found")
+
+
+def _load_prompts():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    prompts_path = os.path.join(script_dir, '..', 'config', 'services_prompts.yaml')
+    if os.path.exists(prompts_path):
+        with open(prompts_path, 'r') as f:
+            return yaml.safe_load(f)
+    raise RuntimeError("HARDFAIL: Prompts not found")
+
+
+CONFIG = _load_config()
+PROMPTS = _load_prompts()
+
+# --- PATHS ---
+KUZU_PATH = CONFIG['paths']['kuzu_db']
+TAXONOMY_FILE = CONFIG['paths'].get('taxonomy_file')
+LOG_FILE = CONFIG['logging']['log_file_path']
+# Timestamp-fil ligger i samma mapp som taxonomin
+_taxonomy_dir = os.path.dirname(TAXONOMY_FILE)
+TIMESTAMP_FILE = os.path.join(_taxonomy_dir, ".dreamer_last_run")
+
+# --- TIMEZONE ---
+TZ_NAME = CONFIG.get('system', {}).get('timezone', 'UTC')
+try:
+    SYSTEM_TZ = zoneinfo.ZoneInfo(TZ_NAME)
+except Exception as e:
+    raise ValueError(f"HARDFAIL: Ogiltig timezone '{TZ_NAME}': {e}") from e
+
+# --- LOGGING ---
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format='%(asctime)s - DREAMER - %(levelname)s - %(message)s'
+)
+LOGGER = logging.getLogger('Dreamer')
+
+# --- AI CLIENT ---
+API_KEY = CONFIG.get('ai_engine', {}).get('api_key', '')
+MODEL_FAST = CONFIG.get('ai_engine', {}).get('models', {}).get('model_fast', 'models/gemini-flash-latest')
+AI_CLIENT = genai.Client(api_key=API_KEY) if API_KEY else None
+
+LOGGER.info(f"Dreamer initierad: MODEL={MODEL_FAST}, KUZU={KUZU_PATH}, TAXONOMY={TAXONOMY_FILE}")
+
+# --- DREAMING INTERVAL ---
+DREAMING_INTERVAL_HOURS = 24
+
+
+def _ts():
+    return datetime.datetime.now(SYSTEM_TZ).strftime("[%H:%M:%S]")
+
+
+def should_run_dreaming() -> bool:
+    """Kolla om dreaming ska köras (>24h sedan senaste)."""
+    if not os.path.exists(TIMESTAMP_FILE):
+        return True
+    
+    try:
+        with open(TIMESTAMP_FILE, 'r') as f:
+            last_run_str = f.read().strip()
+        last_run = datetime.datetime.fromisoformat(last_run_str)
+        now = datetime.datetime.now(SYSTEM_TZ)
+        hours_since = (now - last_run).total_seconds() / 3600
+        return hours_since >= DREAMING_INTERVAL_HOURS
+    except Exception as e:
+        LOGGER.warning(f"Kunde inte läsa timestamp-fil: {e}")
+        return True
+
+
+def _save_timestamp():
+    """Spara tidsstämpel för senaste dreaming-körning."""
+    os.makedirs(os.path.dirname(TIMESTAMP_FILE), exist_ok=True)
+    with open(TIMESTAMP_FILE, 'w') as f:
+        f.write(datetime.datetime.now(SYSTEM_TZ).isoformat())
+
+
+def _load_taxonomy() -> dict:
+    """Ladda befintlig taxonomi."""
+    LOGGER.info(f"Laddar taxonomi från: {TAXONOMY_FILE}")
+    if not os.path.exists(TAXONOMY_FILE):
+        LOGGER.error(f"HARDFAIL: Taxonomi-fil saknas: {TAXONOMY_FILE}")
+        raise RuntimeError(f"HARDFAIL: Taxonomi-fil saknas: {TAXONOMY_FILE}")
+    
+    with open(TAXONOMY_FILE, 'r', encoding='utf-8') as f:
+        taxonomy = json.load(f)
+    
+    total_sub_nodes = sum(len(v.get("sub_nodes", [])) for v in taxonomy.values())
+    LOGGER.info(f"Taxonomi laddad: {len(taxonomy)} masternoder, {total_sub_nodes} sub_nodes totalt")
+    return taxonomy
+
+
+def _save_taxonomy(taxonomy: dict):
+    """Spara uppdaterad taxonomi."""
+    with open(TAXONOMY_FILE, 'w', encoding='utf-8') as f:
+        json.dump(taxonomy, f, ensure_ascii=False, indent=2)
+    LOGGER.info(f"Taxonomi uppdaterad: {TAXONOMY_FILE}")
+
+
+def collect_from_graph() -> dict:
+    """
+    Samla alla noder från grafen (synapserna).
+    
+    Returns:
+        dict med:
+        - concepts: Lista med alla Concept-noder
+        - entities: Dict med type -> [names]
+        - aliases: Lista med (alias, canonical) tuples
+    """
+    try:
+        import kuzu
+    except ImportError:
+        LOGGER.error("HARDFAIL: kuzu-paketet saknas")
+        raise RuntimeError("HARDFAIL: kuzu-paketet saknas")
+    
+    result = {
+        "concepts": [],
+        "entities": {},
+        "aliases": []
+    }
+    
+    try:
+        db = kuzu.Database(KUZU_PATH)
+        conn = kuzu.Connection(db)
+        
+        # 1. Hämta alla Concept-noder
+        try:
+            concepts_result = conn.execute("MATCH (c:Concept) RETURN c.id")
+            while concepts_result.has_next():
+                row = concepts_result.get_next()
+                if row and row[0]:
+                    result["concepts"].append(row[0])
+        except Exception as e:
+            LOGGER.warning(f"Kunde inte hämta Concept-noder: {e}")
+        
+        # 2. Hämta alla Entity-noder med typ
+        try:
+            entities_result = conn.execute("MATCH (e:Entity) RETURN e.id, e.type, e.aliases")
+            while entities_result.has_next():
+                row = entities_result.get_next()
+                if row and row[0]:
+                    entity_id = row[0]
+                    entity_type = row[1] or "Unknown"
+                    entity_aliases = row[2] or []
+                    
+                    if entity_type not in result["entities"]:
+                        result["entities"][entity_type] = []
+                    result["entities"][entity_type].append(entity_id)
+                    
+                    # Samla alias-relationer
+                    for alias in entity_aliases:
+                        result["aliases"].append((alias, entity_id))
+        except Exception as e:
+            LOGGER.warning(f"Kunde inte hämta Entity-noder: {e}")
+        
+        # 3. Hämta Person-noder (legacy)
+        try:
+            persons_result = conn.execute("MATCH (p:Person) RETURN p.id")
+            while persons_result.has_next():
+                row = persons_result.get_next()
+                if row and row[0]:
+                    if "Person" not in result["entities"]:
+                        result["entities"]["Person"] = []
+                    if row[0] not in result["entities"]["Person"]:
+                        result["entities"]["Person"].append(row[0])
+        except Exception as e:
+            LOGGER.warning(f"Kunde inte hämta Person-noder: {e}")
+        
+        del conn
+        del db
+        
+    except Exception as e:
+        LOGGER.error(f"Fel vid graf-anslutning: {e}")
+        raise RuntimeError(f"HARDFAIL: Kunde inte ansluta till grafen: {e}") from e
+    
+    LOGGER.info(f"Samlade från graf: {len(result['concepts'])} concepts, "
+                f"{sum(len(v) for v in result['entities'].values())} entities, "
+                f"{len(result['aliases'])} aliases")
+    
+    return result
+
+
+def _find_unrecognized_nodes(graph_data: dict, taxonomy: dict) -> dict:
+    """
+    Hitta noder i grafen som inte finns i taxonomin.
+    
+    Returns:
+        dict med:
+        - new_concepts: Concepts som inte matchar någon sub_node
+        - new_entities: Entities som inte finns i motsvarande typ-kategori
+    """
+    # Bygg lookup för alla kända sub_nodes
+    known_sub_nodes = set()
+    for master_node, data in taxonomy.items():
+        known_sub_nodes.add(master_node)
+        for sub in data.get("sub_nodes", []):
+            known_sub_nodes.add(sub)
+    
+    # Hitta okända concepts
+    new_concepts = []
+    for concept in graph_data["concepts"]:
+        if concept not in known_sub_nodes:
+            new_concepts.append(concept)
+    
+    # Hitta okända entities
+    new_entities = {}
+    for entity_type, names in graph_data["entities"].items():
+        if entity_type in taxonomy:
+            known_in_type = set(taxonomy[entity_type].get("sub_nodes", []))
+            for name in names:
+                if name not in known_in_type:
+                    if entity_type not in new_entities:
+                        new_entities[entity_type] = []
+                    new_entities[entity_type].append(name)
+    
+    return {
+        "new_concepts": new_concepts,
+        "new_entities": new_entities
+    }
+
+
+def consolidate() -> dict:
+    """
+    Huvudfunktion: Konsolidera grafens noder till taxonomin.
+    
+    Steg:
+    1. Samla noder från grafen
+    2. Jämför med taxonomin
+    3. Skicka nya noder till LLM för kategorisering
+    4. Uppdatera taxonomin
+    
+    Returns:
+        dict med statistik över konsolideringen
+    """
+    print(f"{_ts()} 💭 Dreaming startar...")
+    LOGGER.info("Dreaming startar")
+    
+    stats = {
+        "concepts_added": 0,
+        "entities_added": 0,
+        "aliases_found": 0,
+        "status": "OK"
+    }
+    
+    try:
+        # 1. Samla från grafen
+        graph_data = collect_from_graph()
+        
+        # 2. Ladda taxonomin
+        taxonomy = _load_taxonomy()
+        
+        # 3. Hitta nya noder
+        unrecognized = _find_unrecognized_nodes(graph_data, taxonomy)
+        
+        new_concepts = unrecognized["new_concepts"]
+        new_entities = unrecognized["new_entities"]
+        
+        if not new_concepts and not new_entities:
+            print(f"{_ts()} ✅ Dreaming klar: Inga nya noder att konsolidera")
+            LOGGER.info("Inga nya noder att konsolidera")
+            _save_timestamp()
+            return stats
+        
+        print(f"{_ts()} 🔍 Hittade {len(new_concepts)} nya concepts, "
+              f"{sum(len(v) for v in new_entities.values())} nya entities")
+        
+        # 4. Skicka till LLM för kategorisering
+        if AI_CLIENT:
+            categorized = _llm_categorize(new_concepts, new_entities, taxonomy)
+            
+            # 5. Uppdatera taxonomin
+            if categorized:
+                for master_node, additions in categorized.items():
+                    if master_node in taxonomy:
+                        current_subs = set(taxonomy[master_node].get("sub_nodes", []))
+                        for item in additions:
+                            if item not in current_subs:
+                                taxonomy[master_node]["sub_nodes"].append(item)
+                                stats["concepts_added"] += 1
+                
+                _save_taxonomy(taxonomy)
+                print(f"{_ts()} ✅ Dreaming klar: {stats['concepts_added']} noder tillagda i taxonomin")
+        else:
+            LOGGER.warning("AI-klient saknas, kan inte kategorisera nya noder")
+            stats["status"] = "NO_AI"
+        
+        _save_timestamp()
+        
+    except Exception as e:
+        LOGGER.error(f"Fel under dreaming: {e}")
+        stats["status"] = "ERROR"
+        stats["error"] = str(e)
+        print(f"{_ts()} ❌ Dreaming misslyckades: {e}")
+    
+    return stats
+
+
+def _llm_categorize(new_concepts: list, new_entities: dict, taxonomy: dict) -> Optional[dict]:
+    """
+    Använd LLM för att kategorisera nya noder under rätt masternode.
+    
+    Returns:
+        dict med {masternode: [items to add]} eller None vid fel
+    """
+    if not new_concepts and not new_entities:
+        return None
+    
+    prompt_template = PROMPTS.get('dreamer', {}).get('consolidation_prompt', '')
+    if not prompt_template:
+        LOGGER.error("HARDFAIL: dreamer.consolidation_prompt saknas i services_prompts.yaml")
+        raise RuntimeError("HARDFAIL: dreamer.consolidation_prompt saknas")
+    
+    # Bygg input för LLM (använd replace istället för format för att undvika {}-konflikter)
+    master_nodes_info = {
+        k: v.get("description", "") for k, v in taxonomy.items()
+    }
+    
+    prompt = prompt_template
+    prompt = prompt.replace("{master_nodes}", json.dumps(master_nodes_info, ensure_ascii=False, indent=2))
+    prompt = prompt.replace("{new_concepts}", json.dumps(new_concepts, ensure_ascii=False))
+    prompt = prompt.replace("{new_entities}", json.dumps(new_entities, ensure_ascii=False))
+    
+    try:
+        LOGGER.info(f"Skickar {len(new_concepts)} concepts och {len(new_entities)} entities till LLM")
+        
+        # DEBUG: Spara prompten till fil för inspektion
+        debug_prompt_file = os.path.join(os.path.dirname(TAXONOMY_FILE), "dreamer_debug_prompt.txt")
+        with open(debug_prompt_file, "w", encoding="utf-8") as f:
+            f.write(f"=== DREAMER PROMPT ({len(prompt)} tecken) ===\n\n")
+            f.write(prompt)
+        LOGGER.info(f"Prompt sparad till: {debug_prompt_file}")
+        print(f"{_ts()} 📝 Prompt sparad till: {debug_prompt_file}")
+        
+        response = AI_CLIENT.models.generate_content(
+            model=MODEL_FAST,
+            contents=[
+                types.Content(role="user", parts=[types.Part.from_text(text=prompt)])
+            ],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        
+        raw_text = response.text.replace('```json', '').replace('```', '').strip()
+        LOGGER.info(f"LLM svarade: {raw_text[:500]}...")  # Logga första 500 tecken
+        
+        result = json.loads(raw_text)
+        LOGGER.info(f"LLM kategoriserade {len(result)} noder")
+        return result
+        
+    except json.JSONDecodeError as e:
+        LOGGER.error(f"JSON-parse fel: {e}. Råsvar: {response.text[:200] if response else 'inget svar'}")
+        return None
+    except Exception as e:
+        LOGGER.error(f"LLM-kategorisering misslyckades: {e}")
+        return None
+
+
+# --- CLI ---
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) > 1 and sys.argv[1] == "--force":
+        print("Forcerar dreaming...")
+        result = consolidate()
+        print(f"Resultat: {result}")
+    elif should_run_dreaming():
+        result = consolidate()
+        print(f"Resultat: {result}")
+    else:
+        print("Dreaming behöver inte köras (senaste körning var för < 24h sedan)")

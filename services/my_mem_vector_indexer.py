@@ -92,16 +92,14 @@ def indexera_vektor(filväg, filnamn):
         
         # 3. Upsert Chroma
         ai_summary = metadata.get('ai_summary') or ""
-        context_id = metadata.get('context_id') or "unknown"
         timestamp = metadata.get('timestamp_created') or ""
         
-        full_doc = f"FILENAME: {filnamn}\nCONTEXT: {context_id}\nSUMMARY: {ai_summary}\n\nCONTENT:\n{text[:8000]}"
+        full_doc = f"FILENAME: {filnamn}\nSUMMARY: {ai_summary}\n\nCONTENT:\n{text[:8000]}"
 
         VECTOR_COLLECTION.upsert(
             ids=[unit_id],
             documents=[full_doc],
             metadatas=[{
-                "context": context_id,
                 "timestamp": timestamp,
                 "filename": filnamn
             }]

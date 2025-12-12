@@ -102,7 +102,24 @@ DropZone → File Retriever → Asset Store
 - Långsam responstid
 - Ingen aggregerad insikt
 
-## 6. Nästa Fas: Kritiska Objekt
+## 6. Senaste Förbättringar (v6.1)
+
+### DateService (OBJEKT-50) ✅
+Central datumhantering med prioritet: Frontmatter → Filnamn → PDF-metadata → Filesystem → HARDFAIL.
+
+### Transcriber Pro+Pro Retry
+Flash transkribering med kvalitetskontroll. Vid fel: automatisk retry med Pro-modell för både transkribering och analys.
+
+### Staged Rebuild Tool
+Nytt verktyg (`tools/tool_staged_rebuild.py`) för kronologisk åter-indexering med:
+- Per-fil skip-logik (kollar Lake + Failed)
+- 30 min timeout med graceful recovery
+- Automatisk backup/restore vid avbrott
+
+### Slack Collector → One-shot
+Ändrat från daemon till engångsprocess vid startup.
+
+## 7. Nästa Fas: Kritiska Objekt
 
 | Prio | Objekt | Titel | Problem |
 |------|--------|-------|---------|
@@ -110,9 +127,10 @@ DropZone → File Retriever → Asset Store
 | **0** | OBJEKT-42 | Temporal Intelligence | Förstår inte "igår" |
 | **0.5** | OBJEKT-43 | Summary-First Search | 50-130s svarstid |
 | **1** | OBJEKT-44 | Entity Resolution | "Sänk" ≠ "Cenk Bisgen" |
-| **1** | OBJEKT-45 | Context Injection | Agenter jobbar i mörkret |
+| **1** | OBJEKT-51 | Separera Entiteter | Entiteter i graf, ej taxonomi |
+| **1** | OBJEKT-53 | Kurerad Entity-session | Proaktiv användarinput |
 
-## 7. Utvecklingsregler
+## 8. Utvecklingsregler
 
 Definierade i `.cursorrules`:
 
@@ -120,7 +138,7 @@ Definierade i `.cursorrules`:
 2. **Fail Fast, Fail Loud** – Validera tidigt, logga allt
 3. **Ingen AI-cringe** – Professionella konceptnamn (ej "Trädgårdsmästaren")
 
-## 8. Teknisk Stack
+## 9. Teknisk Stack
 
 | Komponent | Teknologi |
 |-----------|-----------|
@@ -132,6 +150,6 @@ Definierade i `.cursorrules`:
 | UI | Rich (CLI) |
 
 ---
-*Senast uppdaterad: 2025-12-03*
+*Senast uppdaterad: 2025-12-12*
 *Se `my_mem_arkitektur.md` för teknisk implementation.*
 *Se `my_mem_backlogg.md` för aktiva objekt.*

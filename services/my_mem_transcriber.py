@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import yaml
 import logging
@@ -8,6 +9,10 @@ import shutil
 import threading
 import re
 import zoneinfo
+
+# Lägg till projektroten i sys.path för att hitta services-paketet
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from concurrent.futures import ThreadPoolExecutor
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -18,6 +23,8 @@ try:
 except ImportError:
     print("[CRITICAL] Saknar bibliotek 'google-genai'.")
     exit(1)
+
+from services.utils.date_service import get_timestamp
 
 # --- CONFIG LOADER ---
 def ladda_yaml(filnamn, strict=True):
@@ -126,14 +133,16 @@ def clean_ghost_artifacts():
             LOGGER.warning(f"Kunde inte ta bort {ghost_log}: {e}")
 
 def fa_fil_skapad_datum(filväg):
+    """Hämta filens skapelsedatum via central DateService."""
     try:
-        stat = os.stat(filväg)
-        timestamp = stat.st_birthtime if hasattr(stat, 'st_birthtime') else stat.st_mtime
-        dt = datetime.datetime.fromtimestamp(timestamp, SYSTEM_TZ)
-        return dt.isoformat()
-    except Exception as e:
-        LOGGER.error(f"HARDFAIL: Kunde inte läsa tidsstämpel för {filväg}: {e}")
-        raise RuntimeError(f"HARDFAIL: Kunde inte läsa tidsstämpel för {filväg}") from e
+        ts = get_timestamp(filväg)
+        # Konvertera till ISO-format med timezone
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=SYSTEM_TZ)
+        return ts.isoformat()
+    except RuntimeError as e:
+        LOGGER.error(f"HARDFAIL: {e}")
+        raise
 
 def safe_upload(filväg, original_namn):
     """Upload med sekventiell begränsning för att undvika API-blockering."""
@@ -211,6 +220,90 @@ def _move_to_failed(filväg, filnamn, reason):
         return False
 
 
+def _do_transcription(upload_file, model, kort_namn, filnamn, safety_settings):
+    """Transkribera ljudfil med angiven modell. Returnerar (transcript, tid_i_sek)."""
+    transcribe_prompt = "Transkribera ljudfilen ordagrant på svenska. Markera talare (Talare 1 osv) om du kan urskilja dem. Svara ENBART med transkriberad text."
+    start = time.time()
+    transcript = ""
+    
+    for attempt in range(5):
+        try:
+            response = AI_CLIENT.models.generate_content(
+                model=model,
+                contents=[types.Content(role="user", parts=[
+                    types.Part.from_uri(file_uri=upload_file.uri, mime_type=upload_file.mime_type),
+                    types.Part.from_text(text=transcribe_prompt)])],
+                config=types.GenerateContentConfig(
+                    response_mime_type="text/plain",
+                    safety_settings=safety_settings
+                )
+            )
+            try:
+                transcript = response.text
+            except Exception:
+                finish_reason = "Unknown"
+                if response.candidates:
+                    finish_reason = response.candidates[0].finish_reason
+                raise Exception(f"Inget text-svar. Finish Reason: {finish_reason}")
+            break
+        except Exception as e:
+            error_str = str(e)
+            if "503" in error_str or "429" in error_str or "overloaded" in error_str.lower():
+                wait_time = 5 * (2 ** attempt)
+                print(f"{_ts()} ⚠️ TRANS: {kort_namn} → Retry {attempt+1}/5 ({wait_time}s)")
+                LOGGER.warning(f"API överbelastad för {filnamn}. Försök {attempt+1}/5. Väntar {wait_time}s")
+                time.sleep(wait_time)
+            else:
+                raise e
+    
+    if not transcript:
+        raise Exception(f"Transkribering genererade ingen text efter 5 försök.")
+    
+    return transcript, int(time.time() - start)
+
+
+def _do_analysis(transcript, model, kort_namn, filnamn, safety_settings):
+    """Analysera transkript med angiven modell. Returnerar result dict."""
+    analysis_context = transcript[:2000000]  # 2M tecken
+    analysis_prompt = PROMPTS['transcriber']['analysis_prompt']
+    result = None
+    
+    for attempt in range(5):
+        try:
+            response = AI_CLIENT.models.generate_content(
+                model=model,
+                contents=[types.Content(role="user", parts=[
+                    types.Part.from_text(text=f"{analysis_prompt}\n\nTRANSCRIPT TO ANALYZE:\n{analysis_context}")])],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    safety_settings=safety_settings
+                )
+            )
+            result = stada_och_parsa_json(response.text)
+            break
+        except ValueError as e:
+            LOGGER.error(f"HARDFAIL: JSON-parsing misslyckades för {filnamn}: {e}")
+            raise
+        except Exception as e:
+            error_str = str(e)
+            if "503" in error_str or "429" in error_str or "overloaded" in error_str.lower():
+                wait_time = 5 * (2 ** attempt)
+                print(f"{_ts()} ⚠️ TRANS: {kort_namn} → Analysis Retry {attempt+1}/5 ({wait_time}s)")
+                LOGGER.warning(f"Analysis API överbelastad för {filnamn}. Försök {attempt+1}/5. Väntar {wait_time}s")
+                time.sleep(wait_time)
+            else:
+                LOGGER.error(f"HARDFAIL: Metadata-analys misslyckades för {filnamn}: {e}")
+                raise RuntimeError(f"HARDFAIL: Metadata-analys misslyckades") from e
+    
+    if not result:
+        raise Exception("Analys genererade inget resultat efter 5 försök.")
+    
+    if not isinstance(result, dict):
+        raise ValueError(f"HARDFAIL: Resultat är ogiltigt för {filnamn}")
+    
+    return result
+
+
 def processa_mediafil(filväg, filnamn):
     # MODELLER FRÅN CONFIG (inga hårdkodade versionsnummer)
     MODEL_FAST = MODELS.get('model_fast')   # -> "models/gemini-flash-latest"
@@ -268,108 +361,52 @@ def processa_mediafil(filväg, filnamn):
         if upload_file.state.name == "FAILED":
             raise Exception("File state FAILED.")
 
-        # --- STEG 1: TRANSKRIBERING (FLASH) ---
-        flash_start = time.time()
-        raw_transcript = ""
-        transcribe_prompt = "Transkribera ljudfilen ordagrant på svenska. Markera talare (Talare 1 osv) om du kan urskilja dem. Svara ENBART med transkriberad text."
-
-        # Retry-loop för Flash
-        for attempt in range(5):
-            try:
-                response = AI_CLIENT.models.generate_content(
-                    model=MODEL_FAST,
-                    contents=[types.Content(role="user", parts=[
-                        types.Part.from_uri(file_uri=upload_file.uri, mime_type=upload_file.mime_type),
-                        types.Part.from_text(text=transcribe_prompt)])],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="text/plain",
-                        safety_settings=SAFETY_SETTINGS
-                    )
-                )
-                # Robust kontroll av svaret
-                try:
-                    raw_transcript = response.text
-                except Exception:
-                    finish_reason = "Unknown"
-                    if response.candidates:
-                        finish_reason = response.candidates[0].finish_reason
-                    raise Exception(f"Inget text-svar. Finish Reason: {finish_reason}")
-                break
-            except Exception as e:
-                error_str = str(e)
-                if "503" in error_str or "429" in error_str or "overloaded" in error_str.lower():
-                    wait_time = 5 * (2 ** attempt)
-                    print(f"{_ts()} ⚠️ TRANS: {kort_namn} → Retry {attempt+1}/5 ({wait_time}s)")
-                    LOGGER.warning(f"API överbelastad för {filnamn}. Försök {attempt+1}/5. Väntar {wait_time}s")
-                    time.sleep(wait_time)
-                else:
-                    raise e
-
-        if not raw_transcript:
-            raise Exception("Flash genererade ingen text.")
-        
-        flash_time = int(time.time() - flash_start)
-        _log("⚡", f"{kort_namn} → Flash OK ({flash_time}s)")
-
-        # --- STEG 2: ANALYS + SANITY CHECK + KORRIGERING (PRO) ---
-        analysis_context = raw_transcript[:2000000]  # 2M tecken, Gemini Pro klarar det
-        analysis_prompt = PROMPTS['transcriber']['analysis_prompt']
-
-        # Retry-loop för PRO (samma mönster som Flash)
+        # --- PIPELINE: Flash + Pro (med retry via Pro + Pro vid kvalitetsfel) ---
+        raw_transcript = None
         result = None
-        for attempt in range(5):
-            try:
-                response_analysis = AI_CLIENT.models.generate_content(
-                    model=MODEL_SMART,
-                    contents=[types.Content(role="user", parts=[
-                        types.Part.from_text(text=f"{analysis_prompt}\n\nTRANSCRIPT TO ANALYZE:\n{analysis_context}")])],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        safety_settings=SAFETY_SETTINGS
-                    )
-                )
-                result = stada_och_parsa_json(response_analysis.text)
-                _log("🧠", f"{kort_namn} → Pro OK")
-                break
-            except ValueError as e:
-                # JSON-parsing fel - ingen retry
-                LOGGER.error(f"HARDFAIL: JSON-parsing misslyckades för {filnamn}: {e}")
-                raise
-            except Exception as e:
-                error_str = str(e)
-                if "503" in error_str or "429" in error_str or "overloaded" in error_str.lower():
-                    wait_time = 5 * (2 ** attempt)
-                    print(f"{_ts()} ⚠️ TRANS: {kort_namn} → Pro Retry {attempt+1}/5 ({wait_time}s)")
-                    LOGGER.warning(f"PRO API överbelastad för {filnamn}. Försök {attempt+1}/5. Väntar {wait_time}s")
-                    time.sleep(wait_time)
-                else:
-                    LOGGER.error(f"HARDFAIL: Metadata-analys misslyckades för {filnamn}: {e}")
-                    raise RuntimeError(f"HARDFAIL: Metadata-analys misslyckades") from e
+        used_pro_retry = False
         
-        if not result:
-            raise Exception("PRO genererade inget resultat efter 5 försök.")
+        # Försök 1: Flash transkribering + Pro analys
+        raw_transcript, trans_time = _do_transcription(upload_file, MODEL_FAST, kort_namn, filnamn, SAFETY_SETTINGS)
+        _log("⚡", f"{kort_namn} → Flash OK ({trans_time}s)")
         
-        # Validera resultat
-        if not result or not isinstance(result, dict):
-            LOGGER.error(f"HARDFAIL: Resultat är ogiltigt för {filnamn}")
-            raise ValueError(f"HARDFAIL: Resultat är ogiltigt för {filnamn}")
-
-        # --- SANITY CHECK ---
+        result = _do_analysis(raw_transcript, MODEL_SMART, kort_namn, filnamn, SAFETY_SETTINGS)
+        _log("🧠", f"{kort_namn} → Pro OK")
+        
+        # Kvalitetskontroll
         quality_status = result.get('quality_status', 'OK')
         if quality_status == 'FAILED':
             failure_reason = result.get('failure_reason', 'Okänd anledning')
-            _log("🚫", f"{kort_namn} → FAILED: {failure_reason}")
-            _move_to_failed(filväg, filnamn, failure_reason)
-            with PROCESS_LOCK:
-                PROCESSED_FILES.discard(filnamn)
-            return
+            _log("⚠️", f"{kort_namn} → Flash kvalitetsfel: {failure_reason}")
+            _log("🔄", f"{kort_namn} → Retry med Pro+Pro...")
+            
+            # Försök 2: Pro transkribering + Pro analys
+            used_pro_retry = True
+            raw_transcript, trans_time = _do_transcription(upload_file, MODEL_SMART, kort_namn, filnamn, SAFETY_SETTINGS)
+            _log("🧠", f"{kort_namn} → Pro transkribering OK ({trans_time}s)")
+            
+            result = _do_analysis(raw_transcript, MODEL_SMART, kort_namn, filnamn, SAFETY_SETTINGS)
+            _log("🧠", f"{kort_namn} → Pro analys OK")
+            
+            # Andra kvalitetskontrollen
+            quality_status = result.get('quality_status', 'OK')
+            if quality_status == 'FAILED':
+                failure_reason = result.get('failure_reason', 'Okänd anledning')
+                _log("🚫", f"{kort_namn} → FAILED (även med Pro): {failure_reason}")
+                _move_to_failed(filväg, filnamn, failure_reason)
+                with PROCESS_LOCK:
+                    PROCESSED_FILES.discard(filnamn)
+                return
 
-        # --- STEG 3: SPARA ---
+        # --- SPARA ---
         # Använd PRO:s korrigerade transkription (med riktiga talarnamn)
         final_transcript = result.get('transcript', raw_transcript)
         
         skapelsedatum = fa_fil_skapad_datum(filväg)
-        model_info = f"{MODEL_FAST} (Audio) + {MODEL_SMART} (Analysis)"
+        if used_pro_retry:
+            model_info = f"{MODEL_SMART} (Audio+Analysis, retry efter Flash-kvalitetsfel)"
+        else:
+            model_info = f"{MODEL_FAST} (Audio) + {MODEL_SMART} (Analysis)"
         header = skapa_rich_header(filnamn, skapelsedatum, model_info, result, unit_id)
 
         with open(txt_fil, 'w', encoding='utf-8') as f:
@@ -381,6 +418,8 @@ def processa_mediafil(filväg, filnamn):
     except Exception as e:
         LOGGER.error(f"FEL vid transkribering av {filnamn}: {e}")
         print(f"{_ts()} ❌ TRANS: {kort_namn} → FAILED (se logg)")
+        # Flytta till Failed så rebuild inte väntar för evigt
+        _move_to_failed(filväg, filnamn, str(e)[:100])
         with PROCESS_LOCK:
             PROCESSED_FILES.discard(filnamn)
 

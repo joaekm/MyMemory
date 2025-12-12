@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import yaml
 import logging
@@ -7,9 +8,15 @@ import json
 import threading
 import re
 import zoneinfo
+
+# Lägg till projektroten i sys.path för att hitta services-paketet
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from concurrent.futures import ThreadPoolExecutor
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+
+from services.utils.date_service import get_timestamp as date_service_timestamp
 
 try:
     import pypdf
@@ -79,6 +86,7 @@ TRANSCRIPTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_transcripts'])
 DOCUMENTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_documents'])
 SLACK_FOLDER = os.path.expanduser(CONFIG['paths']['asset_slack'])
 SESSIONS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_sessions'])
+FAILED_FOLDER = os.path.expanduser(CONFIG['paths']['asset_failed'])
 WATCH_FOLDERS = [TRANSCRIPTS_FOLDER, DOCUMENTS_FOLDER, SLACK_FOLDER, SESSIONS_FOLDER]
 TAXONOMY_FILE = os.path.expanduser(CONFIG['paths'].get('taxonomy_file', '~/MyMemory/Index/my_mem_taxonomy.json'))
 LOG_FILE = os.path.expanduser(CONFIG['logging']['log_file_path'])
@@ -108,6 +116,30 @@ os.makedirs(log_dir, exist_ok=True)
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format='%(asctime)s - DOCS - %(levelname)s - %(message)s')
 LOGGER = logging.getLogger('MyMem_DocConverter')
 os.makedirs(LAKE_STORE, exist_ok=True)
+
+# --- FAILED FILE HANDLING ---
+def _move_to_failed(filepath: str, reason: str) -> bool:
+    """Flytta fil till Failed-mappen vid HARDFAIL."""
+    try:
+        os.makedirs(FAILED_FOLDER, exist_ok=True)
+        filename = os.path.basename(filepath)
+        dest = os.path.join(FAILED_FOLDER, filename)
+        
+        # Om filen redan finns i Failed, lägg till timestamp
+        if os.path.exists(dest):
+            base, ext = os.path.splitext(filename)
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            dest = os.path.join(FAILED_FOLDER, f"{base}_{timestamp}{ext}")
+        
+        import shutil
+        shutil.move(filepath, dest)
+        LOGGER.warning(f"Fil flyttad till Failed: {filename} - Anledning: {reason}")
+        print(f"{_ts()} ❌ FAIL: {filename[:30]}... → Failed/ ({reason})")
+        return True
+    except Exception as e:
+        LOGGER.error(f"Kunde inte flytta till Failed: {filepath} - {e}")
+        return False
+
 
 # --- TIGHT LOGGING ---
 def _ts():
@@ -309,22 +341,60 @@ def _process_potential_aliases(potential_aliases: list) -> list:
     return processed
 
 
+GRAPH_NODES_CUTOFF = 0.2  # Noder med lägre relevans sparas inte
+
+
+def _filter_graph_nodes(graph_nodes: dict, valid_master_nodes: list) -> dict:
+    """Filtrera graph_nodes: ta bort vikter under cutoff och validera masternoder.
+    
+    Returns:
+        Filtrerad dict, eller None om inga giltiga noder finns (HARDFAIL).
+    """
+    if not graph_nodes:
+        LOGGER.error("HARDFAIL: LLM returnerade tom graph_nodes")
+        return None
+    
+    filtered = {}
+    for key, value in graph_nodes.items():
+        # Abstrakt koncept (masternode) - värde är float
+        if isinstance(value, (int, float)):
+            if value >= GRAPH_NODES_CUTOFF:
+                if key in valid_master_nodes:
+                    filtered[key] = value
+                else:
+                    LOGGER.warning(f"Ogiltig masternode '{key}' ignorerad")
+        # Typad entitet (Person, Aktör, Projekt) - värde är dict
+        elif isinstance(value, dict):
+            if key in valid_master_nodes:  # Typen måste vara giltig
+                filtered_entities = {name: weight for name, weight in value.items() 
+                                   if weight >= GRAPH_NODES_CUTOFF}
+                if filtered_entities:
+                    filtered[key] = filtered_entities
+    
+    # HARDFAIL om allt filtrerades bort - LLM måste kunna kategorisera
+    if not filtered:
+        LOGGER.error("HARDFAIL: Alla graph_nodes filtrerades bort (under cutoff eller ogiltiga)")
+        return None
+    
+    return filtered
+
+
 def generera_metadata(text, filnamn):
-    if not AI_CLIENT or not text: 
-        return {
-            "summary": "No AI", 
-            "keywords": [], 
-            "entities": [],
-            "graph_master_node": "Okategoriserat",
-            "context_id": "INKORG"
-        }
+    """Generera metadata via LLM. Returnerar None vid fel (HARDFAIL)."""
+    if not AI_CLIENT:
+        LOGGER.error(f"HARDFAIL: AI_CLIENT saknas - kan inte processa {filnamn}")
+        return None
+    
+    if not text:
+        LOGGER.error(f"HARDFAIL: Tom text - kan inte processa {filnamn}")
+        return None
     
     valid_nodes = load_taxonomy_keys()
     raw_prompt = PROMPTS.get('doc_converter', {}).get('ots_injection_prompt', '')
     
     if not raw_prompt:
-        LOGGER.error("CRITICAL: Prompt saknas i services_prompts.yaml!")
-        return {"summary": "Prompt Error", "graph_master_node": "Okategoriserat"}
+        LOGGER.error("HARDFAIL: Prompt saknas i services_prompts.yaml!")
+        return None
 
     # Bygg context med kända entiteter
     entity_context = _build_entity_context()
@@ -346,13 +416,16 @@ def generera_metadata(text, filnamn):
         )
         data = json.loads(response.text.replace('```json', '').replace('```', ''))
         
-        # Normalisera entities via entity_consolidator
-        if data.get("entities"):
-            data["entities"] = _normalize_entities(data["entities"])
-        
-        if data.get("graph_master_node") not in valid_nodes:
-            LOGGER.warning(f"AI gissade ogiltig nod '{data.get('graph_master_node')}'. Fallback till 'Okategoriserat'.")
-            data["graph_master_node"] = "Okategoriserat"
+        # Filtrera och validera graph_nodes
+        if data.get("graph_nodes"):
+            filtered_nodes = _filter_graph_nodes(data["graph_nodes"], valid_nodes)
+            if filtered_nodes is None:
+                LOGGER.error(f"HARDFAIL: Kunde inte filtrera graph_nodes för {filnamn}")
+                return None
+            data["graph_nodes"] = filtered_nodes
+        else:
+            LOGGER.error(f"HARDFAIL: LLM returnerade ingen graph_nodes för {filnamn}")
+            return None
         
         # Processa potentiella alias och skriv till graf
         if data.get("potential_aliases"):
@@ -363,29 +436,33 @@ def generera_metadata(text, filnamn):
         return data
 
     except Exception as e: 
-        LOGGER.error(f"AI Error: {e}")
-        return {
-            "summary": "AI Error", 
-            "keywords": [], 
-            "graph_master_node": "Okategoriserat", 
-            "context_id": "ERROR"
-        }
+        LOGGER.error(f"HARDFAIL: AI Error för {filnamn}: {e}")
+        return None
 
 # --- TIMESTAMP LOGIC ---
 def get_best_timestamp(filepath, text_content):
+    """
+    Hämta bästa timestamp för en fil.
+    
+    Prioritet:
+    1. DATUM_TID i textinnehåll (från transkribering)
+    2. Central DateService (frontmatter → filnamn → PDF → filesystem)
+    """
+    # Först: kolla om transkribering har satt DATUM_TID
     match = STANDARD_TIMESTAMP_PATTERN.search(text_content)
     if match:
         ts_str = match.group(1).strip()
         return ts_str
 
+    # Fallback: använd central DateService
     try:
-        stat = os.stat(filepath)
-        timestamp = stat.st_birthtime if hasattr(stat, 'st_birthtime') else stat.st_mtime
-        dt = datetime.datetime.fromtimestamp(timestamp, SYSTEM_TZ)
-        return dt.isoformat()
-    except Exception as e:
-        LOGGER.error(f"HARDFAIL: Kunde inte läsa filens tidsstämpel: {e}")
-        raise RuntimeError(f"HARDFAIL: Kunde inte läsa tidsstämpel för {filepath}") from e
+        ts = date_service_timestamp(filepath)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=SYSTEM_TZ)
+        return ts.isoformat()
+    except RuntimeError as e:
+        LOGGER.error(f"HARDFAIL: {e}")
+        raise
 
 # --- SESSION FILE PROCESSING ---
 def _parse_session_learnings(content: str) -> list:
@@ -490,10 +567,17 @@ def processa_dokument(filväg, filnamn):
         return
 
     raw_text = extract_text(filväg, ext)
-    if not raw_text or len(raw_text) < 5: return
+    if not raw_text or len(raw_text) < 5:
+        _move_to_failed(filväg, "Tom eller för kort text")
+        return
 
     ts = get_best_timestamp(filväg, raw_text)
     meta_data = generera_metadata(raw_text, filnamn)
+    
+    # HARDFAIL: Om LLM inte kunde generera metadata, flytta till Failed
+    if meta_data is None:
+        _move_to_failed(filväg, "LLM kunde inte generera metadata")
+        return
 
     final_metadata = {
         "unit_id": unit_id,
@@ -505,18 +589,20 @@ def processa_dokument(filväg, filnamn):
         "data_format": "text/markdown",
         "timestamp_created": ts,
         "summary": meta_data.get("summary"),
-        "keywords": meta_data.get("keywords"),
-        "entities": meta_data.get("entities"),
-        "graph_master_node": meta_data.get("graph_master_node"),
-        "graph_sub_node": meta_data.get("graph_sub_node"),
-        "context_id": meta_data.get("context_id"),
+        "graph_nodes": meta_data.get("graph_nodes"),
+        "dates_mentioned": meta_data.get("dates_mentioned", []),
+        "actions": meta_data.get("actions", []),
+        "deadlines": meta_data.get("deadlines", []),
         "ai_model_used": MODEL_FAST
     }
     
     with open(sjö_fil, 'w', encoding='utf-8') as f:
         f.write(f"---\n{yaml.dump(final_metadata, allow_unicode=True, sort_keys=False)}---\n\n# Dokument: {filnamn}\n\n{raw_text}")
     
-    master_node = meta_data.get('graph_master_node', 'Okategoriserat')
+    # Extrahera huvudkategori för loggning (högsta vikten bland abstrakta koncept)
+    graph_nodes = meta_data.get('graph_nodes', {})
+    abstract_nodes = {k: v for k, v in graph_nodes.items() if isinstance(v, (int, float))}
+    master_node = max(abstract_nodes, key=abstract_nodes.get) if abstract_nodes else 'Unknown'
     print(f"{_ts()} ✅ CONV: {_kort(filnamn)} → Lake ({master_node})")
     LOGGER.info(f"Konverterad: {base_name}.md -> {master_node}")
 

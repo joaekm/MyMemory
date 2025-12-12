@@ -832,15 +832,29 @@ def _save_session_to_assets(chat_history: list, learnings: list = None, reason: 
         summary_parts.append(f"{len(learnings)} alias-kopplingar identifierade.")
     summary = " ".join(summary_parts)
     
-    # Extrahera keywords och entities från chat_history
-    keywords = []
-    entities = []
+    # Bygg graph_nodes från learnings
+    graph_nodes = {"Händelser": 0.9}  # Sessions är alltid Händelser
+    
     if learnings:
+        # Gruppera entiteter per typ
+        persons = {}
         for l in learnings:
-            if l.get('canonical') and l['canonical'] not in entities:
-                entities.append(l['canonical'])
-            if l.get('alias') and l['alias'] not in keywords:
-                keywords.append(l['alias'])
+            canonical = l.get('canonical')
+            entity_type = l.get('type', 'Person')
+            if canonical:
+                # Lägg till med hög relevans (0.7) - dessa är bekräftade learnings
+                if entity_type == 'Person':
+                    if 'Person' not in graph_nodes:
+                        graph_nodes['Person'] = {}
+                    graph_nodes['Person'][canonical] = 0.7
+                elif entity_type == 'Aktör':
+                    if 'Aktör' not in graph_nodes:
+                        graph_nodes['Aktör'] = {}
+                    graph_nodes['Aktör'][canonical] = 0.7
+                elif entity_type == 'Projekt':
+                    if 'Projekt' not in graph_nodes:
+                        graph_nodes['Projekt'] = {}
+                    graph_nodes['Projekt'][canonical] = 0.7
     
     # Bygg YAML frontmatter
     frontmatter = {
@@ -849,10 +863,7 @@ def _save_session_to_assets(chat_history: list, learnings: list = None, reason: 
         "source_type": "Session",
         "timestamp_created": timestamp_full,
         "summary": summary,
-        "keywords": keywords,
-        "entities": entities,
-        "graph_master_node": "Händelser",
-        "context_id": "SESSION"
+        "graph_nodes": graph_nodes
     }
     
     # Bygg ## Learnings sektion (hårda learnings som YAML)

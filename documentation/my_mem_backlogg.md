@@ -278,6 +278,87 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
         - OBJEKT-44: Entity Resolution sker server-side
     * *Framgångskriterium:* CLI-klienten importerar endast `MyMemEngine` och gör `engine.query()`.
 
+* **OBJEKT-50 (Prio 1 - INFRASTRUKTUR):** Implementera **"DateService"** (Central Datumhantering).
+    * *Problem:* Datumlogik är spridd och inkonsekvent över systemet.
+    * *Bevis (2025-12-11):*
+        - `tool_staged_rebuild.py` använder `birthtime` → `mtime` fallback
+        - `my_mem_transcriber.py` har egen datumlogik
+        - Slack-filer har datum i filnamn men det används inte
+        - Filer kopierade via retriever får korrupt `birthtime` (1984-01-24)
+        - `mtime` kan också vara missvisande (reflekterar synk, inte skapelse)
+    * *Konsekvens:* Rebuild-kronologi blir fel, tidsbaserad sökning opålitlig.
+    * *Mål:* En central tjänst som alla agenter använder för datumextraktion.
+    * *Implementation:*
+        ```python
+        class DateService:
+            def get_date(filepath: str) -> str:
+                """
+                Prioritet:
+                1. Frontmatter (document_date) - mest pålitligt
+                2. Filnamn (Slack_*_2025-12-05_*.txt) - pålitligt för Slack
+                3. Filsystem (mtime med validering) - fallback
+                4. HARDFAIL om inget fungerar
+                """
+        ```
+    * *Utökningsmöjligheter:*
+        - PDF-metadata (CreationDate)
+        - EXIF för bilder
+        - Office-dokument (Properties)
+    * *Princip:* Explicit loggning av vilken källa som användes.
+    * *Framgångskriterium:* Alla agenter anropar `DateService.get_date()` istället för egen logik.
+    * *Koppling:*
+        - OBJEKT-42: Temporal Intelligence bygger på korrekta datum
+        - OBJEKT-46: Pipeline v6 behöver pålitlig kronologi
+
+* **OBJEKT-51 (Prio 1 - ARKITEKTUR):** Separera **Entiteter från Taxonomi**.
+    * *Problem:* Taxonomin innehåller 259 individer (Person: 102, Aktör: 113, Projekt: 44) som borde vara Entity-noder i grafen.
+    * *Konsekvens:*
+        - Taxonomin växer okontrollerat med varje ny person/organisation
+        - Duplicerad data (samma entitet i både taxonomi och graf)
+        - Dreamer konsoliderar till fel plats
+    * *Princip:* Taxonomin ska ENDAST innehålla:
+        - Masternoder (kategorier): Person, Aktör, Projekt, etc.
+        - Abstrakta sub-koncept (t.ex. "Konsultnivå" under Affär)
+        - INTE individnamn som "Joakim Ekman" eller "Digitalist Open Tech AB"
+    * *Implementation:*
+        1. Migrera Person/Aktör/Projekt `sub_nodes` till Entity-tabell i Graf
+        2. Ändra Dreamer att konsolidera entiteter till Graf, inte taxonomi
+        3. Rensa taxonomin från individnamn
+        4. Uppdatera DocConverter att validera mot Graf för entiteter
+    * *Framgångskriterium:* Taxonomin har 0 individnamn. Alla entiteter ligger i Graf med aliases.
+
+* **OBJEKT-53 (Prio 1 - LÄRANDE):** Implementera **"Kurerad Entity-session"** vid uppstart.
+    * *Problem:* Oklara entiteter ("Okänd Person", duplicat) upptäcks men användaren informeras aldrig.
+    * *Vision:* Vid uppstart (veckovis) startar systemet en kurerad konversation där användaren får reda ut oklarheter.
+    * *Flöde:*
+        1. Vid uppstart: Identifiera problem-entiteter (graf-query)
+        2. Presentera för användaren: "Joel, Lars, Nick kopplades till 'Okänd Person'. Kan du hjälpa mig förstå vilka de är?"
+        3. Användaren svarar naturligt: "Joel är Joel Andersson på Digitalist, Lars känner jag inte..."
+        4. Sessionen avslutas → `end_session()` extraherar learnings naturligt
+        5. Session sparas → DocConverter → Graf → Dreamer (befintligt flöde)
+    * *Trigger:* Konfigurerbar (dagligen, veckovis, vid X antal oklara entiteter)
+    * *Implementation:*
+        1. `find_problematic_entities()` i graph_builder
+        2. Startup-hook i `start_services.py` eller `my_mem_chat.py`
+        3. Presentera oklarheter och starta kurerad session
+    * *Princip:* Inget nytt flöde – återanvänd befintlig session-hantering.
+    * *Framgångskriterium:* Användaren får proaktiv fråga om oklara entiteter. Learnings flödar genom systemet.
+
+* **OBJEKT-52 (Prio 1.5 - KVALITET):** Förbättra **Canonical Entity-kvalitet**.
+    * *Problem:* LLM skapar bristfälliga alias-kopplingar vid dokumentprocessning.
+    * *Bevis (2025-12-12):*
+        - "Okänd Person" används som fallback med 4+ alias (Tjenk, Nick, Joel, Lars)
+        - Felaktiga kopplingar: `Johan` → `John` (troligen olika personer)
+        - Självrefererande: `Magnus` alias för `Magnus` (ingen information)
+        - `upgrade_canonical` kraschar: "Node has connected edges... cannot be deleted"
+    * *Implementation:*
+        1. **HARDFAIL** istället för "Okänd Person" – LLM måste identifiera eller skippa
+        2. Validera att `canonical ≠ alias` (ingen självrefererande)
+        3. Fixa `upgrade_canonical` med `DETACH DELETE` för att hantera edges
+        4. Höj confidence-threshold för alias-kopplingar (kräv "high")
+        5. Loggning av alla alias-beslut för kvalitetsuppföljning
+    * *Framgångskriterium:* Inga "Okänd Person"-entiteter. Alla alias-kopplingar har explicit evidens.
+
 * **OBJEKT-32 (Prio 2):** Implementera **"Quick Save"** (Read/Write) i Chatten.
     * *Mål:* Möjlighet att spara text/tankar direkt till `Assets` inifrån chatten ("Kom ihåg att...").
 * **OBJEKT-36 (Prio 2):** Kalender-integration.

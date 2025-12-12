@@ -84,15 +84,14 @@ def auto_repair(health_info):
                         text = parts[2].strip()
                         
                         ai_summary = metadata.get('ai_summary') or ""
-                        context_id = metadata.get('context_id') or "unknown"
                         timestamp = metadata.get('timestamp_created') or ""
                         
-                        full_doc = f"FILENAME: {filename}\nCONTEXT: {context_id}\nSUMMARY: {ai_summary}\n\nCONTENT:\n{text[:8000]}"
+                        full_doc = f"FILENAME: {filename}\nSUMMARY: {ai_summary}\n\nCONTENT:\n{text[:8000]}"
                         
                         coll.upsert(
                             ids=[uid],
                             documents=[full_doc],
-                            metadatas=[{"context": context_id, "timestamp": timestamp, "filename": filename}]
+                            metadatas=[{"timestamp": timestamp, "filename": filename}]
                         )
                     except Exception as e:
                         LOGGER.warning(f"Kunde inte indexera {filename}: {e}")
@@ -130,12 +129,37 @@ def auto_repair(health_info):
     if repaired:
         print()
 
+def run_dreaming():
+    """Kör dreaming vid varje uppstart för att synka graf och taxonomi."""
+    try:
+        from services.my_mem_dreamer import consolidate
+        
+        print(f"{_ts()} 💭 Dreaming...")
+        result = consolidate()
+        if result.get("status") == "OK":
+            added = result.get("concepts_added", 0)
+            if added > 0:
+                print(f"{_ts()} ✅ Dreaming klar: {added} noder tillagda")
+            else:
+                print(f"{_ts()} ✅ Dreaming klar: taxonomi är synkad")
+        elif result.get("status") == "ERROR":
+            print(f"{_ts()} ⚠️ Dreaming misslyckades: {result.get('error', 'okänt fel')}")
+    except ImportError as e:
+        LOGGER.warning(f"Dreamer-modul kunde inte laddas: {e}")
+    except Exception as e:
+        LOGGER.warning(f"Dreaming misslyckades: {e}")
+        print(f"{_ts()} ⚠️ Dreaming misslyckades: {e}")
+
+
 def start_all():
     print(f"\n--- MyMem Services (v6.0) ---\n")
     
     # Kör validering (inkl. loggrensning) och auto-repair
     health_info = run_startup_checks()
     auto_repair(health_info)
+    
+    # Kör dreaming (konsolidering av taxonomi) om det behövs
+    run_dreaming()
     
     python_exec = sys.executable
 

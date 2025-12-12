@@ -8,10 +8,11 @@ validate_rules.py - Deterministisk validering av projektregler
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 Validerar Python-kod mot MyMemory-projektets regler:
-- Princip 1: HARDFAIL > Silent Fallback
+- Princip 2: HARDFAIL > Silent Fallback
 - Princip 6: Inga hårdkodade promptar
 - Princip 7: Taxonomin är Master (inga hårdkodade kategorier)
 - Princip 8: Config är Sanning för Sökvägar
+- Princip 9: Config-värden ska läsas från config (AI-modeller, API-nycklar, etc.)
 
 Användning:
     python tools/validate_rules.py services/my_mem_chat.py
@@ -29,9 +30,9 @@ from pathlib import Path
 
 # Princip 7: Taxonomins huvudnoder (hårdkodade här för att validatorn ska vara självständig)
 TAXONOMY_NODES = [
-    "Okategoriserat", "Händelser", "Projekt", "Administration", 
+    "Händelser", "Projekt", "Administration", 
     "Person", "Aktör", "Teknologier", "Metodik", "Erbjudande",
-    "Vision", "Affär", "Kultur", "Organisation", "Verktyg"
+    "Vision", "Affär", "Kultur", "Organisation", "Arbetsverktyg"
 ]
 
 # Princip 8: Mönster för hårdkodade sökvägar
@@ -40,6 +41,21 @@ HARDCODED_PATH_PATTERNS = [
     r'["\']/Users/\w+/',           # /Users/username/...
     r'["\']/home/\w+/',            # /home/username/...
     r'expanduser\(["\']~/',        # expanduser("~/...) utan config
+]
+
+# Princip 9: Mönster för hårdkodade config-värden (ska läsas från config)
+HARDCODED_CONFIG_PATTERNS = [
+    # AI-modeller
+    (r'["\']models/gemini-', "AI-modell (ska vara CONFIG['ai_engine']['models'])"),
+    (r'["\']gemini-pro', "AI-modell (ska vara CONFIG['ai_engine']['models'])"),
+    (r'["\']gemini-flash', "AI-modell (ska vara CONFIG['ai_engine']['models'])"),
+    (r'["\']gpt-4', "AI-modell (ska vara CONFIG['ai_engine']['models'])"),
+    (r'["\']gpt-3', "AI-modell (ska vara CONFIG['ai_engine']['models'])"),
+    (r'["\']claude-', "AI-modell (ska vara CONFIG['ai_engine']['models'])"),
+    # API-nycklar (Gemini börjar med AIza)
+    (r'["\']AIza[A-Za-z0-9_-]{30,}', "API-nyckel (ska vara CONFIG['ai_engine']['api_key'])"),
+    # Slack tokens
+    (r'["\']xox[pbar]-', "Slack-token (ska vara CONFIG['slack'])"),
 ]
 
 
@@ -276,6 +292,61 @@ def check_hardcoded_paths(filepath: str, content: str) -> list:
     return violations
 
 
+# === PRINCIP 9: Config-värden ska läsas från config ===
+
+def check_hardcoded_config_values(filepath: str, content: str) -> list:
+    """
+    Leta efter hårdkodade config-värden som AI-modeller och API-nycklar.
+    
+    Violations:
+    - "gemini-pro", "gemini-flash", etc.
+    - API-nycklar (AIza...)
+    - Slack-tokens (xoxp-, xoxb-)
+    """
+    violations = []
+    lines = content.split('\n')
+    
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        
+        # Hoppa över kommentarer
+        if stripped.startswith('#'):
+            continue
+        
+        # Separera kod från inline-kommentar
+        code_part = line.split('#')[0] if '#' in line else line
+        
+        # Kolla varje mönster - men ENDAST i kod-delen (inte kommentarer)
+        for pattern, message in HARDCODED_CONFIG_PATTERNS:
+            if re.search(pattern, code_part):
+                # Undantag: om det är i config-filer
+                if 'config' in filepath.lower() and filepath.endswith('.yaml'):
+                    continue
+                
+                # Undantag: validate_rules.py själv
+                if 'validate_rules.py' in filepath:
+                    continue
+                
+                # Undantag: om CONFIG finns på samma rad (läser från config)
+                if 'CONFIG' in code_part or "config[" in code_part.lower() or "config.get" in code_part.lower():
+                    continue
+                
+                # Undantag: om MODELS eller PROMPTS läses (redan från config)
+                if 'MODELS' in code_part or 'PROMPTS' in code_part:
+                    continue
+                
+                violations.append({
+                    "file": filepath,
+                    "line": i,
+                    "rule": "P9",
+                    "message": f"Hårdkodat config-värde: {message}",
+                    "code": stripped[:100]
+                })
+                break  # En violation per rad räcker
+    
+    return violations
+
+
 # === MAIN VALIDATOR ===
 
 def validate_file(filepath: str) -> list:
@@ -297,6 +368,7 @@ def validate_file(filepath: str) -> list:
     violations.extend(check_hardcoded_prompts(filepath, content))
     violations.extend(check_hardcoded_taxonomy(filepath, content))
     violations.extend(check_hardcoded_paths(filepath, content))
+    violations.extend(check_hardcoded_config_values(filepath, content))
     
     return violations
 

@@ -76,11 +76,17 @@ doc_converter:
 
     INSTRUKTION:
     Analysera texten och placera den i exakt EN av ovanstående kategorier.
-    Skapa även ett "context_id" som grupperar detta dokument med andra (t.ex. PROJEKT_X).
 
     VIKTIG INSTRUKTION FÖR ENTITETER:
     Om texten nämner en person eller ett projekt som finns i listan KÄNDA PERSONER/PROJEKT,
     använd EXAKT det namnet. Gissa INTE egna varianter.
+    
+    ENTITETSNAMN REGLER:
+    - IGNORERA filnamn som entiteter (*.py, *.js, *.md, *.txt etc) - de är INTE projekt
+    - KORTA namn till max 40 tecken. "Abelsson eller annan funktionell..." → "Abelsson"
+    - Om ett namn har förkortning i parentes, t.ex. "Carbon Copy Machine (CCM)", 
+      använd BARA huvudnamnet "Carbon Copy Machine" och lägg förkortningen som alias
+    - Entiteter ska vara NAMN på personer/organisationer/projekt, inte beskrivningar
     
     ALIAS-DETEKTION:
     Om texten innehåller namnvarianter som troligen refererar till samma entitet,
@@ -88,15 +94,24 @@ doc_converter:
     - "Sänk" nämns i samma kontext som "Cenk" → potential alias
     - "Adda-grejen" och "Adda PoC" → potential alias
     - Smeknamn, förkortningar, felstavningar
+    - "CCM" och "Carbon Copy Machine" → potential alias
     
     OUTPUT KRAV (Returnera ENDAST denna JSON):
     {
       "summary": "Kort sammanfattning på svenska. INKLUDERA viktiga datum och aktiviteter.",
-      "graph_master_node": "MÅSTE vara ett värde exakt från listan GILTIGA MASTER NODER.",
-      "graph_sub_node": "En passande underkategori.",
-      "context_id": "Ett ID för att gruppera detta (SNAKE_CASE).",
-      "keywords": ["Sökord för vektordatabasen", "interna begrepp", "specifika begrepp", "slang", "övrigt med relevans"],
-      "entities": ["Identifierade personer", "Företag"],
+      "graph_nodes": {
+        "Händelser": 0.7,
+        "Teknologier": 0.3,
+        "Person": {
+          "Tommy Olsson": 0.6
+        },
+        "Aktör": {
+          "Adda": 0.8
+        },
+        "Projekt": {
+          "Adda PoC": 0.9
+        }
+      },
       "dates_mentioned": ["YYYY-MM-DD format för alla datum nämnda i texten"],
       "actions": ["Aktiviteter som nämns (t.ex. 'Användartester', 'Demo', 'Möte')"],
       "deadlines": [
@@ -106,8 +121,41 @@ doc_converter:
         {"name_variant": "Smeknamn/variant", "likely_refers_to": "Formellt namn", "entity_type": "Person|Aktör|Projekt", "confidence": "low|medium|high"}
       ]
     }
+    
+    GRAPH_NODES INSTRUKTION:
+    - Abstrakta koncept (masternoder som Händelser, Teknologier): Ange relevans 0.0-1.0
+    - Typade entiteter (Person, Aktör, Projekt): Dict med namn → relevans
+    - CUTOFF: Inkludera ENDAST noder med relevans >= 0.2
+    - Dokumentet kan vara relevant för FLERA masternoder (viktat)
+    - Använd EXAKT namn från KÄNDA PERSONER/PROJEKT om tillgängliga
 
 # --- Chatt-agenten (RAG-gränssnitt) ---
 chat:
   system_prompt: |
     Du är "MyMemory", en intelligent assistent. Svara baserat på bifogad kontext.
+
+# --- Dreamer (Taxonomi-konsolidering) ---
+dreamer:
+  consolidation_prompt: |
+    Du är en taxonomi-expert. Din uppgift är att kategorisera NYA noder under rätt masternode.
+    
+    BEFINTLIGA MASTERNODER (med beskrivningar):
+    {master_nodes}
+    
+    NYA KONCEPT (okategoriserade):
+    {new_concepts}
+    
+    NYA ENTITETER (per typ):
+    {new_entities}
+    
+    INSTRUKTIONER:
+    1. Placera varje nytt koncept under den MEST passande masternoden
+    2. Använd EXAKT nodnamn från BEFINTLIGA MASTERNODER ovan som nycklar
+    3. Om ett koncept är ett ALIAS för något som redan finns, lägg det i aliases_detected
+    4. Var konsekvent - liknande koncept ska hamna under samma masternode
+    5. VARJE koncept MÅSTE placeras under en masternode - ingen får utelämnas
+    
+    RETURNERA ENDAST GILTIG JSON. Exempel på korrekt format:
+    {"Händelser": ["Sprint review", "Standup"], "Teknologier": ["Kubernetes"], "Person": ["Anna"], "aliases_detected": [{"alias": "K8s", "canonical": "Kubernetes", "confidence": "high"}]}
+    
+    Nycklar MÅSTE vara exakta nodnamn från BEFINTLIGA MASTERNODER. Inkludera INTE noder utan nya koncept.
