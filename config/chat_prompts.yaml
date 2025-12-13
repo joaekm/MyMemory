@@ -98,49 +98,47 @@ planner_evaluate:
   instruction: |
     MISSION: {mission_goal}
     
-    === NUVARANDE ARBETSHYPOTES (TORNET) ===
+    === VÅRT ARBETSMINNE (TORNET) ===
     {current_synthesis}
     
-    === SAMLADE BEVIS ===
+    === BEVIS I LÅDAN ===
     {existing_facts}
     
-    === NYA DOKUMENT ATT ANALYSERA ===
+    === NYA DOKUMENT ===
     {candidates}
     
     TIDIGARE SÖKNINGAR: {past_queries}
     ITERATION: {iteration}/{max_iterations}
     
-    DIN UPPGIFT (ROLLING HYPOTHESIS):
+    === DIN UPPGIFT: PIVOT OR PERSEVERE ===
     
-    1. LÄS dokumenten noggrant
+    Bedöm hur den nya missionen förhåller sig till Tornet:
     
-    2. JÄMFÖR med arbetshypotesen:
-       - BEKRÄFTELSE: Ny info stödjer hypotesen → Förtydliga
-       - KONFLIKT: Ny info motsäger → SKRIV OM (nyare datum vinner)
-       - NYTT SPÅR: Integrera i berättelsen
-       - IRRELEVANT: Ignorera
+    BEDÖM RELEVANS (tänk högt i "reasoning"):
+    - FORTSÄTTNING: Ny mission bygger på Tornet → Bygg vidare
+    - JÄMFÖRELSE: "Hur var det med X då?" → Använd Tornet som referens
+    - HELT NYTT ÄMNE: → Skriv NY syntes, MEN återanvänd relevanta fakta
     
-    3. UPPDATERA TORNET:
-       - Skriv en NY sammanhängande text som inkorporerar allt
-       - Var SPECIFIK: datum, namn, belopp, versioner
-       - Max 200 ord
+    REGLER:
+    1. Du är INTE låst. Du FÅR skriva om Tornet helt om fokus bytt.
+    2. Men RIV INTE i onödan. Sök den röda tråden om den finns.
+    3. Håll dig strikt till fakta (gamla + nya).
+    4. Var SPECIFIK: datum, namn, belopp, versioner.
+    5. Max 300 ord i updated_synthesis.
     
-    4. EXTRAHERA BEVIS:
-       - Korta, specifika punkter som stödjer hypotesen
-       - Format: "Faktura 600k (2025-11-25)"
+    STYR NÄSTA STEG:
+    - COMPLETE: Missionen är besvarad
+    - SEARCH: Saknar viktigt (ange next_search_query)
+    - ABORT: Inga relevanta dokument
     
-    5. STYR NÄSTA STEG:
-       - COMPLETE: Missionen är besvarad
-       - SEARCH: Saknar viktigt
-       - ABORT: Inga relevanta dokument
-       
-    OBS: Sök INTE på samma sak igen.
+    OBS: Sök INTE på samma sak igen (kolla past_queries).
     
     Svara ENDAST med JSON:
     {{
+        "reasoning": "Kort: Fortsättning/Jämförelse/Nytt ämne?",
         "status": "SEARCH" | "COMPLETE" | "ABORT",
-        "updated_synthesis": "Ny sammanhängande text som beskriver läget...",
-        "new_evidence": ["Specifikt bevis 1", "Specifikt bevis 2"],
+        "updated_synthesis": "Den text som bäst beskriver NU-läget",
+        "new_evidence": ["Specifikt bevis 1 (datum)", "Bevis 2"],
         "next_search_query": "Ny sökning..." | null,
         "gaps": ["Vad som saknas"]
     }}

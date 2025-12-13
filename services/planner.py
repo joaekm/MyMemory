@@ -1,17 +1,16 @@
 """
-Planner - Pipeline v8.1 "Rolling Hypothesis"
+Planner - Pipeline v8.2 "Pivot or Persevere"
 
 Ansvar:
 - ReAct-loop: Reason + Act tills mission_goal uppfyllt
+- Pivot or Persevere: Plannern avgör kontextrelevans
 - Rolling Hypothesis: Bygger current_synthesis (Tornet) iterativt
-- Evaluate state: Jämför ny info med befintlig syntes
 - Identifiera gaps och learnings
-- Konvergens/stagnation-detection
 
-v8.1 Changes:
-- Rolling Hypothesis: current_synthesis uppdateras varje loop
-- Facts List: Appendar bevis (append-only)
-- Tornet + Bevisen = Komplett bild
+v8.2 Changes:
+- Pivot or Persevere: Tar emot befintligt Torn + Facts från SessionEngine
+- MIN_ITERATIONS_BEFORE_COMPLETE: Tvingar tornbyggande först
+- Returnerar state för SessionEngine att spara
 
 Princip: HARDFAIL > Silent Fallback
 """
@@ -25,11 +24,11 @@ from google import genai
 # Import utilities
 try:
     from services.utils.json_parser import parse_llm_json
-    from services.utils.state_manager import PlannerState, save_state, load_state
+    from services.session_engine import PlannerState
 except ImportError as _import_err:
     try:
         from utils.json_parser import parse_llm_json
-        from utils.state_manager import PlannerState, save_state, load_state
+        from session_engine import PlannerState
     except ImportError as e:
         raise ImportError(f"HARDFAIL: Kan inte importera utilities: {e}") from e
 
@@ -68,6 +67,7 @@ MODEL_LITE = CONFIG['ai_engine']['models']['model_lite']
 
 # Konstanter
 MAX_ITERATIONS = 5
+MIN_ITERATIONS_BEFORE_COMPLETE = 2  # v8.2: Tvinga tornbyggande först
 
 # AI Client (lazy init)
 _AI_CLIENT = None
@@ -203,31 +203,38 @@ def run_planner_loop(
     initial_candidates: list,
     candidates_formatted: str,
     session_id: str,
+    initial_synthesis: str = "",
+    initial_facts: list = None,
     search_fn=None,
     debug_trace: dict = None
 ) -> dict:
     """
-    ReAct-loop med Facts List (v7.5).
+    ReAct-loop med Pivot or Persevere (v8.2).
     
     Arkitektur:
-    1. Topp 3 dokument levereras med FULLTEXT direkt (Lost in the Middle fix)
-    2. LLM extraherar FAKTA från dokument (appendar till lista, skriver INTE om)
-    3. SEARCH, COMPLETE eller ABORT
-    4. Rapport byggs från facts-lista först i slutet
+    1. Tar emot befintligt Torn + Facts från SessionEngine (Pivot or Persevere)
+    2. Plannern avgör själv om kontexten är relevant
+    3. Tvingar minst MIN_ITERATIONS_BEFORE_COMPLETE innan COMPLETE tillåts
+    4. Returnerar state för SessionEngine att spara
     
     Args:
         mission_goal: Uppdrag från IntentRouter
         query: Original användarfråga
         initial_candidates: Kandidater från ContextBuilder (full metadata)
         candidates_formatted: Formaterad sträng med topp 3 fulltext
-        session_id: Unikt session-ID för state persistence
+        session_id: Unikt session-ID
+        initial_synthesis: Befintligt Torn från SessionEngine (Pivot or Persevere)
+        initial_facts: Befintliga Facts från SessionEngine (Pivot or Persevere)
         search_fn: Funktion för extra sökningar (optional)
         debug_trace: Dict för debug-info (optional)
     
     Returns:
         dict med:
             - status: "COMPLETE" | "ABORT" | "PARTIAL"
-            - report: Fakta-lista formaterad som rapport
+            - report: Rapport baserad på Tornet
+            - current_synthesis: Uppdaterat Torn
+            - facts: Uppdaterade Facts
+            - state: PlannerState för SessionEngine att spara
             - sources_used: Lista med använda filnamn
             - gaps: Vad som saknas
     """
@@ -238,19 +245,21 @@ def run_planner_loop(
         LOGGER.debug(f"Fallback-import context_builder: {_import_err}")
         from context_builder import format_candidates_for_planner, TOP_N_FULLTEXT
     
-    # Ladda eller skapa state
-    state = load_state(session_id)
-    if state is None:
-        state = PlannerState(
-            session_id=session_id,
-            mission_goal=mission_goal,
-            query=query,
-            candidates=initial_candidates,
-            facts=[],  # Bevisen (append-only)
-            current_synthesis="",  # v8.1: Tornet (Rolling Hypothesis)
-            working_findings="",  # Legacy
-            past_queries=[]
-        )
+    # v8.2: Skapa state med befintligt Torn + Facts (Pivot or Persevere)
+    state = PlannerState(
+        session_id=session_id,
+        mission_goal=mission_goal,
+        query=query,
+        candidates=initial_candidates,
+        facts=initial_facts or [],
+        current_synthesis=initial_synthesis,
+        past_queries=[]
+    )
+    
+    if initial_synthesis:
+        LOGGER.info(f"Pivot or Persevere: Startar med befintligt Torn ({len(initial_synthesis)} chars)")
+    if initial_facts:
+        LOGGER.info(f"Pivot or Persevere: Startar med {len(initial_facts)} befintliga Facts")
     
     # Nuvarande kandidater formaterade för prompt
     current_candidates_formatted = candidates_formatted
@@ -285,9 +294,6 @@ def run_planner_loop(
         
         state.gaps = eval_result.get('gaps', [])
         
-        # Spara state för debuggbarhet
-        save_state(state)
-        
         # Spara till debug_trace
         if debug_trace is not None:
             # v8.1: Visa synthesis preview och facts
@@ -303,46 +309,56 @@ def run_planner_loop(
         
         # Check för COMPLETE
         if eval_result['status'] == 'COMPLETE':
-            LOGGER.info(f"Planner COMPLETE efter {state.iteration + 1} iterationer")
-            
-            # Extrahera källor från candidates
-            sources = [c.get('filename', 'unknown') for c in state.candidates[:10]]
-            
-            # v8.1: Rapport baseras på Tornet (synthesis) + bevis (facts)
-            if state.current_synthesis:
-                report = state.current_synthesis
-            elif state.facts:
-                report = "\n".join([f"- {fact}" for fact in state.facts])
+            # v8.2: Tvinga tornbyggande innan COMPLETE tillåts
+            if state.iteration < MIN_ITERATIONS_BEFORE_COMPLETE:
+                LOGGER.info(f"Tvingar fortsatt sökning (iteration {state.iteration} < {MIN_ITERATIONS_BEFORE_COMPLETE})")
+                eval_result['status'] = 'SEARCH'
+                if not eval_result.get('next_search_query'):
+                    # Generera en default sökning baserat på mission
+                    eval_result['next_search_query'] = f"{mission_goal} detaljer"
             else:
-                report = state.working_findings  # Legacy fallback
-            
-            return {
-                "status": "COMPLETE",
-                "report": report,
-                "current_synthesis": state.current_synthesis,  # v8.1
-                "facts": state.facts,  # v8.1
-                "sources_used": sources,
-                "gaps": state.gaps
-            }
+                LOGGER.info(f"Planner COMPLETE efter {state.iteration + 1} iterationer")
+                
+                # Extrahera källor från candidates
+                sources = [c.get('filename', 'unknown') for c in state.candidates[:10]]
+                
+                # v8.2: Rapport baseras på Tornet
+                if state.current_synthesis:
+                    report = state.current_synthesis
+                elif state.facts:
+                    report = "\n".join([f"- {fact}" for fact in state.facts])
+                else:
+                    report = ""
+                
+                return {
+                    "status": "COMPLETE",
+                    "report": report,
+                    "current_synthesis": state.current_synthesis,
+                    "facts": state.facts,
+                    "state": state,  # v8.2: För SessionEngine
+                    "sources_used": sources,
+                    "gaps": state.gaps
+                }
         
         # Check för ABORT
         if eval_result['status'] == 'ABORT':
             LOGGER.warning(f"Planner ABORT: {state.gaps}")
             
             # Returnera PARTIAL om vi har NÅGOT
-            if state.current_synthesis or state.facts or state.working_findings:
+            if state.current_synthesis or state.facts:
                 sources = [c.get('filename', 'unknown') for c in state.candidates[:5]]
                 if state.current_synthesis:
                     report = state.current_synthesis
                 elif state.facts:
                     report = "\n".join([f"- {fact}" for fact in state.facts])
                 else:
-                    report = state.working_findings
+                    report = ""
                 return {
                     "status": "PARTIAL",
                     "report": report,
                     "current_synthesis": state.current_synthesis,
                     "facts": state.facts,
+                    "state": state,  # v8.2
                     "sources_used": sources,
                     "gaps": state.gaps
                 }
@@ -353,6 +369,7 @@ def run_planner_loop(
                 "report": "",
                 "current_synthesis": "",
                 "facts": [],
+                "state": state,  # v8.2
                 "sources_used": [],
                 "gaps": state.gaps
             }
@@ -417,21 +434,22 @@ def run_planner_loop(
     # Returnera vad vi har
     sources = [c.get('filename', 'unknown') for c in state.candidates[:10]]
     
-    # v8.1: Rapport baseras på Tornet + bevis
+    # v8.2: Rapport baseras på Tornet
     if state.current_synthesis:
         report = state.current_synthesis
     elif state.facts:
         report = "\n".join([f"- {fact}" for fact in state.facts])
     else:
-        report = state.working_findings
+        report = ""
     
-    has_content = state.current_synthesis or state.facts or state.working_findings
+    has_content = state.current_synthesis or state.facts
     
     return {
         "status": "PARTIAL" if has_content else "ABORT",
         "report": report,
         "current_synthesis": state.current_synthesis,
         "facts": state.facts,
+        "state": state,  # v8.2: För SessionEngine
         "sources_used": sources,
         "gaps": state.gaps
     }

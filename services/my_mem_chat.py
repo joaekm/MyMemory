@@ -29,23 +29,14 @@ from rich.table import Table
 from rich import box
 from rich.live import Live
 
-# Pipeline v8.1 imports
+# Pipeline v8.2 imports - SessionEngine
 try:
-    from services.intent_router import route_intent
-    from services.context_builder import build_context, search
-    from services.planner import run_planner_loop
-    from services.synthesizer import synthesize
-    from services.utils.session_manager import SessionManager, get_session, reset_session
+    from services.session_engine import SessionEngine, get_engine, reset_engine
 except ImportError as _import_err:
-    # Direkt körning - försök importera utan services-prefix
     try:
-        from intent_router import route_intent
-        from context_builder import build_context, search
-        from planner import run_planner_loop
-        from synthesizer import synthesize
-        from utils.session_manager import SessionManager, get_session, reset_session
+        from session_engine import SessionEngine, get_engine, reset_engine
     except ImportError as e:
-        raise ImportError(f"HARDFAIL: Kan inte importera pipeline-moduler: {e}") from e
+        raise ImportError(f"HARDFAIL: Kan inte importera session_engine: {e}") from e
 
 # Entity Register (OBJEKT-44) - Använder graph_builder direkt
 try:
@@ -286,234 +277,47 @@ def _handle_feedback(canonical: str, alias: str, entity_type: str) -> str:
 
 
 
-# === PIPELINE v8.1 "The Chameleon Delivery" ===
-def execute_pipeline_v7(query, chat_history, debug_mode=False, debug_trace=None):
-    """
-    Pipeline v8.1: IntentRouter → ContextBuilder → Planner Loop → Synthesizer
-    
-    Args:
-        query: Användarens fråga
-        chat_history: Lista med tidigare meddelanden
-        debug_mode: Om True, visa debug-paneler
-        debug_trace: Dict att samla debug-info till (optional)
-    
-    Returns:
-        dict: {
-            "status": "COMPLETE" | "ABORT" | "NO_RESULTS" | "ERROR",
-            "report": Markdown-rapport för Synthesizer,
-            "current_synthesis": Tornet (Rolling Hypothesis),
-            "facts": Bevisen (lista),
-            "op_mode": "query" | "deliver",
-            "delivery_format": Format för leverans,
-            "sources": Lista med filnamn,
-            "gaps": Lista med identifierade luckor,
-            "reason": Anledning vid ABORT
-        }
-    """
-    import uuid
-    start_time = time.time()
-    
-    # Fas 1: IntentRouter (AI) - Skapa Mission Goal
-    if debug_mode:
-        console.print("[dim]→ IntentRouter (Mission Goal)...[/dim]")
-    
-    intent_data = route_intent(query, chat_history, debug_trace=debug_trace)
-    
-    if intent_data.get('status') == 'ERROR':
-        LOGGER.error(f"HARDFAIL: IntentRouter misslyckades: {intent_data.get('reason')}")
-        raise RuntimeError(f"HARDFAIL: IntentRouter misslyckades: {intent_data.get('reason')}")
-    
-    # v8.1: Extrahera op_mode och delivery_format
-    op_mode = intent_data.get('op_mode', 'query')
-    delivery_format = intent_data.get('delivery_format', 'Narrativ Analys')
-    
-    if debug_mode:
-        debug_content = f"[bold]Mission Goal:[/bold] {intent_data.get('mission_goal', '')[:100]}...\n"
-        debug_content += f"[cyan]Keywords:[/cyan] {intent_data.get('keywords')}\n"
-        debug_content += f"[green]Entities:[/green] {intent_data.get('entities')}\n"
-        debug_content += f"[magenta]Tidsfilter:[/magenta] {intent_data.get('time_filter')}\n"
-        debug_content += f"[bold yellow]Op Mode:[/bold yellow] {op_mode}\n"
-        debug_content += f"[bold yellow]Format:[/bold yellow] {delivery_format}"
-        debug_panel("1. INTENT", debug_content, style="magenta", debug_mode=debug_mode)
-    
-    # Fas 2: ContextBuilder (Kod) - Initial sökning
-    if debug_mode:
-        console.print("[dim]→ ContextBuilder (Initial)...[/dim]")
-    
-    context_result = build_context(
-        keywords=intent_data.get('keywords', []),
-        entities=intent_data.get('entities', []),
-        time_filter=intent_data.get('time_filter'),
-        debug_trace=debug_trace
-    )
-    
-    # Logga sökning för Dreaming
-    stats = context_result.get('stats', {})
-    total_hits = stats.get('lake_hits', 0) + stats.get('vector_hits', 0)
-    log_search(
-        query=query,
-        keywords=intent_data.get('keywords', []),
-        hits=total_hits,
-        intent="v7.0"
-    )
-    
-    if context_result.get('status') == 'NO_RESULTS':
-        if debug_mode:
-            console.print(f"[yellow]Inga träffar: {context_result.get('reason')}[/yellow]")
-        return {
-            "status": "NO_RESULTS",
-            "reason": context_result.get('reason'),
-            "suggestion": context_result.get('suggestion'),
-            "report": "",
-            "sources": [],
-            "gaps": ["Inga dokument hittades"]
-        }
-    
-    if debug_mode:
-        debug_content = f"[bold]Lake:[/bold] {stats.get('lake_hits', 0)} träffar\n"
-        debug_content += f"[bold]Vektor:[/bold] {stats.get('vector_hits', 0)} träffar\n"
-        debug_content += f"[bold]Efter dedup:[/bold] {stats.get('after_dedup', 0)} kandidater"
-        debug_panel("2. CONTEXT", debug_content, style="green", debug_mode=debug_mode)
-    
-    # Fas 3: Planner Loop (AI) - ReAct Loop
-    if debug_mode:
-        console.print("[dim]→ Planner Loop (ReAct)...[/dim]")
-    
-    session_id = str(uuid.uuid4())[:8]
-    mission_goal = intent_data.get('mission_goal', query)
-    initial_candidates = context_result.get('candidates_full', [])
-    candidates_formatted = context_result.get('candidates_formatted', '')
-    
-    planner_result = run_planner_loop(
-        mission_goal=mission_goal,
-        query=query,
-        initial_candidates=initial_candidates,
-        candidates_formatted=candidates_formatted,
-        session_id=session_id,
-        search_fn=search,  # Callback för extra sökningar
-        debug_trace=debug_trace
-    )
-    
-    if debug_mode:
-        # Visa info från varje iteration (Knowledge Refinement)
-        if debug_trace:
-            for key in sorted([k for k in debug_trace.keys() if k.startswith('planner_iter_')]):
-                iter_data = debug_trace[key]
-                iter_num = key.split('_')[-1]
-                status = iter_data.get('status', '')
-                next_search = iter_data.get('next_search', '')
-                console.print(f"[dim]  Iteration {iter_num}: {status}[/dim]")
-                if next_search:
-                    console.print(f"[dim]    → Nästa sökning: '{next_search}'[/dim]")
-        
-        debug_content = f"[bold]Status:[/bold] {planner_result.get('status')}\n"
-        if planner_result.get('reason'):
-            debug_content += f"[bold]Reason:[/bold] {planner_result.get('reason')[:100]}...\n"
-        debug_content += f"[bold]Använda källor:[/bold] {len(planner_result.get('sources_used', []))}\n"
-        debug_content += f"[bold]Luckor:[/bold] {planner_result.get('gaps', [])}"
-        debug_panel("3. PLANNER", debug_content, style="blue", debug_mode=debug_mode)
-    
-    # Spara timing
-    if debug_trace is not None:
-        debug_trace['pipeline_duration'] = round(time.time() - start_time, 2)
-        debug_trace['op_mode'] = op_mode
-        debug_trace['delivery_format'] = delivery_format
-    
-    return {
-        "status": planner_result.get('status', 'ERROR'),
-        "report": planner_result.get('report', ''),
-        # v8.1: Rolling Hypothesis
-        "current_synthesis": planner_result.get('current_synthesis', ''),
-        "facts": planner_result.get('facts', []),
-        "op_mode": op_mode,
-        "delivery_format": delivery_format,
-        "sources": planner_result.get('sources_used', []),
-        "gaps": planner_result.get('gaps', []),
-        "reason": planner_result.get('reason')
-    }
-
-
 # --- PROCESS QUERY (API) ---
 def process_query(query: str, chat_history: list = None, collect_debug: bool = False) -> dict:
     """
     Bearbetar en fråga och returnerar ett strukturerat svar.
     
-    Pipeline v7.0: IntentRouter → ContextBuilder → Planner Loop → Synthesizer
+    Pipeline v8.2: SessionEngine hanterar orchestration.
+    OBS: Denna funktion skapar en ny engine per anrop (stateless).
+    För stateful API, använd SessionEngine direkt.
     
     Args:
         query: Användarens fråga
-        chat_history: Lista med tidigare meddelanden [{"role": "user/assistant", "content": "..."}]
+        chat_history: Lista med tidigare meddelanden (ignoreras - engine hanterar)
         collect_debug: Om True, samla debug-information i svaret
     
     Returns:
         dict: {
-            "answer": "Svaret från Gemini...",
+            "answer": "Svaret...",
             "sources": ["fil1.md", "fil2.md"],
             "debug_trace": {...}
         }
     """
-    if chat_history is None:
-        chat_history = []
+    # Skapa en stateless engine för detta anrop
+    engine = SessionEngine()
     
     debug_trace = {} if collect_debug else None
-    start_time = time.time()
     
-    # === PIPELINE v7.0 ===
-    pipeline_result = execute_pipeline_v7(query, chat_history, debug_mode=False, debug_trace=debug_trace)
-    
-    if pipeline_result.get('status') == 'NO_RESULTS':
+    try:
+        result = engine.run_query(query, debug_mode=False, debug_trace=debug_trace)
+        
         return {
-            "answer": f"Hittade ingen relevant information. {pipeline_result.get('suggestion', '')}",
+            "answer": result.get('answer', ''),
+            "sources": result.get('sources', []),
+            "debug_trace": result.get('debug_trace', {}) if collect_debug else {}
+        }
+    except Exception as e:
+        LOGGER.error(f"process_query error: {e}")
+        return {
+            "answer": f"Ett fel uppstod: {e}",
             "sources": [],
             "debug_trace": debug_trace if collect_debug else {}
         }
-    
-    if pipeline_result.get('status') == 'ERROR':
-        return {
-            "answer": f"Ett fel uppstod: {pipeline_result.get('reason', 'Okänt fel')}",
-            "sources": [],
-            "debug_trace": debug_trace if collect_debug else {}
-        }
-    
-    # Syntes - v8.1 hanterar COMPLETE, ABORT + Chameleon Delivery
-    report = pipeline_result.get('report', '')
-    sources = pipeline_result.get('sources', [])
-    gaps = pipeline_result.get('gaps', [])
-    status = pipeline_result.get('status', 'COMPLETE')
-    reason = pipeline_result.get('reason')
-    # v8.1: Rolling Hypothesis + Chameleon
-    current_synthesis = pipeline_result.get('current_synthesis', '')
-    facts = pipeline_result.get('facts', [])
-    op_mode = pipeline_result.get('op_mode', 'query')
-    delivery_format = pipeline_result.get('delivery_format', 'Narrativ Analys')
-    
-    synth_result = synthesize(
-        query=query,
-        report=report,
-        gaps=gaps,
-        status=status,
-        reason=reason,
-        chat_history=chat_history,
-        debug_trace=debug_trace,
-        # v8.1: Chameleon Delivery
-        op_mode=op_mode,
-        delivery_format=delivery_format,
-        current_synthesis=current_synthesis,
-        facts=facts
-    )
-    
-    answer = synth_result.get('answer', 'Fel vid syntes')
-    
-    # Spara timing
-    if debug_trace is not None:
-        debug_trace['total_duration'] = round(time.time() - start_time, 2)
-        debug_trace['pipeline_version'] = 'v8.1'
-    
-    return {
-        "answer": answer,
-        "sources": sources,
-        "debug_trace": debug_trace if collect_debug else {}
-    }
 
 
 # --- CHAT LOOP (CLI) ---
@@ -521,29 +325,26 @@ def chat_loop(debug_mode=False):
     """
     Interaktiv chattloop för CLI-användning.
     
-    Pipeline v8.1: IntentRouter → ContextBuilder → Planner Loop → Synthesizer
-    (med Session State Persistence för cross-turn minne)
+    Pipeline v8.2: SessionEngine hanterar all orchestration.
+    Pivot or Persevere: Tornet bevaras mellan turer.
     
     Args:
         debug_mode: Om True, visa debug-paneler under körning
     """
     console.clear()
     product_name = CONFIG.get('system', {}).get('product_name', 'MyMemory')
-    console.print(Panel(f"[bold white]{product_name} v8.1[/bold white]", style="on blue", box=box.DOUBLE, expand=False))
+    console.print(Panel(f"[bold white]{product_name} v8.2[/bold white]", style="on blue", box=box.DOUBLE, expand=False))
     if debug_mode:
-        console.print("[dim]Debug Mode: ON[/dim]")
+        console.print("[dim]Debug Mode: ON (Pivot or Persevere)[/dim]")
     
-    # v8.1: Session State Persistence
-    session = get_session()
-    chat_history = [] 
+    # v8.2: SessionEngine hanterar allt
+    engine = get_engine()
 
     try:
         while True:
             query = Prompt.ask("\n[bold green]Du[/bold green]")
             if query.lower() in ['exit', 'quit', 'sluta']:
-                # Avsluta session
-                end_session(chat_history)
-                reset_session()
+                reset_engine()
                 console.print("[dim]Session avslutad.[/dim]")
                 break
             if not query.strip(): continue
@@ -573,56 +374,32 @@ def chat_loop(debug_mode=False):
                         console.print(f"[bold purple]MyMem:[/bold purple] {result}")
                         continue
 
-            # Debug trace för CLI
+            # === PIPELINE v8.2 via SessionEngine ===
             debug_trace = {} if debug_mode else None
             
-            # === PIPELINE v8.1 ===
-            pipeline_result = execute_pipeline_v7(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
-            
-            if pipeline_result.get('status') in ['NO_RESULTS', 'ERROR']:
-                console.print(f"[red]{pipeline_result.get('reason', 'Ingen information hittades.')}[/red]")
+            try:
+                result = engine.run_query(query, debug_mode=debug_mode, debug_trace=debug_trace)
+            except Exception as e:
+                LOGGER.error(f"Pipeline error: {e}")
+                console.print(f"[red]Fel: {e}[/red]")
                 continue
             
-            # v8.1: Extrahera alla fält
-            report = pipeline_result.get('report', '')
-            gaps = pipeline_result.get('gaps', [])
-            status = pipeline_result.get('status', 'COMPLETE')
-            reason = pipeline_result.get('reason')
-            current_synthesis = pipeline_result.get('current_synthesis', '')
-            facts = pipeline_result.get('facts', [])
-            op_mode = pipeline_result.get('op_mode', 'query')
-            delivery_format = pipeline_result.get('delivery_format', 'Narrativ Analys')
+            if result.get('status') == 'NO_RESULTS':
+                console.print(f"[yellow]{result.get('answer', 'Ingen information hittades.')}[/yellow]")
+                continue
             
+            # Visa svar
             console.print("\n[bold purple]MyMem:[/bold purple]")
+            console.print(Markdown(result.get('answer', '')))
             
-            # v8.1: Använd synthesize() med Chameleon Delivery
-            synth_result = synthesize(
-                query=query,
-                report=report,
-                gaps=gaps,
-                status=status,
-                reason=reason,
-                chat_history=chat_history,
-                debug_trace=debug_trace,
-                op_mode=op_mode,
-                delivery_format=delivery_format,
-                current_synthesis=current_synthesis,
-                facts=facts
-            )
-            
-            answer = synth_result.get('answer', 'Fel vid syntes')
-            console.print(Markdown(answer))
-            
-            # Uppdatera historik
-            chat_history.append({"role": "user", "content": query})
-            chat_history.append({"role": "assistant", "content": answer})
-            
-            # v8.1: Uppdatera session för cross-turn persistence
-            session.update_history(query, answer)
+            # Debug: Visa Torn-status
+            if debug_mode:
+                synthesis_len = len(engine.get_synthesis())
+                facts_count = len(engine.get_facts())
+                console.print(f"[dim]Torn: {synthesis_len} chars | Facts: {facts_count}[/dim]")
     
     except KeyboardInterrupt:
-        end_session(chat_history)
-        reset_session()
+        reset_engine()
         console.print("\n[dim]Session avbruten.[/dim]")
         console.print("Hejdå!")
 
