@@ -3,38 +3,35 @@
 intent_router:
   role: "Du analyserar användarfrågor för att avgöra sökstrategi och graf-expansion."
   instruction: |
-    DAGENS DATUM: {date} ({weekday})
+    TIDPUNKT: {timestamp} ({weekday})
     
     FRÅGA: {query}
     
     CHATTHISTORIK:
     {history}
     
-    TILLGÄNGLIGA HUVUDNODER I GRAFEN:
-    {taxonomy_nodes}
+    KUNSKAPSGRAF (Taxonomi med beskrivningar och innehåll):
+    {taxonomy_context}
     
     UPPGIFT:
     1. Klassificera intent:
-       - STRICT: Användaren söker specifik fakta (datum, namn, citat, siffror)
-       - RELAXED: Användaren söker idéer, sammanfattningar, eller bred förståelse
+       - STRICT: Specifik fakta (datum, namn, citat, siffror)
+       - RELAXED: Idéer, sammanfattningar, bred förståelse
     
-    2. Parsa tidsreferenser till absoluta datum:
-       - "igår" → beräkna från dagens datum
-       - "förra veckan" → intervall (after/before)
-       - "senaste mötet" → null (för svårt att avgöra exakt)
+    2. Parsa tidsreferenser till absoluta datum
     
-    3. Upplös kontextreferenser från historiken:
-       - "det projektet" → vilket projekt nämndes senast?
-       - "han/hon" → vem pratade vi om?
+    3. Upplös kontextreferenser från historiken
     
-    4. Extrahera sökord (keywords) och en bred semantisk söksträng (vector_query)
+    4. Extrahera sökord (keywords):
+       - Analysera taxonomin för att hitta SPECIFIKA namn
+       - Om användaren nämner "Adda", leta i taxonomin och lägg till "Adda PoC" om det finns
+       - Inkludera både generella och specifika termer
     
     5. Bestäm graf-expansion (graph_paths):
-       - Om STRICT: tom lista [] (ingen expansion)
-       - Om RELAXED: lista relevanta huvudnoder att expandera
-       - Välj ENDAST från listan ovan
+       - Om STRICT: tom lista [] (ingen expansion behövs - du har redan valt specifika keywords)
+       - Om RELAXED: lista relevanta huvudnoder
     
-    Svara JSON:
+    Svara ENDAST med JSON:
     {{
         "intent": "STRICT" | "RELAXED",
         "keywords": ["ord1", "ord2"],
@@ -211,66 +208,7 @@ consolidator:
         "insights": "Övergripande insikter om användarbeteende..."
     }}
 
-# === LEGACY (v5.2 - behålls för bakåtkompatibilitet) ===
-
-planner:
-  role: "Din roll är att förstå syfte och riktning i chatthistoriken och leverera relevanta NYCKELORD för semantisk, taxonomisk och matchningsmässig sökning."
-  instruction: |
-    Datum: {date}
-    
-    UPPGIFT (Resonera enligt följande steg):
-    1. Analysera vad användaren har för intention totalt sett baserat på historiken.
-    2. Om chatten innehåller flera tydliga ämnen eller teman basera din sökning på DET SENASTE ämnet och IGNORERA historiken för de tidigare.
-    3. Baserat på steg 1 och 2 ta fram en kortfattad beskrivning (ranking_criteria) som kan fungera av en viktning/rankning av dokumentträffar från datasökningar.
-    4. Identifiera och leverera RELEVANTA NYCKELORD (hunter_keywords) för taxonomisk och matchningsmässig sökning i tillgänglig data. Din uppgift är INTE att tolka och ALDRIG gissa. utgå specifikt från det du känner till. Skriv endast ett (1) ord per nyckelord.
-    5. Skapa en bred SEMANTISK SÖKSTRÄNG (vector_query) för en sökning i vektordatabasen baserat på tidigare steg.
-
-    Svara JSON:
-    {{
-        "reasoning": "Kort analys av situationen och varför vi söker som vi gör...",
-        "ranking_criteria": "KRITERIER",
-        "hunter_keywords": ["Nyckelord1", "Nyckelord2"], 
-        "vector_query": "Semantisk söksträng..."
-    }}
-
-judge:
-  role: "Din roll är att rangordna dokument baserat deras relevans enligt en sökfråga från en användare."
-  instruction: |
-    Din uppgift är att rangordna dokument.
-    
-    KRITERIER: "{criteria}"
-    
-    DOKUMENT ATT BEDÖMA:
-    {documents}
-    
-    INSTRUKTION:
-    1. Ge varje dokument en relevanspoäng från 0 till 10 (0: helt irelevant, 10: fullständigt relevant)
-    2. Returnera en JSON-lista med IDn sorterad fallande på poäng.
-    
-    Svara JSON:
-    {{
-        "reasoning": "Kort motivering om varför du valde dessa dokument...",
-        "ranked_ids": ["id_bäst", "id_näst_bäst", "..."]
-    }}
-
-synthesizer:
-  role: "Du är MyMem."
-  instruction: |
-    Svara på frågan detaljerat baserat på bifogad dokumentation.
-    
-    VIKTIGT OM KÄLLOR:
-    - Dokument märkta "SEARCH_LAKE" innehåller EXAKTA matchningar och kan betraktas som FAKTA.
-    - Dokument märkta "VEKTOR" är semantiskt lika och kan betraktas som KONTEXT.
-    - Prioritera FAKTA över KONTEXT men gör en helhetsbedömning baserat på den senast ställda frågan. 
-    
-    INSTRUKTIONER:
-    1. Läs alla källor.
-    2. Försök att avgöra baserat på chatthistoriken vilken typ av svar som önskas. (Kortfattat, detaljerat, Strategiskt, Taktiskt, Operativt)
-    3. Avgör om du har tillräcklig information för att ge ett fullgott svar. om inte, notera kort och avstå ett svar.
-    4. Svara på den senaste frågan enligt ovan.
-    
-    DOKUMENTATION:
-    {context_docs}
+# === SIMULATION (Interrogator) ===
 
 interrogator:
   role: |
@@ -293,7 +231,7 @@ interrogator:
   instruction: |
     Du testar MyMemory för att lösa en arbetsuppgift.
     
-    DAGENS DATUM: {date} ({weekday})
+    TIDPUNKT: {timestamp} ({weekday})
     
     UPPGIFT: {task}
     
@@ -399,7 +337,7 @@ interrogator_check:
   instruction: |
     Du försöker lösa följande uppgift med hjälp av MyMemory:
     
-    DAGENS DATUM: {date} ({weekday})
+    TIDPUNKT: {timestamp} ({weekday})
     
     UPPGIFT: {task}
     

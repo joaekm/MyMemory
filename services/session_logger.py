@@ -306,3 +306,4 @@ def get_session_state() -> dict:
         "searches": _SESSION.searches,
         "feedback": _SESSION.feedback
     }
+

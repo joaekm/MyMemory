@@ -33,7 +33,10 @@ import datetime
 import json
 import time
 import yaml
+import logging
 from pathlib import Path
+
+LOGGER = logging.getLogger('SimulateSession')
 
 # Lägg till parent-mappen i path så vi kan importera services
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -91,13 +94,13 @@ def generate_question(ai_client, task: dict, conversation_history: list) -> str:
     else:
         history_text = "(Ingen tidigare konversation)"
     
-    today = datetime.date.today()
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     weekday = get_swedish_weekday()
     
     instruction = PROMPTS['interrogator']['instruction'].format(
         task=task['description'],
         conversation_history=history_text,
-        date=today,
+        timestamp=timestamp,
         weekday=weekday
     )
     
@@ -110,6 +113,7 @@ def generate_question(ai_client, task: dict, conversation_history: list) -> str:
         question = question.strip('"\'')
         return question
     except Exception as e:
+        LOGGER.warning(f"Fråge-generering misslyckades: {e}")
         return f"[FEL VID FRÅGE-GENERERING: {e}]"
 
 
@@ -127,13 +131,13 @@ def check_task_completion(ai_client, task: dict, conversation_history: list) -> 
         for item in conversation_history
     ])
     
-    today = datetime.date.today()
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     weekday = get_swedish_weekday()
     
     instruction = PROMPTS['interrogator_check']['instruction'].format(
         task=task['description'],
         conversation_history=history_text,
-        date=today,
+        timestamp=timestamp,
         weekday=weekday
     )
     
@@ -146,6 +150,7 @@ def check_task_completion(ai_client, task: dict, conversation_history: list) -> 
         result = json.loads(text)
         return result
     except Exception as e:
+        LOGGER.warning(f"Task completion check misslyckades: {e}")
         return {"done": False, "confidence": 0, "reason": f"Fel: {e}"}
 
 
@@ -172,6 +177,7 @@ def evaluate_task_completion(ai_client, task: dict, conversation_history: list) 
         evaluation = json.loads(text)
         return evaluation
     except Exception as e:
+        LOGGER.warning(f"Utvärdering misslyckades: {e}")
         return {
             "score": 0,
             "verdict": "Utvärderingsfel",
@@ -542,6 +548,14 @@ class IncrementalLogger:
                 lines.append("```")
                 lines.append("")
                 
+                # IntentRouter LLM raw
+                if dt.get('intent_router_raw'):
+                    lines.append("**LLM Raw Response:**")
+                    lines.append("```")
+                    lines.append(dt.get('intent_router_raw', '')[:1000])
+                    lines.append("```")
+                    lines.append("")
+                
                 # 2. ContextBuilder
                 lines.append("#### 2. CONTEXT BUILDER")
                 cb = dt.get('context_builder', {})
@@ -583,8 +597,32 @@ class IncrementalLogger:
                     lines.append(f"**Selected IDs:** {dt.get('planner_selected_ids', [])}")
                     lines.append("")
                 
-                # 4. Timing
-                lines.append("#### 4. TIMING")
+                # Planner LLM raw responses
+                if dt.get('planner_selection_llm_raw'):
+                    lines.append("**Selection LLM Raw:**")
+                    lines.append("```")
+                    lines.append(dt.get('planner_selection_llm_raw', '')[:1000])
+                    lines.append("```")
+                    lines.append("")
+                
+                if dt.get('planner_report_llm_raw'):
+                    lines.append("**Report LLM Raw:**")
+                    lines.append("```")
+                    lines.append(dt.get('planner_report_llm_raw', '')[:2000])
+                    lines.append("```")
+                    lines.append("")
+                
+                # 4. SYNTHESIZER
+                lines.append("#### 4. SYNTHESIZER")
+                if dt.get('synthesizer_llm_raw'):
+                    lines.append("**LLM Raw Response:**")
+                    lines.append("```")
+                    lines.append(dt.get('synthesizer_llm_raw', '')[:1500])
+                    lines.append("```")
+                    lines.append("")
+                
+                # 5. Timing
+                lines.append("#### 5. TIMING")
                 lines.append("```")
                 lines.append(f"Pipeline Duration: {dt.get('pipeline_duration', 0):.2f}s")
                 lines.append(f"Total Duration: {dt.get('total_duration', 0):.2f}s")

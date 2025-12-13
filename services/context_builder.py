@@ -68,24 +68,22 @@ TAXONOMY = _load_taxonomy()
 
 def _expand_keywords_via_graph(keywords: list, graph_paths: list) -> list:
     """
-    Expandera keywords med subnoder från angivna graf-paths.
+    Lägg till huvudnoder som extra söktermer (ingen sub_node-expansion).
+    IntentRouter ansvarar nu för specifika urval.
     
     Args:
         keywords: Ursprungliga sökord
-        graph_paths: Lista med huvudnoder att expandera (från IntentRouter)
+        graph_paths: Lista med huvudnoder att lägga till
     
     Returns:
         Expanderad lista med sökord
     """
-    expanded = set(keywords)  # Börja med ursprungliga
+    expanded = set(keywords)
     
     for path in graph_paths:
         if path in TAXONOMY:
-            subnodes = TAXONOMY[path]
-            # Lägg till subnoder som extra söktermer
-            for subnode in subnodes[:10]:  # Max 10 subnoder per huvudnod
-                expanded.add(subnode)
-            LOGGER.debug(f"Expanderade '{path}' med {len(subnodes[:10])} subnoder")
+            expanded.add(path)  # Bara huvudnoden
+            LOGGER.debug(f"La till huvudnod '{path}' som sökterm")
     
     return list(expanded)
 
@@ -125,9 +123,8 @@ def _search_lake(keywords: list) -> dict:
                     yaml_content = content[3:yaml_end]
                     metadata = yaml.safe_load(yaml_content)
                     summary = metadata.get('summary', '')[:200]
-                except Exception as e:
-                    LOGGER.error(f"HARDFAIL: Kunde inte parsa YAML-header i {filename}: {e}")
-                    raise ValueError(f"HARDFAIL: Kunde inte parsa YAML-header i {filename}") from e
+                except:
+                    pass
             
             if not summary:
                 summary = content[:200].replace("\n", " ")

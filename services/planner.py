@@ -73,9 +73,8 @@ def _select_documents(query: str, intent: str, candidates: list) -> list:
     prompt_template = PROMPTS.get('planner_select', {}).get('instruction', '')
     
     if not prompt_template:
-        # Fallback: ta top 15 baserat på score
-        LOGGER.warning("planner_select prompt saknas, använder score-fallback")
-        return [c['id'] for c in candidates[:15]]
+        LOGGER.error("HARDFAIL: planner_select prompt saknas i chat_prompts.yaml")
+        raise ValueError("HARDFAIL: planner_select prompt saknas i chat_prompts.yaml")
     
     # Formatera kandidater för prompten
     candidates_text = ""
@@ -97,6 +96,7 @@ def _select_documents(query: str, intent: str, candidates: list) -> list:
         )
         
         text = response.text.replace("```json", "").replace("```", "").strip()
+        LOGGER.debug(f"Planner selection LLM-svar: {text[:500]}...")
         result = json.loads(text)
         
         selected_ids = result.get('selected_ids', [])
@@ -106,12 +106,15 @@ def _select_documents(query: str, intent: str, candidates: list) -> list:
         selected_ids = [id for id in selected_ids if id in valid_ids]
         
         LOGGER.info(f"Planner valde {len(selected_ids)} dokument")
-        return selected_ids
+        return selected_ids, text  # Returnera även rå LLM-text
         
+    except json.JSONDecodeError as e:
+        LOGGER.error(f"HARDFAIL: Planner selection JSON parse error: {e}")
+        LOGGER.error(f"Rå LLM-respons: {text}")
+        raise ValueError(f"HARDFAIL: Planner selection kunde inte parsa AI-svar: {e}") from e
     except Exception as e:
-        LOGGER.error(f"Planner selection misslyckades: {e}")
-        # Fallback: top 15 baserat på score
-        return [c['id'] for c in candidates[:15]]
+        LOGGER.error(f"HARDFAIL: Planner selection misslyckades: {e}")
+        raise RuntimeError(f"HARDFAIL: Planner selection misslyckades: {e}") from e
 
 
 def _create_report(query: str, intent: str, documents: list) -> dict:
@@ -161,6 +164,7 @@ def _create_report(query: str, intent: str, documents: list) -> dict:
         )
         
         text = response.text.replace("```json", "").replace("```", "").strip()
+        LOGGER.debug(f"Planner report LLM-svar: {text[:500]}...")
         result = json.loads(text)
         
         return {
@@ -168,11 +172,13 @@ def _create_report(query: str, intent: str, documents: list) -> dict:
             "report": result.get('report', ''),
             "sources_used": result.get('sources_used', []),
             "gaps": result.get('gaps', []),
-            "confidence": result.get('confidence', 0.5)
+            "confidence": result.get('confidence', 0.5),
+            "llm_raw": text  # Rå LLM-text för debug
         }
         
     except json.JSONDecodeError as e:
         LOGGER.error(f"HARDFAIL: Planner report JSON parse error: {e}")
+        LOGGER.error(f"Rå LLM-respons: {text}")
         return {
             "status": "ERROR",
             "reason": f"JSON parse error: {e}",
@@ -227,10 +233,11 @@ def create_report(context_result: dict, intent_data: dict, debug_trace: dict = N
         }
     
     # Steg 1: Välj dokument baserat på summaries
-    selected_ids = _select_documents(query, intent, candidates)
+    selected_ids, selection_llm_raw = _select_documents(query, intent, candidates)
     
     if debug_trace is not None:
         debug_trace['planner_selected_ids'] = selected_ids
+        debug_trace['planner_selection_llm_raw'] = selection_llm_raw
     
     # Steg 2: Hämta fulltext för valda dokument
     # Skapa lookup från candidates_full
@@ -264,6 +271,7 @@ def create_report(context_result: dict, intent_data: dict, debug_trace: dict = N
             "confidence": result.get('confidence', 0),
             "report_length": len(result.get('report', ''))
         }
+        debug_trace['planner_report_llm_raw'] = result.get('llm_raw')
     
     return result
 

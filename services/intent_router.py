@@ -73,6 +73,30 @@ def _load_taxonomy_nodes() -> list:
 
 TAXONOMY_NODES = _load_taxonomy_nodes()
 
+
+def _load_taxonomy_str() -> str:
+    """Formatera taxonomin som läsbar kontext för LLM."""
+    if not os.path.exists(TAXONOMY_FILE):
+        return ""
+    try:
+        with open(TAXONOMY_FILE, 'r', encoding='utf-8') as f:
+            taxonomy = json.load(f)
+        
+        lines = []
+        for node, data in taxonomy.items():
+            desc = data.get('description', '')
+            subs = data.get('sub_nodes', [])
+            lines.append(f"{node}: {desc}")
+            if subs:
+                lines.append(f"  Innehåller: {', '.join(subs[:20])}")
+        return "\n".join(lines)
+    except Exception as e:
+        LOGGER.warning(f"Kunde inte formatera taxonomi: {e}")
+        return ""
+
+
+TAXONOMY_CONTEXT = _load_taxonomy_str()
+
 # AI Client (lazy init)
 _AI_CLIENT = None
 
@@ -129,17 +153,17 @@ def route_intent(query: str, chat_history: list = None, debug_trace: dict = None
         raise ValueError("HARDFAIL: intent_router prompt saknas i chat_prompts.yaml")
     
     # Bygg prompt
-    today = datetime.date.today()
+    now = datetime.datetime.now()
+    timestamp = now.strftime("%Y-%m-%d %H:%M")
     weekday = _get_swedish_weekday()
     history_text = _format_history(chat_history)
-    taxonomy_text = ", ".join(TAXONOMY_NODES)
     
     full_prompt = prompt_template.format(
-        date=today,
+        timestamp=timestamp,
         weekday=weekday,
         query=query,
         history=history_text,
-        taxonomy_nodes=taxonomy_text
+        taxonomy_context=TAXONOMY_CONTEXT
     )
     
     try:
@@ -151,6 +175,7 @@ def route_intent(query: str, chat_history: list = None, debug_trace: dict = None
         
         # Parsa JSON-svar
         text = response.text.replace("```json", "").replace("```", "").strip()
+        LOGGER.debug(f"IntentRouter LLM-svar: {text[:500]}...")
         result = json.loads(text)
         
         # Validera och normalisera
@@ -186,6 +211,7 @@ def route_intent(query: str, chat_history: list = None, debug_trace: dict = None
         
     except json.JSONDecodeError as e:
         LOGGER.error(f"HARDFAIL: IntentRouter JSON parse error: {e}")
+        LOGGER.error(f"Rå LLM-respons: {text}")
         raise ValueError(f"HARDFAIL: IntentRouter kunde inte parsa AI-svar: {e}") from e
         
     except Exception as e:

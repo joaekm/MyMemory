@@ -23,12 +23,14 @@ try:
     from services.intent_router import route_intent
     from services.context_builder import build_context
     from services.planner import create_report
+    from services.synthesizer import synthesize
 except ImportError:
     # Direkt körning - försök importera utan services-prefix
     try:
         from intent_router import route_intent
         from context_builder import build_context
         from planner import create_report
+        from synthesizer import synthesize
     except ImportError as e:
         raise ImportError(f"HARDFAIL: Kan inte importera pipeline-moduler: {e}") from e
 
@@ -270,297 +272,6 @@ def _handle_feedback(canonical: str, alias: str, entity_type: str) -> str:
         return f"✗ Kunde inte spara aliaset: {e}"
 
 
-# --- STEP 2a: THE HUNTER ---
-def search_lake(keywords):
-    if not keywords: return {}
-    hits = {}
-    if not os.path.exists(LAKE_PATH): return hits
-    
-    try:
-        files = [f for f in os.listdir(LAKE_PATH) if f.endswith('.md')]
-    except Exception as e:
-        LOGGER.error(f"HARDFAIL: Kunde inte lista filer i Lake: {e}")
-        raise RuntimeError(f"HARDFAIL: Kunde inte lista filer i Lake: {e}") from e
-    
-    for filename in files:
-        filepath = os.path.join(LAKE_PATH, filename)
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read()
-                content_lower = content.lower()
-                
-                summary = "Ingen sammanfattning"
-                if "summary:" in content:
-                    try:
-                        summary_part = content.split("summary:")[1].split("\n")[0].strip()
-                        if len(summary_part) > 5: summary = summary_part
-                    except Exception as e:
-                        LOGGER.error(f"HARDFAIL: Kunde inte parsa summary i {filename}: {e}")
-                        raise RuntimeError(f"HARDFAIL: Kunde inte parsa summary i {filename}") from e
-
-                for kw in keywords:
-                    if kw.lower() in content_lower:
-                        file_id = filename
-                        if "_" in filename:
-                             parts = filename.split('_')
-                             if len(parts[-1]) > 10: file_id = parts[-1].replace('.md', '')
-                        
-                        hits[file_id] = {
-                            "id": file_id,
-                            "filename": filename,
-                            "summary": summary,
-                            "content": content,
-                            "source": f"SEARCH_LAKE ({kw})",
-                            "score": 1.0
-                        }
-                        break 
-        except Exception as e:
-            LOGGER.error(f"HARDFAIL: Kunde inte läsa fil {filename}: {e}")
-            raise RuntimeError(f"HARDFAIL: Kunde inte läsa fil {filename}") from e
-    return hits
-
-# --- STEP 1: PLANERING ---
-def plan_query(user_query, chat_history, debug_mode=False, debug_trace=None):
-    history_text = ""
-    if chat_history:
-        history_text = "\nKONTEXT (Tidigare dialog):\n" + "\n".join([f"{m['role'].upper()}: {m['content']}" for m in chat_history])
-
-    instruction_template = PROMPTS['planner']['instruction']
-    prompt_content = instruction_template.format(date=datetime.date.today())
-    
-    full_prompt = f"FRÅGA: \"{user_query}\"\n{history_text}\n\n{prompt_content}"
-
-    try:
-        ai_client = get_ai_client()
-        resp = ai_client.models.generate_content(model=MODEL_LITE, contents=full_prompt)
-        text = resp.text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(text)
-        
-        # Visa resonemanget!
-        debug_content = f"[bold]Resonemang:[/bold] {data.get('reasoning', 'Inget resonemang')}\n\n"
-        debug_content += f"[cyan]Jägaren:[/cyan] {data.get('hunter_keywords')}\n"
-        debug_content += f"[green]Vektorn:[/green] {data.get('vector_query')}\n"
-        debug_content += f"[magenta]Kriterier:[/magenta] {data.get('ranking_criteria')}"
-        
-        debug_panel("1. PLANERING", debug_content, style="magenta", debug_mode=debug_mode, debug_trace=debug_trace, trace_key="plan")
-        
-        # Spara strukturerad plan-data till trace (utökad)
-        if debug_trace is not None:
-            debug_trace["plan_data"] = data
-            debug_trace["hunter_keywords"] = data.get('hunter_keywords', [])
-            debug_trace["vector_query"] = data.get('vector_query', '')
-            debug_trace["ranking_criteria"] = data.get('ranking_criteria', '')
-            debug_trace["plan_reasoning"] = data.get('reasoning', '')
-        
-        return data
-    except Exception as e:
-        LOGGER.error(f"Plan error: {e}")
-        return {"ranking_criteria": "Relevans", "hunter_keywords": [], "vector_query": user_query}
-
-# --- STEP 4: RE-RANKING ---
-def rerank_candidates(candidates, criteria, debug_mode=False, debug_trace=None):
-    if not candidates: return [], None
-    
-    docs_metadata = []
-    for doc in candidates.values():
-        snippet = doc.get('summary', '')
-        if len(snippet) < 10: snippet = doc.get('content', '')[:300].replace("\n", " ")
-        docs_metadata.append({
-            "id": doc['id'],
-            "filename": doc['filename'],
-            "source": doc['source'],
-            "summary_snippet": snippet
-        })
-    
-    # Visa vad domaren får jobba med
-    if debug_mode:
-        input_table = Table(title="Dokument till Domaren", show_header=True, header_style="bold magenta", box=box.SIMPLE, width=90)
-        input_table.add_column("Källa", style="cyan", width=15)
-        input_table.add_column("Filnamn", style="green")
-        for d in docs_metadata[:10]:
-            input_table.add_row(d['source'], d['filename'])
-        console.print(input_table)
-
-    instruction_template = PROMPTS['judge']['instruction']
-    full_prompt = instruction_template.format(
-        criteria=criteria,
-        documents=json.dumps(docs_metadata, indent=2)
-    )
-    
-    try:
-        ai_client = get_ai_client()
-        resp = ai_client.models.generate_content(model=MODEL_LITE, contents=full_prompt)
-        text = resp.text.replace("```json", "").replace("```", "").strip()
-        rank_data = json.loads(text)
-        ranked_ids = rank_data.get('ranked_ids', [])
-        
-        debug_content = f"[bold]Resonemang:[/bold] {rank_data.get('reasoning', 'Inget resonemang')}\n\n"
-        debug_content += f"[bold]Valda IDn:[/bold] {ranked_ids[:5]}..."
-        debug_panel("4. DOMAREN (Beslut)", debug_content, style="cyan", debug_mode=debug_mode, debug_trace=debug_trace, trace_key="judge")
-        
-        # Spara judge-data till trace (utökad)
-        if debug_trace is not None:
-            debug_trace["judge_data"] = rank_data
-            debug_trace["judge_input_count"] = len(docs_metadata)
-            debug_trace["judge_input_files"] = [d['filename'] for d in docs_metadata]
-            debug_trace["judge_reasoning"] = rank_data.get('reasoning', '')
-        
-        if not ranked_ids:
-            if debug_mode: console.print("[dim yellow]   ⚠️ Domaren returnerade 0 dokument. Använder fallback.[/dim yellow]")
-            return list(candidates.keys()), rank_data
-            
-        return ranked_ids, rank_data
-    except Exception as e:
-        LOGGER.error(f"Rerank error: {e}")
-        return list(candidates.keys()), None
-
-# --- MAIN SEARCH PIPELINE ---
-def execute_pipeline(query, chat_history, debug_mode=False, debug_trace=None):
-    """
-    Kör sökpipelinen och returnerar context_docs.
-    
-    Args:
-        query: Användarens fråga
-        chat_history: Lista med tidigare meddelanden
-        debug_mode: Om True, visa debug-paneler
-        debug_trace: Dict att samla debug-info till (optional)
-    
-    Returns:
-        list: Lista med kontext-dokument för syntes
-    """
-    plan = plan_query(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
-    candidates = {}
-    hunter_hits_count = 0
-    vector_hits_count = 0
-
-    # 2. GREP SÖK (Jägaren)
-    hunter_files = []
-    if plan.get('hunter_keywords'):
-        hunter_hits = search_lake(plan['hunter_keywords'])
-        if hunter_hits:
-            candidates.update(hunter_hits)
-            hunter_hits_count = len(hunter_hits)
-            hunter_files = [{"filename": h['filename'], "matched_keyword": h['source']} for h in hunter_hits.values()]
-            
-            if debug_mode:
-                msg = "\n".join([f"- {h['filename']}" for h in list(hunter_hits.values())[:5]])
-                if len(hunter_hits) > 5: msg += f"\n... (+{len(hunter_hits)-5} till)"
-                debug_panel("2. JÄGAREN (Träffar)", msg, style="green", debug_mode=debug_mode, debug_trace=debug_trace, trace_key="hunter")
-    
-    # Spara hunter-resultat till trace
-    if debug_trace is not None:
-        debug_trace["hunter_files"] = hunter_files
-
-    # 3. VEKTORN
-    vector_files = []
-    try:
-        chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
-        emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        coll = chroma_client.get_collection(name="dfm_knowledge_base", embedding_function=emb_fn)
-        
-        vec_res = coll.query(query_texts=[plan['vector_query']], n_results=20)
-        
-        vector_hits_debug = []
-        for i, uid in enumerate(vec_res['ids'][0]):
-            distance = vec_res['distances'][0][i]
-            meta = vec_res['metadatas'][0][i]
-            filename = meta.get('filename')
-            
-            # Spara alla vektorträffar till trace (även duplicates)
-            vector_files.append({
-                "filename": filename,
-                "distance": round(distance, 3),
-                "already_in_candidates": uid in candidates
-            })
-            
-            if uid in candidates: continue 
-            
-            text = vec_res['documents'][0][i]
-            
-            candidates[uid] = {
-                "id": uid,
-                "filename": filename,
-                "summary": meta.get('summary', 'Ingen sammanfattning'),
-                "content": text,
-                "source": "VEKTOR",
-                "score": 0.5
-            }
-            vector_hits_debug.append(f"{filename} ({distance:.2f})")
-        
-        vector_hits_count = len(vector_hits_debug)
-            
-        if debug_mode and vector_hits_debug:
-             msg = "\n".join(vector_hits_debug[:5])
-             if len(vector_hits_debug) > 5: msg += f"\n... (+{len(vector_hits_debug)-5} till)"
-             debug_panel("3. VEKTORN", msg, style="blue", debug_mode=debug_mode, debug_trace=debug_trace, trace_key="vector")
-
-    except Exception as e:
-        if debug_mode:
-            console.print(f"[red]Vektor fel: {e}[/red]")
-        LOGGER.error(f"Vector search error: {e}")
-    
-    # Spara vektor-resultat till trace
-    if debug_trace is not None:
-        debug_trace["vector_files"] = vector_files
-
-    # Spara träffstatistik till trace
-    if debug_trace is not None:
-        debug_trace["hits_hunter"] = hunter_hits_count
-        debug_trace["hits_vector"] = vector_hits_count
-
-    # 4. RE-RANKING
-    ranked_ids, judge_data = rerank_candidates(candidates, plan['ranking_criteria'], debug_mode=debug_mode, debug_trace=debug_trace)
-    
-    # 5. CONTEXT ASSEMBLY
-    final_context = []
-    sources = []
-    total_chars = 0
-    MAX_CHARS = 100000
-    
-    for uid in ranked_ids:
-        if uid not in candidates: continue
-        doc = candidates[uid]
-        
-        content = doc['content']
-        if len(content) < 1000 and os.path.exists(os.path.join(LAKE_PATH, doc['filename'])):
-             try:
-                 with open(os.path.join(LAKE_PATH, doc['filename']), 'r') as f:
-                     content = f.read()
-             except Exception as e:
-                 LOGGER.error(f"HARDFAIL: Kunde inte läsa fil {doc['filename']}: {e}")
-                 raise RuntimeError(f"HARDFAIL: Kunde inte läsa fil {doc['filename']}") from e
-        
-        entry = f"--- DOKUMENT ({doc['source']}) ---\nID: {uid}\nFIL: {doc['filename']}\nINNEHÅLL:\n{content}\n"
-        
-        if total_chars + len(entry) > MAX_CHARS:
-            break
-            
-        final_context.append(entry)
-        sources.append(doc['filename'])
-        total_chars += len(entry)
-
-    debug_panel("5. SYNTES", f"Valde {len(final_context)} dokument.\nTotalt: {total_chars} tecken.", style="red", debug_mode=debug_mode, debug_trace=debug_trace, trace_key="synthesis")
-    
-    # Spara utökad info till trace
-    if debug_trace is not None:
-        debug_trace["sources"] = sources
-        debug_trace["docs_selected"] = len(final_context)
-        debug_trace["total_chars"] = total_chars
-        debug_trace["total_candidates"] = len(candidates)
-        debug_trace["ranked_order"] = ranked_ids[:10] if ranked_ids else []
-        # Sammanfattning av flödet
-        debug_trace["pipeline_summary"] = {
-            "keywords_used": plan.get('hunter_keywords', []),
-            "vector_query_used": plan.get('vector_query', ''),
-            "hunter_found": hunter_hits_count,
-            "vector_found": vector_hits_count,
-            "total_candidates": len(candidates),
-            "docs_to_synthesis": len(final_context),
-            "chars_to_synthesis": total_chars
-        }
-    
-    return final_context
-
 
 # === PIPELINE v6.0 ===
 def execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=None):
@@ -671,18 +382,16 @@ def execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=None)
 
 
 # --- PROCESS QUERY (API) ---
-def process_query(query: str, chat_history: list = None, collect_debug: bool = False, use_v6: bool = True) -> dict:
+def process_query(query: str, chat_history: list = None, collect_debug: bool = False) -> dict:
     """
     Bearbetar en fråga och returnerar ett strukturerat svar.
     
-    Denna funktion är avsedd för programmatisk användning (API).
-    Den kör hela pipelinen och returnerar svaret som en dictionary.
+    Pipeline v6.0: IntentRouter → ContextBuilder → Planner → Synthesizer
     
     Args:
         query: Användarens fråga
         chat_history: Lista med tidigare meddelanden [{"role": "user/assistant", "content": "..."}]
         collect_debug: Om True, samla debug-information i svaret
-        use_v6: Om True, använd Pipeline v6.0 (default). Om False, använd legacy v5.2.
     
     Returns:
         dict: {
@@ -697,94 +406,46 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
     debug_trace = {} if collect_debug else None
     start_time = time.time()
     
-    if use_v6:
-        # === PIPELINE v6.0 ===
-        pipeline_result = execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=debug_trace)
-        
-        if pipeline_result.get('status') == 'NO_RESULTS':
-            return {
-                "answer": f"Hittade ingen relevant information. {pipeline_result.get('suggestion', '')}",
-                "sources": [],
-                "debug_trace": debug_trace if collect_debug else {}
-            }
-        
-        if pipeline_result.get('status') == 'ERROR':
-            return {
-                "answer": f"Ett fel uppstod: {pipeline_result.get('reason', 'Okänt fel')}",
-                "sources": [],
-                "debug_trace": debug_trace if collect_debug else {}
-            }
-        
-        # Syntes med rapport istället för råa dokument
-        report = pipeline_result.get('report', '')
-        sources = pipeline_result.get('sources', [])
-        gaps = pipeline_result.get('gaps', [])
-        
-        # Syntes med prompt från config
-        synth_template = PROMPTS.get('synthesizer_v6', {}).get('instruction', '')
-        if not synth_template:
-            LOGGER.error("HARDFAIL: synthesizer_v6 prompt saknas i chat_prompts.yaml")
-            return {
-                "answer": "Konfigurationsfel: synthesizer_v6 prompt saknas",
-                "sources": sources,
-                "debug_trace": debug_trace if collect_debug else {}
-            }
-        
-        synth_prompt = synth_template.format(
-            report=report,
-            gaps=gaps if gaps else "Inga kända luckor",
-            query=query
-        )
-        
-        contents = []
-        for msg in chat_history:
-            role = "model" if msg['role'] == "assistant" else "user"
-            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
-        
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=synth_prompt)]))
-        
-    else:
-        # === LEGACY PIPELINE v5.2 ===
-        context_docs = execute_pipeline(query, chat_history, debug_mode=False, debug_trace=debug_trace)
-        
-        if not context_docs:
-            return {
-                "answer": "Hittade ingen relevant information för att besvara frågan.",
-                "sources": [],
-                "debug_trace": debug_trace if collect_debug else {}
-            }
-        
-        synthesizer_template = PROMPTS['synthesizer']['instruction']
-        system_prompt = synthesizer_template.format(context_docs="\n".join(context_docs))
-        
-        contents = []
-        for msg in chat_history:
-            role = "model" if msg['role'] == "assistant" else "user"
-            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
-            
-        full_message = f"{system_prompt}\n\nFRÅGA: {query}"
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=full_message)]))
-        
-        sources = debug_trace.get("sources", []) if debug_trace else []
-
-    # Syntes (gemensam för båda pipelines)
-    try:
-        ai_client = get_ai_client()
-        # Synthesizer använder LITE - rapporten är redan kurerad av Planner (PRO)
-        response = ai_client.models.generate_content(model=MODEL_LITE, contents=contents)
-        answer = response.text
-    except Exception as e:
-        LOGGER.error(f"Synthesis error: {e}")
-        answer = f"Fel vid generering av svar: {e}"
+    # === PIPELINE v6.0 ===
+    pipeline_result = execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=debug_trace)
+    
+    if pipeline_result.get('status') == 'NO_RESULTS':
+        return {
+            "answer": f"Hittade ingen relevant information. {pipeline_result.get('suggestion', '')}",
+            "sources": [],
+            "debug_trace": debug_trace if collect_debug else {}
+        }
+    
+    if pipeline_result.get('status') == 'ERROR':
+        return {
+            "answer": f"Ett fel uppstod: {pipeline_result.get('reason', 'Okänt fel')}",
+            "sources": [],
+            "debug_trace": debug_trace if collect_debug else {}
+        }
+    
+    # Syntes
+    report = pipeline_result.get('report', '')
+    sources = pipeline_result.get('sources', [])
+    gaps = pipeline_result.get('gaps', [])
+    
+    synth_result = synthesize(
+        query=query,
+        report=report,
+        gaps=gaps,
+        chat_history=chat_history,
+        debug_trace=debug_trace
+    )
+    
+    answer = synth_result.get('answer', 'Fel vid syntes')
     
     # Spara timing
     if debug_trace is not None:
         debug_trace['total_duration'] = round(time.time() - start_time, 2)
-        debug_trace['pipeline_version'] = 'v6.0' if use_v6 else 'v5.2'
+        debug_trace['pipeline_version'] = 'v6.0'
     
     return {
         "answer": answer,
-        "sources": sources if not use_v6 else pipeline_result.get('sources', []),
+        "sources": sources,
         "debug_trace": debug_trace if collect_debug else {}
     }
 
@@ -893,18 +554,18 @@ def _save_session_to_assets(chat_history: list, learnings: list = None, reason: 
 
 
 # --- CHAT LOOP (CLI) ---
-def chat_loop(debug_mode=False, use_v6=True):
+def chat_loop(debug_mode=False):
     """
     Interaktiv chattloop för CLI-användning.
     
+    Pipeline v6.0: IntentRouter → ContextBuilder → Planner → Synthesizer
+    
     Args:
         debug_mode: Om True, visa debug-paneler under körning
-        use_v6: Om True, använd Pipeline v6.0 (default)
     """
     console.clear()
-    version = "v6.0" if use_v6 else "v5.2"
     product_name = CONFIG.get('system', {}).get('product_name', 'MyMemory')
-    console.print(Panel(f"[bold white]{product_name} {version}[/bold white]", style="on blue", box=box.DOUBLE, expand=False))
+    console.print(Panel(f"[bold white]{product_name} v6.0[/bold white]", style="on blue", box=box.DOUBLE, expand=False))
     if debug_mode:
         console.print("[dim]Debug Mode: ON[/dim]")
         
@@ -938,7 +599,6 @@ def chat_loop(debug_mode=False, use_v6=True):
                     continue
             
             # === KOLLA OM DET ÄR NATURLIGT SPRÅK FEEDBACK ===
-            # (Endast om det börjar med typiska feedback-fraser)
             feedback_phrases = ["är samma", "heter egentligen", "kallas också", "är alias för"]
             if any(phrase in query.lower() for phrase in feedback_phrases):
                 feedback = _interpret_feedback(query)
@@ -954,62 +614,40 @@ def chat_loop(debug_mode=False, use_v6=True):
             # Debug trace för CLI
             debug_trace = {} if debug_mode else None
             
-            if use_v6:
-                # === PIPELINE v6.0 ===
-                pipeline_result = execute_pipeline_v6(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
-                
-                if pipeline_result.get('status') in ['NO_RESULTS', 'ERROR']:
-                    console.print(f"[red]{pipeline_result.get('reason', 'Ingen information hittades.')}[/red]")
-                    continue
-                
-                report = pipeline_result.get('report', '')
-                sources = pipeline_result.get('sources', [])
-                gaps = pipeline_result.get('gaps', [])
-                
-                # Syntes med prompt från config
-                synth_template = PROMPTS.get('synthesizer_v6', {}).get('instruction', '')
-                if not synth_template:
-                    console.print("[red]HARDFAIL: synthesizer_v6 prompt saknas i config[/red]")
-                    continue
-                
-                synth_prompt = synth_template.format(
-                    report=report,
-                    gaps=gaps if gaps else "Inga kända luckor",
-                    query=query
-                )
-                
-                contents = []
-                for msg in chat_history:
-                    role = "model" if msg['role'] == "assistant" else "user"
-                    contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
-                
-                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=synth_prompt)]))
-                
-            else:
-                # === LEGACY PIPELINE v5.2 ===
-                context_docs = execute_pipeline(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
-                
-                if not context_docs:
-                    console.print("[red]Hittade ingen information.[/red]")
-                    continue
-                
-                synthesizer_template = PROMPTS['synthesizer']['instruction']
-                system_prompt = synthesizer_template.format(context_docs="\n".join(context_docs))
-                
-                contents = []
-                for msg in chat_history:
-                    role = "model" if msg['role'] == "assistant" else "user"
-                    contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
-                    
-                full_message = f"{system_prompt}\n\nFRÅGA: {query}"
-                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=full_message)]))
-
+            # === PIPELINE v6.0 ===
+            pipeline_result = execute_pipeline_v6(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
+            
+            if pipeline_result.get('status') in ['NO_RESULTS', 'ERROR']:
+                console.print(f"[red]{pipeline_result.get('reason', 'Ingen information hittades.')}[/red]")
+                continue
+            
+            report = pipeline_result.get('report', '')
+            gaps = pipeline_result.get('gaps', [])
+            
             console.print("\n[bold purple]MyMem:[/bold purple]")
+            
+            # Syntes med streaming
+            synth_template = PROMPTS.get('synthesizer_v6', {}).get('instruction', '')
+            if not synth_template:
+                LOGGER.error("HARDFAIL: synthesizer_v6 prompt saknas")
+                console.print("[red]Konfigurationsfel: synthesizer_v6 prompt saknas[/red]")
+                continue
+            
+            synth_prompt = synth_template.format(
+                report=report,
+                gaps=gaps if gaps else "Inga kända luckor",
+                query=query
+            )
+            
+            contents = []
+            for msg in chat_history:
+                role = "model" if msg['role'] == "assistant" else "user"
+                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
+            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=synth_prompt)]))
             
             collected_text = ""
             try:
                 ai_client = get_ai_client()
-                # Synthesizer använder LITE - rapporten är redan kurerad av Planner (PRO)
                 response_stream = ai_client.models.generate_content_stream(model=MODEL_LITE, contents=contents)
                 with Live(Markdown(collected_text), console=console, refresh_per_second=10) as live:
                     for chunk in response_stream:
@@ -1024,7 +662,6 @@ def chat_loop(debug_mode=False, use_v6=True):
                 raise RuntimeError(f"HARDFAIL: AI-syntes misslyckades: {e}") from e
     
     except KeyboardInterrupt:
-        # Extrahera learnings och spara session till Assets
         session_result = end_session(chat_history)
         learnings = session_result.get('learnings', [])
         filepath = _save_session_to_assets(chat_history, learnings, "interrupted")
@@ -1038,6 +675,5 @@ def chat_loop(debug_mode=False, use_v6=True):
 if __name__ == "__main__":
     args = parse_args()
     DEBUG_MODE = args.debug or CONFIG.get('debug', False)
-    USE_V6 = CONFIG.get('pipeline_version', 'v6') == 'v6'  # Default till v6.0
     
-    chat_loop(debug_mode=DEBUG_MODE, use_v6=USE_V6)
+    chat_loop(debug_mode=DEBUG_MODE)
