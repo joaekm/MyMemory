@@ -67,7 +67,8 @@ MODEL_LITE = CONFIG['ai_engine']['models']['model_lite']
 
 # Konstanter
 MAX_ITERATIONS = 5
-MIN_ITERATIONS_BEFORE_COMPLETE = 2  # v8.2: Tvinga tornbyggande först
+GAIN_THRESHOLD = 0.05   # Under detta = "vi hittade inget nytt"
+MAX_PATIENCE = 2        # Antal stagnerade loopar innan exit
 
 # AI Client (lazy init)
 _AI_CLIENT = None
@@ -264,6 +265,9 @@ def run_planner_loop(
     # Nuvarande kandidater formaterade för prompt
     current_candidates_formatted = candidates_formatted
     
+    # Context Gain Delta - "Nöjd eller Utmattad"
+    patience = 0
+    
     while state.iteration < MAX_ITERATIONS:
         LOGGER.info(f"Planner iteration {state.iteration + 1}/{MAX_ITERATIONS}")
         
@@ -294,11 +298,37 @@ def run_planner_loop(
         
         state.gaps = eval_result.get('gaps', [])
         
+        # --- CONTEXT GAIN DELTA ---
+        context_gain = eval_result.get('context_gain', 0.5)
+        LOGGER.info(f"Context gain: {context_gain:.2f}")
+        
+        if context_gain < GAIN_THRESHOLD:
+            patience += 1
+            LOGGER.info(f"Lågt gain ({context_gain:.2f}), patience={patience}/{MAX_PATIENCE}")
+            
+            if patience >= MAX_PATIENCE:
+                LOGGER.info(f"EXHAUSTED efter {state.iteration + 1} iterationer")
+                sources = [c.get('filename', 'unknown') for c in state.candidates[:10]]
+                report = state.current_synthesis if state.current_synthesis else "\n".join([f"- {f}" for f in state.facts])
+                return {
+                    "status": "COMPLETE",
+                    "reason": "Exhausted - no new context found",
+                    "report": report,
+                    "current_synthesis": state.current_synthesis,
+                    "facts": state.facts,
+                    "state": state,
+                    "sources_used": sources,
+                    "gaps": state.gaps
+                }
+        else:
+            patience = 0  # Reset om vi hittade nytt
+        
         # Spara till debug_trace
         if debug_trace is not None:
-            # v8.1: Visa synthesis preview och facts
             debug_trace[f'planner_iter_{state.iteration}'] = {
                 "status": eval_result['status'],
+                "context_gain": context_gain,
+                "patience": patience,
                 "synthesis_preview": state.current_synthesis[:200] if state.current_synthesis else "(tom)",
                 "facts_count": len(state.facts),
                 "facts_preview": state.facts[:3] if state.facts else [],
@@ -309,36 +339,26 @@ def run_planner_loop(
         
         # Check för COMPLETE
         if eval_result['status'] == 'COMPLETE':
-            # v8.2: Tvinga tornbyggande innan COMPLETE tillåts
-            if state.iteration < MIN_ITERATIONS_BEFORE_COMPLETE:
-                LOGGER.info(f"Tvingar fortsatt sökning (iteration {state.iteration} < {MIN_ITERATIONS_BEFORE_COMPLETE})")
-                eval_result['status'] = 'SEARCH'
-                if not eval_result.get('next_search_query'):
-                    # Generera en default sökning baserat på mission
-                    eval_result['next_search_query'] = f"{mission_goal} detaljer"
+            LOGGER.info(f"Planner COMPLETE efter {state.iteration + 1} iterationer")
+            
+            sources = [c.get('filename', 'unknown') for c in state.candidates[:10]]
+            
+            if state.current_synthesis:
+                report = state.current_synthesis
+            elif state.facts:
+                report = "\n".join([f"- {fact}" for fact in state.facts])
             else:
-                LOGGER.info(f"Planner COMPLETE efter {state.iteration + 1} iterationer")
-                
-                # Extrahera källor från candidates
-                sources = [c.get('filename', 'unknown') for c in state.candidates[:10]]
-                
-                # v8.2: Rapport baseras på Tornet
-                if state.current_synthesis:
-                    report = state.current_synthesis
-                elif state.facts:
-                    report = "\n".join([f"- {fact}" for fact in state.facts])
-                else:
-                    report = ""
-                
-                return {
-                    "status": "COMPLETE",
-                    "report": report,
-                    "current_synthesis": state.current_synthesis,
-                    "facts": state.facts,
-                    "state": state,  # v8.2: För SessionEngine
-                    "sources_used": sources,
-                    "gaps": state.gaps
-                }
+                report = ""
+            
+            return {
+                "status": "COMPLETE",
+                "report": report,
+                "current_synthesis": state.current_synthesis,
+                "facts": state.facts,
+                "state": state,
+                "sources_used": sources,
+                "gaps": state.gaps
+            }
         
         # Check för ABORT
         if eval_result['status'] == 'ABORT':

@@ -126,6 +126,13 @@ planner_evaluate:
     4. Var SPECIFIK: datum, namn, belopp, versioner.
     5. Max 300 ord i updated_synthesis.
     
+    BEDÖM CONTEXT GAIN:
+    - Hur mycket NY relevant information hittade du i dokumenten?
+    - 0.0 = Inget nytt (allt fanns redan i Tornet)
+    - 0.3 = Lite nytt (detaljer, förtydliganden)
+    - 0.7 = Mycket nytt (nya fakta, nya vinklar)
+    - 1.0 = Helt ny kunskap
+    
     STYR NÄSTA STEG:
     - COMPLETE: Missionen är besvarad
     - SEARCH: Saknar viktigt (ange next_search_query)
@@ -135,6 +142,7 @@ planner_evaluate:
     
     Svara ENDAST med JSON:
     {{
+        "context_gain": 0.5,
         "reasoning": "Kort: Fortsättning/Jämförelse/Nytt ämne?",
         "status": "SEARCH" | "COMPLETE" | "ABORT",
         "updated_synthesis": "Den text som bäst beskriver NU-läget",
