@@ -66,7 +66,7 @@ API_KEY = CONFIG['ai_engine']['api_key']
 MODEL_LITE = CONFIG['ai_engine']['models']['model_lite']
 
 # Konstanter
-MAX_ITERATIONS = 5
+MAX_ITERATIONS = 30     # Säkerhetsspärr (exhaustion avslutar tidigare)
 GAIN_THRESHOLD = 0.05   # Under detta = "vi hittade inget nytt"
 MAX_PATIENCE = 2        # Antal stagnerade loopar innan exit
 
