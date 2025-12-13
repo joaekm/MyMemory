@@ -68,6 +68,7 @@ MODEL_LITE = CONFIG['ai_engine']['models']['model_lite']
 # Konstanter
 MAX_ITERATIONS = 30     # Säkerhetsspärr (exhaustion avslutar tidigare)
 GAIN_THRESHOLD = 0.05   # Under detta = "vi hittade inget nytt"
+HIGH_GAIN_THRESHOLD = 0.3  # Över detta = "vi hittar fortfarande mycket, fortsätt!"
 MAX_PATIENCE = 2        # Antal stagnerade loopar innan exit
 
 # AI Client (lazy init)
@@ -339,26 +340,34 @@ def run_planner_loop(
         
         # Check för COMPLETE
         if eval_result['status'] == 'COMPLETE':
-            LOGGER.info(f"Planner COMPLETE efter {state.iteration + 1} iterationer")
-            
-            sources = [c.get('filename', 'unknown') for c in state.candidates[:10]]
-            
-            if state.current_synthesis:
-                report = state.current_synthesis
-            elif state.facts:
-                report = "\n".join([f"- {fact}" for fact in state.facts])
+            # Om vi fortfarande hittar mycket nytt, fortsätt!
+            if context_gain >= HIGH_GAIN_THRESHOLD:
+                LOGGER.info(f"Hög gain ({context_gain:.2f} >= {HIGH_GAIN_THRESHOLD}), fortsätter trots COMPLETE")
+                eval_result['status'] = 'SEARCH'
+                if not eval_result.get('next_search_query'):
+                    eval_result['next_search_query'] = f"{mission_goal} fler detaljer"
             else:
-                report = ""
-            
-            return {
-                "status": "COMPLETE",
-                "report": report,
-                "current_synthesis": state.current_synthesis,
-                "facts": state.facts,
-                "state": state,
-                "sources_used": sources,
-                "gaps": state.gaps
-            }
+                # Verkligen klar - gain är lågt nog
+                LOGGER.info(f"Planner COMPLETE efter {state.iteration + 1} iterationer (gain={context_gain:.2f})")
+                
+                sources = [c.get('filename', 'unknown') for c in state.candidates[:10]]
+                
+                if state.current_synthesis:
+                    report = state.current_synthesis
+                elif state.facts:
+                    report = "\n".join([f"- {fact}" for fact in state.facts])
+                else:
+                    report = ""
+                
+                return {
+                    "status": "COMPLETE",
+                    "report": report,
+                    "current_synthesis": state.current_synthesis,
+                    "facts": state.facts,
+                    "state": state,
+                    "sources_used": sources,
+                    "gaps": state.gaps
+                }
         
         # Check för ABORT
         if eval_result['status'] == 'ABORT':
