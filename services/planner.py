@@ -1,15 +1,17 @@
 """
-Planner - Pipeline v7.5 "Facts List"
+Planner - Pipeline v8.1 "Rolling Hypothesis"
 
 Ansvar:
 - ReAct-loop: Reason + Act tills mission_goal uppfyllt
-- Evaluate state: Jämför insamlad data med mission_goal
+- Rolling Hypothesis: Bygger current_synthesis (Tornet) iterativt
+- Evaluate state: Jämför ny info med befintlig syntes
 - Identifiera gaps och learnings
 - Konvergens/stagnation-detection
 
-v7.5 Changes:
-- Facts List: Appendar fakta istället för att skriva om working_findings
-- Förhindrar "Telephone Game" där detaljer försvinner vid omskrivning
+v8.1 Changes:
+- Rolling Hypothesis: current_synthesis uppdateras varje loop
+- Facts List: Appendar bevis (append-only)
+- Tornet + Bevisen = Komplett bild
 
 Princip: HARDFAIL > Silent Fallback
 """
@@ -117,16 +119,17 @@ def _format_existing_facts(facts: list) -> str:
 def _evaluate_state(state: PlannerState, candidates_formatted: str) -> dict:
     """
     Evaluera aktuellt state mot mission_goal.
-    v7.5 Fact Extractor: Extraherar fakta från dokument (appendar, ersätter inte).
+    v8.1 Rolling Hypothesis: Jämför ny info med befintlig syntes (Tornet).
     
     Args:
-        state: PlannerState med facts och past_queries
+        state: PlannerState med current_synthesis, facts och past_queries
         candidates_formatted: Formaterade kandidater (topp 3 med fulltext)
     
     Returns:
         dict med:
             - status: "SEARCH" | "COMPLETE" | "ABORT"
-            - new_facts: Nya extraherade fakta (läggs till i facts-listan)
+            - updated_synthesis: Uppdaterad arbetshypotes (Tornet)
+            - new_evidence: Nya bevis (läggs till i facts-listan)
             - next_search_query: Ny sökning om SEARCH
             - gaps: Vad som fortfarande saknas
     """
@@ -139,22 +142,25 @@ def _evaluate_state(state: PlannerState, candidates_formatted: str) -> dict:
     past_queries = _format_past_queries(state.past_queries)
     existing_facts = _format_existing_facts(state.facts)
     
-    # v7.5: Använd nya placeholders om de finns, annars fallback till legacy
+    # v8.1: Rolling Hypothesis - inkludera current_synthesis
+    current_synthesis = state.current_synthesis or "(Ingen analys ännu - börja från noll)"
+    
     try:
         full_prompt = prompt_template.format(
             mission_goal=state.mission_goal,
+            current_synthesis=current_synthesis,
             existing_facts=existing_facts,
             candidates=candidates_formatted,
             past_queries=past_queries,
             iteration=state.iteration + 1,
             max_iterations=MAX_ITERATIONS
         )
-    except KeyError:
-        # Fallback för legacy prompt (working_findings)
-        LOGGER.warning("Legacy prompt format detekterat, använder working_findings")
+    except KeyError as e:
+        # Fallback för legacy prompt
+        LOGGER.warning(f"Legacy prompt format (saknar {e}), använder fallback")
         full_prompt = prompt_template.format(
             mission_goal=state.mission_goal,
-            working_findings=_format_existing_facts(state.facts) if state.facts else state.working_findings or "(Tom)",
+            working_findings=current_synthesis if current_synthesis else existing_facts,
             candidates=candidates_formatted,
             past_queries=past_queries,
             iteration=state.iteration + 1,
@@ -174,8 +180,12 @@ def _evaluate_state(state: PlannerState, candidates_formatted: str) -> dict:
         
         return {
             "status": result.get('status', 'ABORT'),
-            "new_facts": result.get('new_facts', []),  # v7.5: nya fakta
-            "refined_findings": result.get('refined_findings', ''),  # Legacy fallback
+            # v8.1: Rolling Hypothesis
+            "updated_synthesis": result.get('updated_synthesis', ''),
+            "new_evidence": result.get('new_evidence', []),
+            # Legacy fallbacks
+            "new_facts": result.get('new_facts', []),
+            "refined_findings": result.get('refined_findings', ''),
             "next_search_query": result.get('next_search_query'),
             "gaps": result.get('gaps', []),
             "llm_raw": text
@@ -236,7 +246,8 @@ def run_planner_loop(
             mission_goal=mission_goal,
             query=query,
             candidates=initial_candidates,
-            facts=[],  # v7.5: Tom lista
+            facts=[],  # Bevisen (append-only)
+            current_synthesis="",  # v8.1: Tornet (Rolling Hypothesis)
             working_findings="",  # Legacy
             past_queries=[]
         )
@@ -247,22 +258,29 @@ def run_planner_loop(
     while state.iteration < MAX_ITERATIONS:
         LOGGER.info(f"Planner iteration {state.iteration + 1}/{MAX_ITERATIONS}")
         
-        # Evaluate: LLM läser dokument och extraherar fakta
+        # Evaluate: LLM läser dokument och uppdaterar hypotes
         eval_result = _evaluate_state(state, current_candidates_formatted)
         
-        # v7.5: APPENDA nya fakta med deduplicering
-        new_facts = eval_result.get('new_facts', [])
-        if new_facts:
-            # FACT DEDUPLICATION: Undvik att lägga till samma fakta flera gånger
-            existing_lower = {f.lower().strip() for f in state.facts}
-            for fact in new_facts:
-                if fact and fact.lower().strip() not in existing_lower:
-                    state.facts.append(fact)
-                    existing_lower.add(fact.lower().strip())
-            LOGGER.info(f"Lade till {len(new_facts)} nya fakta (totalt: {len(state.facts)})")
+        # v8.1: Uppdatera TORNET (current_synthesis)
+        updated_synthesis = eval_result.get('updated_synthesis', '')
+        if updated_synthesis:
+            state.current_synthesis = updated_synthesis
+            LOGGER.info(f"Tornet uppdaterat: {updated_synthesis[:100]}...")
         
-        # Legacy fallback: Om prompten returnerar refined_findings istället för new_facts
-        if not new_facts and eval_result.get('refined_findings'):
+        # v8.1: APPENDA nya bevis med deduplicering
+        new_evidence = eval_result.get('new_evidence', []) or eval_result.get('new_facts', [])
+        if new_evidence:
+            existing_lower = {f.lower().strip() for f in state.facts}
+            added = 0
+            for evidence in new_evidence:
+                if evidence and evidence.lower().strip() not in existing_lower:
+                    state.facts.append(evidence)
+                    existing_lower.add(evidence.lower().strip())
+                    added += 1
+            LOGGER.info(f"Lade till {added} nya bevis (totalt: {len(state.facts)})")
+        
+        # Legacy fallback: Om prompten returnerar refined_findings
+        if not updated_synthesis and eval_result.get('refined_findings'):
             state.working_findings = eval_result.get('refined_findings', state.working_findings)
         
         state.gaps = eval_result.get('gaps', [])
@@ -272,13 +290,13 @@ def run_planner_loop(
         
         # Spara till debug_trace
         if debug_trace is not None:
-            # v7.5: Visa facts count och preview
-            facts_preview = state.facts[:3] if state.facts else []
+            # v8.1: Visa synthesis preview och facts
             debug_trace[f'planner_iter_{state.iteration}'] = {
                 "status": eval_result['status'],
+                "synthesis_preview": state.current_synthesis[:200] if state.current_synthesis else "(tom)",
                 "facts_count": len(state.facts),
-                "facts_preview": facts_preview,
-                "new_facts_added": len(new_facts) if new_facts else 0,
+                "facts_preview": state.facts[:3] if state.facts else [],
+                "new_evidence_added": len(new_evidence) if new_evidence else 0,
                 "gaps": state.gaps,
                 "next_search": eval_result.get('next_search_query')
             }
@@ -290,8 +308,10 @@ def run_planner_loop(
             # Extrahera källor från candidates
             sources = [c.get('filename', 'unknown') for c in state.candidates[:10]]
             
-            # v7.5: Bygg rapport från facts-lista (om den finns)
-            if state.facts:
+            # v8.1: Rapport baseras på Tornet (synthesis) + bevis (facts)
+            if state.current_synthesis:
+                report = state.current_synthesis
+            elif state.facts:
                 report = "\n".join([f"- {fact}" for fact in state.facts])
             else:
                 report = state.working_findings  # Legacy fallback
@@ -299,6 +319,8 @@ def run_planner_loop(
             return {
                 "status": "COMPLETE",
                 "report": report,
+                "current_synthesis": state.current_synthesis,  # v8.1
+                "facts": state.facts,  # v8.1
                 "sources_used": sources,
                 "gaps": state.gaps
             }
@@ -307,17 +329,20 @@ def run_planner_loop(
         if eval_result['status'] == 'ABORT':
             LOGGER.warning(f"Planner ABORT: {state.gaps}")
             
-            # Returnera PARTIAL om vi har NÅGOT (facts eller working_findings)
-            if state.facts or state.working_findings:
+            # Returnera PARTIAL om vi har NÅGOT
+            if state.current_synthesis or state.facts or state.working_findings:
                 sources = [c.get('filename', 'unknown') for c in state.candidates[:5]]
-                # v7.5: Bygg rapport från facts-lista
-                if state.facts:
+                if state.current_synthesis:
+                    report = state.current_synthesis
+                elif state.facts:
                     report = "\n".join([f"- {fact}" for fact in state.facts])
                 else:
                     report = state.working_findings
                 return {
                     "status": "PARTIAL",
                     "report": report,
+                    "current_synthesis": state.current_synthesis,
+                    "facts": state.facts,
                     "sources_used": sources,
                     "gaps": state.gaps
                 }
@@ -326,6 +351,8 @@ def run_planner_loop(
                 "status": "ABORT",
                 "reason": "Inga relevanta dokument hittades",
                 "report": "",
+                "current_synthesis": "",
+                "facts": [],
                 "sources_used": [],
                 "gaps": state.gaps
             }
@@ -390,15 +417,21 @@ def run_planner_loop(
     # Returnera vad vi har
     sources = [c.get('filename', 'unknown') for c in state.candidates[:10]]
     
-    # v7.5: Bygg rapport från facts-lista
-    if state.facts:
+    # v8.1: Rapport baseras på Tornet + bevis
+    if state.current_synthesis:
+        report = state.current_synthesis
+    elif state.facts:
         report = "\n".join([f"- {fact}" for fact in state.facts])
     else:
         report = state.working_findings
     
+    has_content = state.current_synthesis or state.facts or state.working_findings
+    
     return {
-        "status": "PARTIAL" if (state.facts or state.working_findings) else "ABORT",
+        "status": "PARTIAL" if has_content else "ABORT",
         "report": report,
+        "current_synthesis": state.current_synthesis,
+        "facts": state.facts,
         "sources_used": sources,
         "gaps": state.gaps
     }

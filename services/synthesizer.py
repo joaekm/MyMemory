@@ -1,11 +1,11 @@
 """
-Synthesizer - Pipeline v7.0
+Synthesizer - Pipeline v8.1 "Chameleon Delivery"
 
 Ansvar:
-- Ta emot kurerad rapport från Planner
+- Ta emot kurerad rapport från Planner (current_synthesis + facts)
 - Hantera både COMPLETE och ABORT status
-- Generera naturligt svar baserat på rapporten
-- Anpassa tonalitet och längd efter frågetyp
+- Chameleon Delivery: Anpassa format baserat på delivery_format
+- Modellval: FAST för struktur, PRO för analys
 """
 
 import os
@@ -46,6 +46,19 @@ LOGGER = logging.getLogger('Synthesizer')
 
 API_KEY = CONFIG['ai_engine']['api_key']
 MODEL_LITE = CONFIG['ai_engine']['models']['model_lite']
+MODEL_PRO = CONFIG['ai_engine']['models'].get('model_pro', MODEL_LITE)
+
+# v8.1: Format-baserat modellval
+# Struktur-format (bara formatering - FAST model)
+FAST_FORMATS = [
+    "Formellt Mötesprotokoll",
+    "Professionellt Email-utkast",
+    "Kondenserad Punktlista",
+    "Teknisk Rapport"
+]
+
+# Analys-format (kräver resonemang - PRO model)
+PRO_FORMATS = ["Narrativ Analys"]
 
 # AI Client (lazy init)
 _AI_CLIENT = None
@@ -118,21 +131,30 @@ def synthesize(
     status: str = "COMPLETE",
     reason: str = None,
     chat_history: list = None, 
-    debug_trace: dict = None
+    debug_trace: dict = None,
+    # v8.1: Chameleon Delivery
+    op_mode: str = "query",
+    delivery_format: str = "Narrativ Analys",
+    current_synthesis: str = "",
+    facts: list = None
 ) -> dict:
     """
     Generera svar baserat på Planner-resultat.
     
-    Pipeline v7.0: Hanterar både COMPLETE och ABORT status.
+    Pipeline v8.1: Chameleon Delivery - dynamiskt format och modellval.
     
     Args:
         query: Användarens ursprungliga fråga
-        report: Kurerad rapport från Planner
+        report: Kurerad rapport från Planner (legacy, används om current_synthesis saknas)
         gaps: Lista med identifierade luckor
         status: "COMPLETE" eller "ABORT"
         reason: Anledning vid ABORT
         chat_history: Tidigare konversation för kontext
         debug_trace: Dict för att samla debug-info (optional)
+        op_mode: "query" eller "deliver" (v8.1)
+        delivery_format: Format för leverans (v8.1)
+        current_synthesis: Tornet från Planner (v8.1)
+        facts: Bevislistan från Planner (v8.1)
     
     Returns:
         dict med:
@@ -149,18 +171,59 @@ def synthesize(
             debug_trace=debug_trace
         )
     
-    # COMPLETE: Generera svar från rapport
-    prompt_template = PROMPTS.get('synthesizer', {}).get('instruction', '')
-    if not prompt_template:
-        LOGGER.error("HARDFAIL: synthesizer prompt saknas i chat_prompts.yaml")
-        raise ValueError("HARDFAIL: synthesizer prompt saknas i chat_prompts.yaml")
+    # v8.1: Välj modell baserat på format (INTE op_mode)
+    if delivery_format in PRO_FORMATS:
+        target_model = MODEL_PRO
+        mode_label = "ANALYS"
+    else:
+        target_model = MODEL_LITE
+        mode_label = "STRUKTUR" if op_mode == "deliver" else "QUERY"
     
-    # Bygg prompt
-    synth_prompt = prompt_template.format(
-        report=report,
-        gaps=gaps if gaps else "Inga kända luckor",
-        query=query
-    )
+    LOGGER.info(f"Synthesizer {mode_label} MODE ({delivery_format}) - {target_model}")
+    
+    # v8.1: Välj prompt baserat på op_mode
+    if op_mode == "deliver":
+        # DELIVER: Använd synthesizer_report med format
+        prompt_template = PROMPTS.get('synthesizer_report', {}).get('instruction', '')
+        if not prompt_template:
+            # Fallback till standard synthesizer om report-prompt saknas
+            LOGGER.warning("synthesizer_report prompt saknas, använder standard")
+            prompt_template = PROMPTS.get('synthesizer', {}).get('instruction', '')
+        
+        # Bygg underlag från Tornet + bevis
+        facts_text = "\n".join([f"- {f}" for f in (facts or [])]) if facts else "(Inga bevis)"
+        synthesis_text = current_synthesis or report or "(Ingen analys)"
+        
+        try:
+            synth_prompt = prompt_template.format(
+                format=delivery_format,
+                current_synthesis=synthesis_text,
+                facts=facts_text,
+                query=query,
+                # Legacy fallbacks
+                report=synthesis_text,
+                gaps=gaps if gaps else "Inga kända luckor"
+            )
+        except KeyError as e:
+            LOGGER.warning(f"Prompt-formatering misslyckades ({e}), använder fallback")
+            synth_prompt = prompt_template.format(
+                report=synthesis_text,
+                gaps=gaps if gaps else "Inga kända luckor",
+                query=query
+            )
+    else:
+        # QUERY: Standard synthesizer prompt
+        prompt_template = PROMPTS.get('synthesizer', {}).get('instruction', '')
+        if not prompt_template:
+            LOGGER.error("HARDFAIL: synthesizer prompt saknas i chat_prompts.yaml")
+            raise ValueError("HARDFAIL: synthesizer prompt saknas i chat_prompts.yaml")
+        
+        # Använd current_synthesis om tillgängligt, annars report
+        synth_prompt = prompt_template.format(
+            report=current_synthesis or report,
+            gaps=gaps if gaps else "Inga kända luckor",
+            query=query
+        )
     
     # Bygg contents med chatthistorik
     contents = []
@@ -173,16 +236,18 @@ def synthesize(
     
     try:
         client = _get_ai_client()
-        response = client.models.generate_content(model=MODEL_LITE, contents=contents)
+        response = client.models.generate_content(model=target_model, contents=contents)
         answer = response.text
         
         LOGGER.debug(f"Synthesizer LLM-svar: {answer[:500]}...")
-        LOGGER.info(f"Synthesizer COMPLETE: svarslängd={len(answer)} tecken")
+        LOGGER.info(f"Synthesizer {status}: svarslängd={len(answer)} tecken")
         
         # Spara till debug_trace
         if debug_trace is not None:
             debug_trace['synthesizer_llm_raw'] = answer
-            debug_trace['synthesizer_status'] = 'COMPLETE'
+            debug_trace['synthesizer_status'] = status
+            debug_trace['synthesizer_model'] = target_model
+            debug_trace['synthesizer_format'] = delivery_format
         
         return {
             "status": "OK",

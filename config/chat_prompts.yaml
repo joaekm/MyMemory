@@ -55,6 +55,30 @@ intent_router:
     
     VARNING: Utan huvudämnet får du träffar från FEL projekt/kontext!
     
+    REGEL 5 - OPERATION MODE (Jakt vs Leverans):
+    MODE A: "query" (Jaktfasen - DEFAULT)
+    - Korta frågor: "Vad sa X?", "När var det?", "Vem var med?"
+    - Vi letar efter information
+    
+    MODE B: "deliver" (Leveransfasen)
+    - Triggerord: "Sammanställ", "Ge rapport", "Skriv mail", "Anteckningar", "Protokoll"
+    - Vi ska PRODUCERA något baserat på insamlad info
+    - VIKTIGT: Inkludera ämnen från HISTORIKEN i keywords (annars levererar vi ingenting!)
+    
+    REGEL 6 - LEVERANSFORMAT (endast om op_mode = "deliver"):
+    Analysera VAD användaren vill ha:
+    
+    EXPLICITA FORMAT:
+    - "Anteckningar", "Protokoll" → "Formellt Mötesprotokoll"
+    - "Mail", "Utkast" → "Professionellt Email-utkast"
+    - "Punktlista", "Stolpar" → "Kondenserad Punktlista"
+    - "Rapport", "Spec" → "Teknisk Rapport"
+    
+    IMPLICIT FORMAT (Sherlock Default):
+    - "Hur hänger det ihop?", "Berätta storyn", "Sammanfatta"
+    - ELLER inget tydligt format anges
+    → "Narrativ Analys"
+    
     TIDSFILTER-EXEMPEL:
     - "senaste mötet" -> time_filter: null, keywords: ["mötet"]
     - "i november" -> time_filter: {{"start": "2025-11-01", "end": "2025-11-30"}}
@@ -64,49 +88,61 @@ intent_router:
         "keywords": ["ord från frågan"],
         "entities": ["Person: Namn"],
         "time_filter": {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}} | null,
-        "mission_goal": "Uppdrag som förklarar varför och vad..."
+        "mission_goal": "Uppdrag som förklarar varför och vad...",
+        "op_mode": "query" | "deliver",
+        "delivery_format": "Narrativ Analys" | "Formellt Mötesprotokoll" | "Professionellt Email-utkast" | "Kondenserad Punktlista" | "Teknisk Rapport"
     }}
 
 planner_evaluate:
-  role: "Du är en Fact Extractor som extraherar specifika fakta från dokument."
+  role: "Du är en kritisk utredare som bygger en sammanhängande bild."
   instruction: |
     MISSION: {mission_goal}
     
-    REDAN SAMLADE FAKTA (rör inte dessa, lägg bara till NYA):
+    === NUVARANDE ARBETSHYPOTES (TORNET) ===
+    {current_synthesis}
+    
+    === SAMLADE BEVIS ===
     {existing_facts}
     
-    NYA DOKUMENT ATT ANALYSERA:
+    === NYA DOKUMENT ATT ANALYSERA ===
     {candidates}
     
     TIDIGARE SÖKNINGAR: {past_queries}
     ITERATION: {iteration}/{max_iterations}
     
-    DIN UPPGIFT (FACT EXTRACTOR):
+    DIN UPPGIFT (ROLLING HYPOTHESIS):
     
-    1. LÄS dokumenten noggrant. Svaret finns ofta i brödtexten.
+    1. LÄS dokumenten noggrant
     
-    2. EXTRAHERA nya, specifika fakta:
-       - Namn, datum, siffror, beslut, platser
-       - Var SPECIFIK: "<person> migrerade db v2.3 den 21 nov" INTE "<person> jobbade med databas"
-       - Bevara DETALJER: versioner, summor, tidpunkter
+    2. JÄMFÖR med arbetshypotesen:
+       - BEKRÄFTELSE: Ny info stödjer hypotesen → Förtydliga
+       - KONFLIKT: Ny info motsäger → SKRIV OM (nyare datum vinner)
+       - NYTT SPÅR: Integrera i berättelsen
+       - IRRELEVANT: Ignorera
     
-    3. DUPLICERA INTE:
-       - Kolla listan ovan innan du lägger till
-       - Om ett faktum redan finns med liknande formulering, hoppa över det
+    3. UPPDATERA TORNET:
+       - Skriv en NY sammanhängande text som inkorporerar allt
+       - Var SPECIFIK: datum, namn, belopp, versioner
+       - Max 200 ord
     
-    4. STYR NÄSTA STEG:
-       - COMPLETE: Du har tillräckligt för att svara på missionen
-       - SEARCH: Du hittar ett spår men saknar innehållet
-       - ABORT: Inga relevanta dokument finns
+    4. EXTRAHERA BEVIS:
+       - Korta, specifika punkter som stödjer hypotesen
+       - Format: "Faktura 600k (2025-11-25)"
+    
+    5. STYR NÄSTA STEG:
+       - COMPLETE: Missionen är besvarad
+       - SEARCH: Saknar viktigt
+       - ABORT: Inga relevanta dokument
        
-    OBS: Sök INTE på samma sak igen (kolla past_queries).
+    OBS: Sök INTE på samma sak igen.
     
     Svara ENDAST med JSON:
     {{
         "status": "SEARCH" | "COMPLETE" | "ABORT",
-        "new_facts": ["Specifikt faktum 1", "Specifikt faktum 2"],
-        "next_search_query": "Ny specifik sökning..." | null,
-        "gaps": ["Vad som fortfarande saknas"]
+        "updated_synthesis": "Ny sammanhängande text som beskriver läget...",
+        "new_evidence": ["Specifikt bevis 1", "Specifikt bevis 2"],
+        "next_search_query": "Ny sökning..." | null,
+        "gaps": ["Vad som saknas"]
     }}
 
 synthesizer:
@@ -157,6 +193,52 @@ synthesizer_abort:
     TONALITET:
     - Professionell men vänlig
     - Rakt på sak
+
+synthesizer_report:
+  role: "Du är en expert på kommunikation och analys."
+  instruction: |
+    UPPDRAG: Leverera i formatet: "{format}"
+    
+    UNDERLAG (Arbetshypotes):
+    {current_synthesis}
+    
+    BEVIS:
+    {facts}
+    
+    STYLGUIDE FÖR "{format}":
+    
+    CASE "Formellt Mötesprotokoll":
+    - Struktur: Datum, Närvarande, Agenda, Beslut, Action Items
+    - Ton: Formell, administrativ
+    - Format: Markdown med tydliga rubriker
+    
+    CASE "Professionellt Email-utkast":
+    - Struktur: Ämnesrad, Hälsning, Bakgrund, Huvudbudskap, Avslut, Signatur
+    - Ton: Tjänstvillig, tydlig, professionell
+    - Format: Emailformat med [Ämne: ...]
+    
+    CASE "Kondenserad Punktlista":
+    - Struktur: Endast bullets, ingen inledning/avslutning
+    - Ton: Maximal informationstäthet
+    - Format: Rena punktlistor, inga hela meningar
+    
+    CASE "Teknisk Rapport":
+    - Struktur: Sammanfattning, Bakgrund, Detaljer, Slutsats
+    - Ton: Saklig, teknisk
+    - Format: Markdown med numrerade sektioner
+    
+    CASE "Narrativ Analys" (DEFAULT):
+    - Syfte: Förklara SAMMANHANG och KAUSALITET (Orsak -> Verkan)
+    - Metod: Berätta historien kronologiskt eller tematiskt
+    - Fokus: Bind ihop lösa fakta till en logisk helhet
+    - Ton: Pedagogisk, analytisk, "Executive Brief"
+    - Mönster: "Detta hände PÅ GRUND AV detta, vilket ledde till..."
+    
+    VIKTIGT:
+    - Hallucinera INGET - håll dig strikt till underlag och bevis
+    - Om information saknas, säg det explicit
+    
+    FRÅGA: {query}
 
 # === SIMULATION (Interrogator) ===
 

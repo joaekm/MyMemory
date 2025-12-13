@@ -29,12 +29,13 @@ from rich.table import Table
 from rich import box
 from rich.live import Live
 
-# Pipeline v7.0 imports
+# Pipeline v8.1 imports
 try:
     from services.intent_router import route_intent
     from services.context_builder import build_context, search
     from services.planner import run_planner_loop
     from services.synthesizer import synthesize
+    from services.utils.session_manager import SessionManager, get_session, reset_session
 except ImportError as _import_err:
     # Direkt körning - försök importera utan services-prefix
     try:
@@ -42,6 +43,7 @@ except ImportError as _import_err:
         from context_builder import build_context, search
         from planner import run_planner_loop
         from synthesizer import synthesize
+        from utils.session_manager import SessionManager, get_session, reset_session
     except ImportError as e:
         raise ImportError(f"HARDFAIL: Kan inte importera pipeline-moduler: {e}") from e
 
@@ -284,10 +286,10 @@ def _handle_feedback(canonical: str, alias: str, entity_type: str) -> str:
 
 
 
-# === PIPELINE v7.0 "The Reasoning Engine" ===
+# === PIPELINE v8.1 "The Chameleon Delivery" ===
 def execute_pipeline_v7(query, chat_history, debug_mode=False, debug_trace=None):
     """
-    Pipeline v7.0: IntentRouter → ContextBuilder → Planner Loop → Synthesizer
+    Pipeline v8.1: IntentRouter → ContextBuilder → Planner Loop → Synthesizer
     
     Args:
         query: Användarens fråga
@@ -299,6 +301,10 @@ def execute_pipeline_v7(query, chat_history, debug_mode=False, debug_trace=None)
         dict: {
             "status": "COMPLETE" | "ABORT" | "NO_RESULTS" | "ERROR",
             "report": Markdown-rapport för Synthesizer,
+            "current_synthesis": Tornet (Rolling Hypothesis),
+            "facts": Bevisen (lista),
+            "op_mode": "query" | "deliver",
+            "delivery_format": Format för leverans,
             "sources": Lista med filnamn,
             "gaps": Lista med identifierade luckor,
             "reason": Anledning vid ABORT
@@ -317,11 +323,17 @@ def execute_pipeline_v7(query, chat_history, debug_mode=False, debug_trace=None)
         LOGGER.error(f"HARDFAIL: IntentRouter misslyckades: {intent_data.get('reason')}")
         raise RuntimeError(f"HARDFAIL: IntentRouter misslyckades: {intent_data.get('reason')}")
     
+    # v8.1: Extrahera op_mode och delivery_format
+    op_mode = intent_data.get('op_mode', 'query')
+    delivery_format = intent_data.get('delivery_format', 'Narrativ Analys')
+    
     if debug_mode:
         debug_content = f"[bold]Mission Goal:[/bold] {intent_data.get('mission_goal', '')[:100]}...\n"
         debug_content += f"[cyan]Keywords:[/cyan] {intent_data.get('keywords')}\n"
         debug_content += f"[green]Entities:[/green] {intent_data.get('entities')}\n"
-        debug_content += f"[magenta]Tidsfilter:[/magenta] {intent_data.get('time_filter')}"
+        debug_content += f"[magenta]Tidsfilter:[/magenta] {intent_data.get('time_filter')}\n"
+        debug_content += f"[bold yellow]Op Mode:[/bold yellow] {op_mode}\n"
+        debug_content += f"[bold yellow]Format:[/bold yellow] {delivery_format}"
         debug_panel("1. INTENT", debug_content, style="magenta", debug_mode=debug_mode)
     
     # Fas 2: ContextBuilder (Kod) - Initial sökning
@@ -404,10 +416,17 @@ def execute_pipeline_v7(query, chat_history, debug_mode=False, debug_trace=None)
     # Spara timing
     if debug_trace is not None:
         debug_trace['pipeline_duration'] = round(time.time() - start_time, 2)
+        debug_trace['op_mode'] = op_mode
+        debug_trace['delivery_format'] = delivery_format
     
     return {
         "status": planner_result.get('status', 'ERROR'),
         "report": planner_result.get('report', ''),
+        # v8.1: Rolling Hypothesis
+        "current_synthesis": planner_result.get('current_synthesis', ''),
+        "facts": planner_result.get('facts', []),
+        "op_mode": op_mode,
+        "delivery_format": delivery_format,
         "sources": planner_result.get('sources_used', []),
         "gaps": planner_result.get('gaps', []),
         "reason": planner_result.get('reason')
@@ -456,12 +475,17 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
             "debug_trace": debug_trace if collect_debug else {}
         }
     
-    # Syntes - v7.0 hanterar både COMPLETE och ABORT
+    # Syntes - v8.1 hanterar COMPLETE, ABORT + Chameleon Delivery
     report = pipeline_result.get('report', '')
     sources = pipeline_result.get('sources', [])
     gaps = pipeline_result.get('gaps', [])
     status = pipeline_result.get('status', 'COMPLETE')
     reason = pipeline_result.get('reason')
+    # v8.1: Rolling Hypothesis + Chameleon
+    current_synthesis = pipeline_result.get('current_synthesis', '')
+    facts = pipeline_result.get('facts', [])
+    op_mode = pipeline_result.get('op_mode', 'query')
+    delivery_format = pipeline_result.get('delivery_format', 'Narrativ Analys')
     
     synth_result = synthesize(
         query=query,
@@ -470,7 +494,12 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
         status=status,
         reason=reason,
         chat_history=chat_history,
-        debug_trace=debug_trace
+        debug_trace=debug_trace,
+        # v8.1: Chameleon Delivery
+        op_mode=op_mode,
+        delivery_format=delivery_format,
+        current_synthesis=current_synthesis,
+        facts=facts
     )
     
     answer = synth_result.get('answer', 'Fel vid syntes')
@@ -478,7 +507,7 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
     # Spara timing
     if debug_trace is not None:
         debug_trace['total_duration'] = round(time.time() - start_time, 2)
-        debug_trace['pipeline_version'] = 'v7.0'
+        debug_trace['pipeline_version'] = 'v8.1'
     
     return {
         "answer": answer,
@@ -487,141 +516,35 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
     }
 
 
-# --- SESSION TILL ASSETS (Fas 1: DocConverter hanterar Lake) ---
-def _save_session_to_assets(chat_history: list, learnings: list = None, reason: str = "normal") -> str:
-    """
-    Spara session som Markdown i Assets för DocConverter att processa.
-    
-    Struktur:
-    - YAML frontmatter (metadata, inkl. summary med mjuka learnings)
-    - ## Learnings (YAML-block med hårda learnings)
-    - ## Konversation (chatthistorik)
-    
-    Args:
-        chat_history: Lista med meddelanden
-        learnings: Lista med extraherade lärdomar [{canonical, alias, type, confidence, evidence}]
-        reason: "normal", "interrupted", etc.
-    
-    Returns:
-        Sökväg till sparad fil
-    """
-    import uuid as uuid_module
-    
-    if not chat_history:
-        return None
-    
-    return None  # TEMPORARILY DISABLED - sessions blir för stora
-    
-    # Läs sessions-mapp från config
-    sessions_path = os.path.expanduser(CONFIG['paths']['asset_sessions'])
-    os.makedirs(sessions_path, exist_ok=True)
-    
-    # Generera UUID och timestamp
-    unit_id = str(uuid_module.uuid4())
-    now = datetime.datetime.now()
-    timestamp_iso = now.strftime("%Y-%m-%dT%H%M%S")  # Utan kolon för filnamn
-    timestamp_full = now.isoformat()
-    
-    # Filnamn: Session_2025-12-11T153000_UUID.md
-    filename = f"Session_{timestamp_iso}_{unit_id}.md"
-    filepath = os.path.join(sessions_path, filename)
-    
-    # Bygg summary (mjuka learnings)
-    summary_parts = [f"Chatt-session avslutad ({reason})."]
-    if learnings:
-        summary_parts.append(f"{len(learnings)} alias-kopplingar identifierade.")
-    summary = " ".join(summary_parts)
-    
-    # Bygg graph_nodes från learnings
-    graph_nodes = {"Händelser": 0.9}  # Sessions är alltid Händelser
-    
-    if learnings:
-        # Gruppera entiteter per typ
-        persons = {}
-        for l in learnings:
-            canonical = l.get('canonical')
-            entity_type = l.get('type', 'Person')
-            if canonical:
-                # Lägg till med hög relevans (0.7) - dessa är bekräftade learnings
-                if entity_type == 'Person':
-                    if 'Person' not in graph_nodes:
-                        graph_nodes['Person'] = {}
-                    graph_nodes['Person'][canonical] = 0.7
-                elif entity_type == 'Aktör':
-                    if 'Aktör' not in graph_nodes:
-                        graph_nodes['Aktör'] = {}
-                    graph_nodes['Aktör'][canonical] = 0.7
-                elif entity_type == 'Projekt':
-                    if 'Projekt' not in graph_nodes:
-                        graph_nodes['Projekt'] = {}
-                    graph_nodes['Projekt'][canonical] = 0.7
-    
-    # Bygg YAML frontmatter
-    frontmatter = {
-        "unit_id": unit_id,
-        "owner_id": CONFIG.get("owner", {}).get("id", "default"),
-        "source_type": "Session",
-        "timestamp_created": timestamp_full,
-        "summary": summary,
-        "graph_nodes": graph_nodes
-    }
-    
-    # Bygg ## Learnings sektion (hårda learnings som YAML)
-    learnings_section = ""
-    if learnings:
-        learnings_yaml = yaml.dump({"aliases": learnings}, allow_unicode=True, sort_keys=False)
-        learnings_section = f"## Learnings\n\n```yaml\n{learnings_yaml}```\n\n"
-    
-    # Bygg ## Konversation sektion
-    messages_text = ""
-    for msg in chat_history:
-        role = "**User:**" if msg['role'] == 'user' else "**MyMem:**"
-        messages_text += f"{role} {msg['content']}\n\n"
-    
-    conversation_section = f"## Konversation\n\n{messages_text}"
-    
-    # Bygg komplett fil
-    frontmatter_yaml = yaml.dump(frontmatter, allow_unicode=True, sort_keys=False)
-    content = f"---\n{frontmatter_yaml}---\n\n{learnings_section}{conversation_section}"
-    
-    # Spara filen
-    with open(filepath, 'w', encoding='utf-8') as f:
-        f.write(content)
-    
-    LOGGER.info(f"Session sparad: {filename} ({len(learnings or [])} learnings)")
-    return filepath
-
-
 # --- CHAT LOOP (CLI) ---
 def chat_loop(debug_mode=False):
     """
     Interaktiv chattloop för CLI-användning.
     
-    Pipeline v7.0: IntentRouter → ContextBuilder → Planner Loop → Synthesizer
+    Pipeline v8.1: IntentRouter → ContextBuilder → Planner Loop → Synthesizer
+    (med Session State Persistence för cross-turn minne)
     
     Args:
         debug_mode: Om True, visa debug-paneler under körning
     """
     console.clear()
     product_name = CONFIG.get('system', {}).get('product_name', 'MyMemory')
-    console.print(Panel(f"[bold white]{product_name} v7.0[/bold white]", style="on blue", box=box.DOUBLE, expand=False))
+    console.print(Panel(f"[bold white]{product_name} v8.1[/bold white]", style="on blue", box=box.DOUBLE, expand=False))
     if debug_mode:
         console.print("[dim]Debug Mode: ON[/dim]")
-        
+    
+    # v8.1: Session State Persistence
+    session = get_session()
     chat_history = [] 
 
     try:
         while True:
             query = Prompt.ask("\n[bold green]Du[/bold green]")
             if query.lower() in ['exit', 'quit', 'sluta']:
-                # Extrahera learnings och spara session till Assets
-                session_result = end_session(chat_history)
-                learnings = session_result.get('learnings', [])
-                filepath = _save_session_to_assets(chat_history, learnings, "normal")
-                if filepath:
-                    console.print(f"[dim]Session sparad: {os.path.basename(filepath)}[/dim]")
-                    if learnings:
-                        console.print(f"[dim]{len(learnings)} lärdomar extraherade[/dim]")
+                # Avsluta session
+                end_session(chat_history)
+                reset_session()
+                console.print("[dim]Session avslutad.[/dim]")
                 break
             if not query.strip(): continue
 
@@ -653,77 +576,54 @@ def chat_loop(debug_mode=False):
             # Debug trace för CLI
             debug_trace = {} if debug_mode else None
             
-            # === PIPELINE v7.0 ===
+            # === PIPELINE v8.1 ===
             pipeline_result = execute_pipeline_v7(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
             
             if pipeline_result.get('status') in ['NO_RESULTS', 'ERROR']:
                 console.print(f"[red]{pipeline_result.get('reason', 'Ingen information hittades.')}[/red]")
                 continue
             
+            # v8.1: Extrahera alla fält
             report = pipeline_result.get('report', '')
             gaps = pipeline_result.get('gaps', [])
             status = pipeline_result.get('status', 'COMPLETE')
             reason = pipeline_result.get('reason')
+            current_synthesis = pipeline_result.get('current_synthesis', '')
+            facts = pipeline_result.get('facts', [])
+            op_mode = pipeline_result.get('op_mode', 'query')
+            delivery_format = pipeline_result.get('delivery_format', 'Narrativ Analys')
             
             console.print("\n[bold purple]MyMem:[/bold purple]")
             
-            # Välj rätt prompt baserat på status
-            if status == 'ABORT':
-                synth_template = PROMPTS.get('synthesizer_abort', {}).get('instruction', '')
-                if not synth_template:
-                    LOGGER.error("HARDFAIL: synthesizer_abort prompt saknas i chat_prompts.yaml")
-                    console.print("[red]Konfigurationsfel: synthesizer_abort prompt saknas[/red]")
-                    continue
-                
-                gaps_text = "\n".join(f"- {g}" for g in gaps) if gaps else "Ingen specifik information"
-                synth_prompt = synth_template.format(
-                    query=query,
-                    reason=reason or "Kunde inte hitta tillräcklig information",
-                    gaps=gaps_text
-                )
-            else:
-                synth_template = PROMPTS.get('synthesizer', {}).get('instruction', '')
-                if not synth_template:
-                    LOGGER.error("HARDFAIL: synthesizer prompt saknas")
-                    console.print("[red]Konfigurationsfel: synthesizer prompt saknas[/red]")
-                    continue
-                
-                synth_prompt = synth_template.format(
-                    report=report,
-                    gaps=gaps if gaps else "Inga kända luckor",
-                    query=query
-                )
+            # v8.1: Använd synthesize() med Chameleon Delivery
+            synth_result = synthesize(
+                query=query,
+                report=report,
+                gaps=gaps,
+                status=status,
+                reason=reason,
+                chat_history=chat_history,
+                debug_trace=debug_trace,
+                op_mode=op_mode,
+                delivery_format=delivery_format,
+                current_synthesis=current_synthesis,
+                facts=facts
+            )
             
-            contents = []
-            for msg in chat_history:
-                role = "model" if msg['role'] == "assistant" else "user"
-                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg['content'])]))
-            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=synth_prompt)]))
+            answer = synth_result.get('answer', 'Fel vid syntes')
+            console.print(Markdown(answer))
             
-            collected_text = ""
-            try:
-                ai_client = get_ai_client()
-                response_stream = ai_client.models.generate_content_stream(model=MODEL_LITE, contents=contents)
-                with Live(Markdown(collected_text), console=console, refresh_per_second=10) as live:
-                    for chunk in response_stream:
-                        if chunk.text:
-                            collected_text += chunk.text
-                            live.update(Markdown(collected_text))
-                chat_history.append({"role": "user", "content": query})
-                chat_history.append({"role": "assistant", "content": collected_text})
-            except Exception as e:
-                LOGGER.error(f"HARDFAIL: AI-syntes misslyckades: {e}")
-                console.print(f"[red]AI-fel: {e}[/red]")
-                raise RuntimeError(f"HARDFAIL: AI-syntes misslyckades: {e}") from e
+            # Uppdatera historik
+            chat_history.append({"role": "user", "content": query})
+            chat_history.append({"role": "assistant", "content": answer})
+            
+            # v8.1: Uppdatera session för cross-turn persistence
+            session.update_history(query, answer)
     
     except KeyboardInterrupt:
-        session_result = end_session(chat_history)
-        learnings = session_result.get('learnings', [])
-        filepath = _save_session_to_assets(chat_history, learnings, "interrupted")
-        if filepath:
-            console.print(f"\n[dim]Session sparad: {os.path.basename(filepath)}[/dim]")
-            if learnings:
-                console.print(f"[dim]{len(learnings)} lärdomar extraherade[/dim]")
+        end_session(chat_history)
+        reset_session()
+        console.print("\n[dim]Session avbruten.[/dim]")
         console.print("Hejdå!")
 
 
