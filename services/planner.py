@@ -208,7 +208,8 @@ def run_planner_loop(
     initial_synthesis: str = "",
     initial_facts: list = None,
     search_fn=None,
-    debug_trace: dict = None
+    debug_trace: dict = None,
+    on_iteration=None  # Callback för live-output
 ) -> dict:
     """
     ReAct-loop med Pivot or Persevere (v8.2).
@@ -325,18 +326,25 @@ def run_planner_loop(
             patience = 0  # Reset om vi hittade nytt
         
         # Spara till debug_trace
+        iter_data = {
+            "iteration": state.iteration + 1,
+            "status": eval_result['status'],
+            "context_gain": context_gain,
+            "patience": patience,
+            "synthesis_preview": state.current_synthesis[:200] if state.current_synthesis else "(tom)",
+            "facts_count": len(state.facts),
+            "facts_preview": state.facts[:3] if state.facts else [],
+            "new_evidence_added": len(new_evidence) if new_evidence else 0,
+            "gaps": state.gaps,
+            "next_search": eval_result.get('next_search_query')
+        }
+        
         if debug_trace is not None:
-            debug_trace[f'planner_iter_{state.iteration}'] = {
-                "status": eval_result['status'],
-                "context_gain": context_gain,
-                "patience": patience,
-                "synthesis_preview": state.current_synthesis[:200] if state.current_synthesis else "(tom)",
-                "facts_count": len(state.facts),
-                "facts_preview": state.facts[:3] if state.facts else [],
-                "new_evidence_added": len(new_evidence) if new_evidence else 0,
-                "gaps": state.gaps,
-                "next_search": eval_result.get('next_search_query')
-            }
+            debug_trace[f'planner_iter_{state.iteration}'] = iter_data
+        
+        # LIVE OUTPUT
+        if on_iteration:
+            on_iteration(iter_data)
         
         # Check för COMPLETE
         if eval_result['status'] == 'COMPLETE':

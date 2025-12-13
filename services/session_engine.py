@@ -94,7 +94,7 @@ class SessionEngine:
         self._session_id = str(uuid.uuid4())[:8]
         LOGGER.info(f"SessionEngine initierad: {self._session_id}")
     
-    def run_query(self, query: str, debug_mode: bool = False, debug_trace: dict = None) -> dict:
+    def run_query(self, query: str, debug_mode: bool = False, debug_trace: dict = None, on_iteration=None) -> dict:
         """
         Kör hela pipelinen: IntentRouter → ContextBuilder → Planner → Synthesizer
         
@@ -105,6 +105,7 @@ class SessionEngine:
             query: Användarens fråga
             debug_mode: Om True, logga debug-info
             debug_trace: Dict att samla debug-info till
+            on_iteration: Callback för live-output av Tornbygget
         
         Returns:
             dict med answer, sources, status, etc.
@@ -199,7 +200,8 @@ class SessionEngine:
             initial_synthesis=initial_synthesis,
             initial_facts=initial_facts,
             search_fn=search,
-            debug_trace=debug_trace
+            debug_trace=debug_trace,
+            on_iteration=on_iteration
         )
         
         # Spara nytt state (Plannern har redan gjort Pivot or Persevere)
