@@ -10,6 +10,7 @@ validate_prompts.py - Deterministisk validering av promptar med LLM-fix
 Validerar prompt-filer mot MyMemory-projektets regler:
 - P4: Ingen AI-cringe (töntiga metafornamn)
 - P7: Inga hårdkodade kategorier (taxonomi-noder i listor)
+- HE: Inga hårdkodade entiteter (specifika namn på personer/projekt/org)
 - OH: Overhead (upprepade instruktioner)
 - FB: Fallback (hänvisningar till gammal arkitektur)
 - RD: Redundant (promptar som inte används i kod)
@@ -70,6 +71,23 @@ TAXONOMY_NODES = [
     "Person", "Aktör", "Teknologier", "Metodik", "Erbjudande",
     "Vision", "Affär", "Kultur", "Organisation", "Arbetsverktyg",
     "Process", "Marknad", "Juridik", "Förändring"
+]
+
+# Princip HE: Hårdkodade entiteter (specifika namn som borde vara generiska i exempel)
+# Undantag: interrogator-promptar (simulerar specifik användare)
+HARDCODED_ENTITIES = [
+    # Personer
+    "Cenk", "Joakim Ekman", "Susanne", "Tommy",
+    # Organisationer  
+    "Digitalist", "Läkarförbundet",
+    # Projekt/Enheter
+    "Adda", "Inköpslänken", "Almedalsveckan", "Drive",
+]
+
+# Promptar som får ha hårdkodade entiteter (t.ex. simulering av specifik användare)
+HE_EXEMPT_PROMPTS = [
+    "interrogator",
+    "interrogator_check",
 ]
 
 # Fallback: Legacy-termer som inte längre ska användas
@@ -182,6 +200,36 @@ def check_overhead(prompt_key: str, prompt_content: str, filepath: str) -> list:
     # Ta bort intern nyckel
     for v in violations:
         v.pop('_normalized', None)
+    
+    return violations
+
+
+def check_hardcoded_entities(prompt_key: str, prompt_content: str, filepath: str) -> list:
+    """
+    HE: Leta efter hårdkodade entitetsnamn i promptar.
+    Exempel bör använda generiska placeholders som <projekt>, <person>, X, Y.
+    
+    Undantag: Promptar i HE_EXEMPT_PROMPTS (t.ex. interrogator som simulerar användare)
+    """
+    # Undantag för simulerings-promptar
+    if prompt_key in HE_EXEMPT_PROMPTS:
+        return []
+    
+    violations = []
+    lines = prompt_content.split('\n')
+    
+    for term in HARDCODED_ENTITIES:
+        for i, line in enumerate(lines, 1):
+            if term in line:
+                violations.append({
+                    "file": filepath,
+                    "prompt": prompt_key,
+                    "line": i,
+                    "rule": "HE",
+                    "message": f"Hårdkodad entitet: '{term}' - använd generisk placeholder",
+                    "code": line.strip()[:80]
+                })
+                break  # En violation per term räcker
     
     return violations
 
@@ -424,6 +472,7 @@ def validate_prompt_file(filepath: str, project_root: str = None) -> list:
         # Kör alla valideringar
         violations.extend(check_ai_cringe(prompt_key, full_content, filepath))
         violations.extend(check_hardcoded_taxonomy(prompt_key, full_content, filepath))
+        violations.extend(check_hardcoded_entities(prompt_key, full_content, filepath))
         violations.extend(check_overhead(prompt_key, full_content, filepath))
         violations.extend(check_legacy_fallback(prompt_key, full_content, filepath))
     

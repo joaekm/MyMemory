@@ -36,10 +36,11 @@ SESSIONS_PATH = os.path.expanduser(CONFIG['paths'].get('asset_sessions', '~/MyMe
 @dataclass
 class PlannerState:
     """
-    State för Planner ReAct-loopen (v7.0 Knowledge Refinement).
+    State för Planner ReAct-loopen (v7.5 Facts List).
     
     Key fields:
-    - working_findings: Den förädlade kunskapsbanken (ersätts, inte appendas)
+    - facts: Lista av extraherade fakta (APPENDAS, inte ersätts) - Pipeline v7.5
+    - working_findings: Legacy - förädlad kunskapsbank (för bakåtkompatibilitet)
     - past_queries: För att tvinga divergens i sökningar
     - candidates: Alla kandidat-dokument (för referens)
     """
@@ -48,7 +49,8 @@ class PlannerState:
     query: str
     iteration: int = 0
     candidates: List[Dict] = field(default_factory=list)
-    working_findings: str = ""  # Förädlad kunskapsbank
+    facts: List[str] = field(default_factory=list)  # v7.5: Lista av fakta (appendas)
+    working_findings: str = ""  # Legacy: Förädlad kunskapsbank
     past_queries: List[str] = field(default_factory=list)  # För divergens-kontroll
     gaps: List[str] = field(default_factory=list)
     search_history: List[Dict] = field(default_factory=list)

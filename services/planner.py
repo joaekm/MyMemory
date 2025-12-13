@@ -1,11 +1,15 @@
 """
-Planner - Pipeline v7.0 "The Reasoning Engine"
+Planner - Pipeline v7.5 "Facts List"
 
 Ansvar:
 - ReAct-loop: Reason + Act tills mission_goal uppfyllt
 - Evaluate state: Jämför insamlad data med mission_goal
 - Identifiera gaps och learnings
 - Konvergens/stagnation-detection
+
+v7.5 Changes:
+- Facts List: Appendar fakta istället för att skriva om working_findings
+- Förhindrar "Telephone Game" där detaljer försvinner vid omskrivning
 
 Princip: HARDFAIL > Silent Fallback
 """
@@ -103,19 +107,26 @@ def _is_too_similar(new_query: str, past_queries: list, threshold: float = 0.7) 
     return False
 
 
+def _format_existing_facts(facts: list) -> str:
+    """Formatera befintliga fakta för prompten."""
+    if not facts:
+        return "(Inga fakta samlade ännu)"
+    return "\n".join([f"- {fact}" for fact in facts])
+
+
 def _evaluate_state(state: PlannerState, candidates_formatted: str) -> dict:
     """
     Evaluera aktuellt state mot mission_goal.
-    Knowledge Refiner: Förädlar kunskap från dokument.
+    v7.5 Fact Extractor: Extraherar fakta från dokument (appendar, ersätter inte).
     
     Args:
-        state: PlannerState med working_findings och past_queries
-        candidates_formatted: Formaterade kandidater (topp 5 med fulltext)
+        state: PlannerState med facts och past_queries
+        candidates_formatted: Formaterade kandidater (topp 3 med fulltext)
     
     Returns:
         dict med:
             - status: "SEARCH" | "COMPLETE" | "ABORT"
-            - refined_findings: Förädlad kunskap (ersätter working_findings)
+            - new_facts: Nya extraherade fakta (läggs till i facts-listan)
             - next_search_query: Ny sökning om SEARCH
             - gaps: Vad som fortfarande saknas
     """
@@ -126,15 +137,29 @@ def _evaluate_state(state: PlannerState, candidates_formatted: str) -> dict:
         raise ValueError("HARDFAIL: planner_evaluate prompt saknas i chat_prompts.yaml")
     
     past_queries = _format_past_queries(state.past_queries)
+    existing_facts = _format_existing_facts(state.facts)
     
-    full_prompt = prompt_template.format(
-        mission_goal=state.mission_goal,
-        working_findings=state.working_findings or "(Tom - ingen kunskap samlad än)",
-        candidates=candidates_formatted,
-        past_queries=past_queries,
-        iteration=state.iteration + 1,
-        max_iterations=MAX_ITERATIONS
-    )
+    # v7.5: Använd nya placeholders om de finns, annars fallback till legacy
+    try:
+        full_prompt = prompt_template.format(
+            mission_goal=state.mission_goal,
+            existing_facts=existing_facts,
+            candidates=candidates_formatted,
+            past_queries=past_queries,
+            iteration=state.iteration + 1,
+            max_iterations=MAX_ITERATIONS
+        )
+    except KeyError:
+        # Fallback för legacy prompt (working_findings)
+        LOGGER.warning("Legacy prompt format detekterat, använder working_findings")
+        full_prompt = prompt_template.format(
+            mission_goal=state.mission_goal,
+            working_findings=_format_existing_facts(state.facts) if state.facts else state.working_findings or "(Tom)",
+            candidates=candidates_formatted,
+            past_queries=past_queries,
+            iteration=state.iteration + 1,
+            max_iterations=MAX_ITERATIONS
+        )
     
     try:
         client = _get_ai_client()
@@ -149,7 +174,8 @@ def _evaluate_state(state: PlannerState, candidates_formatted: str) -> dict:
         
         return {
             "status": result.get('status', 'ABORT'),
-            "refined_findings": result.get('refined_findings', ''),
+            "new_facts": result.get('new_facts', []),  # v7.5: nya fakta
+            "refined_findings": result.get('refined_findings', ''),  # Legacy fallback
             "next_search_query": result.get('next_search_query'),
             "gaps": result.get('gaps', []),
             "llm_raw": text
@@ -171,18 +197,19 @@ def run_planner_loop(
     debug_trace: dict = None
 ) -> dict:
     """
-    ReAct-loop med Knowledge Refinement.
+    ReAct-loop med Facts List (v7.5).
     
     Arkitektur:
-    1. Topp 5 dokument levereras med FULLTEXT direkt
-    2. LLM förädlar working_findings varje iteration (ersätter, inte appendar)
+    1. Topp 3 dokument levereras med FULLTEXT direkt (Lost in the Middle fix)
+    2. LLM extraherar FAKTA från dokument (appendar till lista, skriver INTE om)
     3. SEARCH, COMPLETE eller ABORT
+    4. Rapport byggs från facts-lista först i slutet
     
     Args:
         mission_goal: Uppdrag från IntentRouter
         query: Original användarfråga
         initial_candidates: Kandidater från ContextBuilder (full metadata)
-        candidates_formatted: Formaterad sträng med topp 5 fulltext
+        candidates_formatted: Formaterad sträng med topp 3 fulltext
         session_id: Unikt session-ID för state persistence
         search_fn: Funktion för extra sökningar (optional)
         debug_trace: Dict för debug-info (optional)
@@ -190,16 +217,16 @@ def run_planner_loop(
     Returns:
         dict med:
             - status: "COMPLETE" | "ABORT" | "PARTIAL"
-            - report: working_findings (förädlad kunskap)
+            - report: Fakta-lista formaterad som rapport
             - sources_used: Lista med använda filnamn
             - gaps: Vad som saknas
     """
     # Import format_candidates_for_planner för nya sökningar
     try:
-        from services.context_builder import format_candidates_for_planner
+        from services.context_builder import format_candidates_for_planner, TOP_N_FULLTEXT
     except ImportError as _import_err:
         LOGGER.debug(f"Fallback-import context_builder: {_import_err}")
-        from context_builder import format_candidates_for_planner
+        from context_builder import format_candidates_for_planner, TOP_N_FULLTEXT
     
     # Ladda eller skapa state
     state = load_state(session_id)
@@ -209,7 +236,8 @@ def run_planner_loop(
             mission_goal=mission_goal,
             query=query,
             candidates=initial_candidates,
-            working_findings="",
+            facts=[],  # v7.5: Tom lista
+            working_findings="",  # Legacy
             past_queries=[]
         )
     
@@ -219,12 +247,24 @@ def run_planner_loop(
     while state.iteration < MAX_ITERATIONS:
         LOGGER.info(f"Planner iteration {state.iteration + 1}/{MAX_ITERATIONS}")
         
-        # Evaluate: LLM läser dokument och förädlar kunskap
+        # Evaluate: LLM läser dokument och extraherar fakta
         eval_result = _evaluate_state(state, current_candidates_formatted)
         
-        # UPPDATERA working_findings med förädlad version
-        # (LLM har integrerat ny info, vi ersätter inte appendar)
-        state.working_findings = eval_result.get('refined_findings', state.working_findings)
+        # v7.5: APPENDA nya fakta med deduplicering
+        new_facts = eval_result.get('new_facts', [])
+        if new_facts:
+            # FACT DEDUPLICATION: Undvik att lägga till samma fakta flera gånger
+            existing_lower = {f.lower().strip() for f in state.facts}
+            for fact in new_facts:
+                if fact and fact.lower().strip() not in existing_lower:
+                    state.facts.append(fact)
+                    existing_lower.add(fact.lower().strip())
+            LOGGER.info(f"Lade till {len(new_facts)} nya fakta (totalt: {len(state.facts)})")
+        
+        # Legacy fallback: Om prompten returnerar refined_findings istället för new_facts
+        if not new_facts and eval_result.get('refined_findings'):
+            state.working_findings = eval_result.get('refined_findings', state.working_findings)
+        
         state.gaps = eval_result.get('gaps', [])
         
         # Spara state för debuggbarhet
@@ -232,9 +272,13 @@ def run_planner_loop(
         
         # Spara till debug_trace
         if debug_trace is not None:
+            # v7.5: Visa facts count och preview
+            facts_preview = state.facts[:3] if state.facts else []
             debug_trace[f'planner_iter_{state.iteration}'] = {
                 "status": eval_result['status'],
-                "refined_findings_preview": state.working_findings[:300] + "..." if len(state.working_findings) > 300 else state.working_findings,
+                "facts_count": len(state.facts),
+                "facts_preview": facts_preview,
+                "new_facts_added": len(new_facts) if new_facts else 0,
                 "gaps": state.gaps,
                 "next_search": eval_result.get('next_search_query')
             }
@@ -246,9 +290,15 @@ def run_planner_loop(
             # Extrahera källor från candidates
             sources = [c.get('filename', 'unknown') for c in state.candidates[:10]]
             
+            # v7.5: Bygg rapport från facts-lista (om den finns)
+            if state.facts:
+                report = "\n".join([f"- {fact}" for fact in state.facts])
+            else:
+                report = state.working_findings  # Legacy fallback
+            
             return {
                 "status": "COMPLETE",
-                "report": state.working_findings,
+                "report": report,
                 "sources_used": sources,
                 "gaps": state.gaps
             }
@@ -257,12 +307,17 @@ def run_planner_loop(
         if eval_result['status'] == 'ABORT':
             LOGGER.warning(f"Planner ABORT: {state.gaps}")
             
-            # Returnera PARTIAL om vi har NÅGOT
-            if state.working_findings:
+            # Returnera PARTIAL om vi har NÅGOT (facts eller working_findings)
+            if state.facts or state.working_findings:
                 sources = [c.get('filename', 'unknown') for c in state.candidates[:5]]
+                # v7.5: Bygg rapport från facts-lista
+                if state.facts:
+                    report = "\n".join([f"- {fact}" for fact in state.facts])
+                else:
+                    report = state.working_findings
                 return {
                     "status": "PARTIAL",
-                    "report": state.working_findings,
+                    "report": report,
                     "sources_used": sources,
                     "gaps": state.gaps
                 }
@@ -314,8 +369,9 @@ def run_planner_loop(
             LOGGER.info(f"Lade till {added} nya kandidater")
             
             # Formatera nya kandidater för nästa iteration
+            # v7.5: Använder TOP_N_FULLTEXT (3) från config
             current_candidates_formatted = format_candidates_for_planner(
-                state.candidates, top_n_fulltext=5
+                state.candidates, top_n_fulltext=TOP_N_FULLTEXT
             )
             
             # Logga sökning
@@ -333,9 +389,16 @@ def run_planner_loop(
     
     # Returnera vad vi har
     sources = [c.get('filename', 'unknown') for c in state.candidates[:10]]
+    
+    # v7.5: Bygg rapport från facts-lista
+    if state.facts:
+        report = "\n".join([f"- {fact}" for fact in state.facts])
+    else:
+        report = state.working_findings
+    
     return {
-        "status": "PARTIAL" if state.working_findings else "ABORT",
-        "report": state.working_findings,
+        "status": "PARTIAL" if (state.facts or state.working_findings) else "ABORT",
+        "report": report,
         "sources_used": sources,
         "gaps": state.gaps
     }

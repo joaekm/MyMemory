@@ -1,11 +1,12 @@
 """
-ContextBuilder - Pipeline v7.0
+ContextBuilder - Pipeline v7.5 "Time-Aware Reranking"
 
 Ansvar:
 - Deterministisk informationshämtning (INGEN AI)
 - Kör Lake + Vektor parallellt
 - Returnera topp 50 kandidater med metadata+summary
 - Ingen intent-logik (Planner hanterar urval)
+- TIME-AWARE RERANKING: Boostar nyare dokument automatiskt
 
 ID-format: Alla IDs normaliseras till UUID för korrekt deduplicering
 """
@@ -15,9 +16,11 @@ import re
 import json
 import yaml
 import logging
+from datetime import datetime
 
 import chromadb
 from chromadb.utils import embedding_functions
+import dateutil.parser
 
 # UUID-mönster för att extrahera från filnamn
 UUID_PATTERN = re.compile(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', re.IGNORECASE)
@@ -46,6 +49,14 @@ TAXONOMY_FILE = os.path.expanduser(CONFIG['paths'].get('taxonomy_file', '~/MyMem
 # Max kandidater att returnera
 MAX_CANDIDATES = 50
 
+# --- RERANKING CONFIG (Pipeline v7.5) ---
+RERANKING_CONFIG = CONFIG.get('reranking', {})
+BOOST_STRENGTH = RERANKING_CONFIG.get('boost_strength', 0.3)
+LEGACY_FACTOR = RERANKING_CONFIG.get('legacy_factor_days', 7.0)
+RELEVANCE_THRESHOLD = RERANKING_CONFIG.get('relevance_threshold', 0.0)
+TOP_N_FULLTEXT = RERANKING_CONFIG.get('top_n_fulltext', 3)
+RECALL_LIMIT = RERANKING_CONFIG.get('recall_limit', 50)
+
 
 def _load_taxonomy() -> dict:
     """Ladda hela taxonomin (huvudnoder + subnoder)."""
@@ -59,6 +70,80 @@ def _load_taxonomy() -> dict:
 
 
 TAXONOMY = _load_taxonomy()
+
+
+# --- RERANKING FUNCTIONS (Pipeline v7.5) ---
+
+def _parse_date(meta: dict) -> datetime | None:
+    """
+    Robust datumextraktion från metadata.
+    Returnerar None vid fel (ingen boost, inget straff).
+    
+    Söker i: timestamp_created (Lake), timestamp (Vector), date
+    """
+    # Prova olika nycklar
+    date_str = meta.get('timestamp_created') or meta.get('timestamp') or meta.get('date')
+    if not date_str:
+        return None
+    
+    try:
+        # dateutil hanterar ISO8601 med timezone
+        return dateutil.parser.parse(str(date_str)).replace(tzinfo=None)
+    except Exception as e:
+        LOGGER.warning(f"Kunde inte parsa datum '{date_str}': {e}")
+        return None
+
+
+def _calculate_hybrid_score(doc: dict, original_score: float) -> float:
+    """
+    Beräknar hybrid-score med Relevance Gate + Inverse Age Boost.
+    
+    Relevance Gate: Endast dokument med score >= RELEVANCE_THRESHOLD får boost.
+    Detta förhindrar att irrelevant spam från igår vinner över relevant content.
+    
+    Formula: final_score = original_score * (1 + time_boost)
+    where time_boost = BOOST_STRENGTH / ((days_old / LEGACY_FACTOR) + 1)
+    """
+    # RELEVANCE GATE: Skräp förblir skräp
+    if original_score < RELEVANCE_THRESHOLD:
+        doc['debug_gate'] = 'BLOCKED'
+        doc['debug_score_final'] = original_score
+        return original_score
+    
+    doc_date = _parse_date(doc)
+    
+    # Inget datum = ingen boost (men inget straff heller)
+    if not doc_date:
+        doc['debug_gate'] = 'NO_DATE'
+        doc['debug_score_final'] = original_score
+        return original_score
+    
+    # Beräkna ålder i dagar
+    now = datetime.now()
+    days_old = (now - doc_date).days
+    
+    # Skydd mot framtida datum (bugg i data)
+    if days_old < 0:
+        LOGGER.warning(f"Framtida datum i dokument: {doc.get('filename')}")
+        days_old = 0
+    
+    # Inverse Age Boost
+    time_boost = BOOST_STRENGTH / ((days_old / LEGACY_FACTOR) + 1)
+    final_score = original_score * (1 + time_boost)
+    
+    # Debug-info
+    doc['debug_gate'] = 'BOOSTED'
+    doc['debug_score_orig'] = round(original_score, 4)
+    doc['debug_score_final'] = round(final_score, 4)
+    doc['debug_age_days'] = days_old
+    doc['debug_boost'] = round(time_boost, 4)
+    
+    # KALIBRERINGSLOGG: Skriv ut scores för att hitta rätt threshold
+    LOGGER.info(f"RERANK: {doc.get('filename', 'unknown')[:30]} | "
+                f"orig={original_score:.3f} | final={final_score:.3f} | "
+                f"age={days_old}d | gate={doc['debug_gate']}")
+    
+    return final_score
 
 
 def _search_lake(keywords: list) -> dict:
@@ -135,11 +220,15 @@ def _search_lake(keywords: list) -> dict:
     return hits
 
 
-def _search_vector(query: str, n_results: int = 30) -> dict:
+def _search_vector(query: str, n_results: int = None) -> dict:
     """
     Sök i vektordatabasen (ChromaDB).
     Returnerar dict med {doc_id: doc_data}
+    
+    RECALL HORIZON FIX: Hämtar RECALL_LIMIT (50) för att ge Rerankern tillräckligt material.
     """
+    if n_results is None:
+        n_results = RECALL_LIMIT  # Default 50 från config
     hits = {}
     
     if not query:
@@ -181,8 +270,9 @@ def _search_vector(query: str, n_results: int = 30) -> dict:
 
 def _dedupe_and_rank(lake_hits: dict, vector_hits: dict) -> list:
     """
-    Deduplicera och ranka kandidater.
-    Ingen intent-baserad viktning - neutral kombination.
+    Deduplicera och ranka kandidater med TIME-AWARE RERANKING.
+    
+    Pipeline v7.5: Applicerar hybrid scoring baserat på relevans + färskhet.
     
     Returns:
         Sorterad lista med kandidater (max MAX_CANDIDATES)
@@ -199,27 +289,40 @@ def _dedupe_and_rank(lake_hits: dict, vector_hits: dict) -> list:
             existing = all_candidates[doc_id]
             existing['score'] = (existing['score'] + doc['score']) / 2
             existing['source'] = "LAKE+VECTOR"
+            # Behåll timestamp från vektor-metadata om den finns
+            if 'timestamp' in doc and 'timestamp' not in existing:
+                existing['timestamp'] = doc['timestamp']
         else:
             all_candidates[doc_id] = doc
     
-    # Sortera på score (högst först)
-    ranked = sorted(all_candidates.values(), key=lambda x: x.get('score', 0), reverse=True)
+    # NYTT: Applicera hybrid scoring (Time-Aware Reranking)
+    for doc_id, doc in all_candidates.items():
+        original_score = doc.get('score', 0.5)
+        doc['hybrid_score'] = _calculate_hybrid_score(doc, original_score)
+    
+    # Sortera på hybrid_score (inte score)
+    ranked = sorted(all_candidates.values(), key=lambda x: x.get('hybrid_score', 0), reverse=True)
     
     return ranked[:MAX_CANDIDATES]
 
 
-def format_candidates_for_planner(candidates: list, top_n_fulltext: int = 5) -> str:
+def format_candidates_for_planner(candidates: list, top_n_fulltext: int = None) -> str:
     """
     Formatera kandidater för Planner-prompten.
     Topp N dokument får FULLTEXT, övriga får SUMMARY.
     
+    Pipeline v7.5: Default är nu TOP_N_FULLTEXT (3) från config.
+    "Lost in the Middle"-fix: Färre fulltext = bättre LLM-attention.
+    
     Args:
         candidates: Lista med kandidat-dokument
-        top_n_fulltext: Antal dokument som får fulltext (default 5)
+        top_n_fulltext: Antal dokument som får fulltext (default från config)
     
     Returns:
         Formaterad sträng för Planner-prompten
     """
+    if top_n_fulltext is None:
+        top_n_fulltext = TOP_N_FULLTEXT  # Default 3 från config
     formatted_output = []
     
     for i, doc in enumerate(candidates):
@@ -337,7 +440,10 @@ def build_context(keywords: list, entities: list = None, time_filter: dict = Non
             "filename": c['filename'],
             "summary": c['summary'],
             "source": c['source'],
-            "score": round(c.get('score', 0), 3)
+            "score": round(c.get('score', 0), 3),
+            "hybrid_score": round(c.get('hybrid_score', 0), 3),
+            "debug_gate": c.get('debug_gate', 'N/A'),
+            "debug_age_days": c.get('debug_age_days', 'N/A')
         })
     
     # Formatera för Planner: Topp 5 får FULLTEXT, övriga får SUMMARY

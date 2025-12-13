@@ -16,33 +16,48 @@ intent_router:
     TAXONOMI (Grafens Karta):
     {taxonomy_context}
     
-    UPPGIFT: Tolka användarens fråga enligt två separata regler.
+    UPPGIFT: Tolka frågan enligt tre regler.
     
-    ═══════════════════════════════════════════════════════════════
-    REGEL 1: SÖKORD - Trogen frågan
-    ═══════════════════════════════════════════════════════════════
-    - `keywords` ska vara TROGNA FRÅGAN - inget mer.
-    - Lägg INTE till ord från user_profile om de inte EXPLICIT nämns i frågan.
+    REGEL 1 - SÖKORD (trogen frågan):
+    - keywords ska vara TROGNA FRÅGAN - inget mer
+    - Lägg INTE till ord från user_profile om de inte nämns i frågan
     - Undantag: Lösa tvetydighet (t.ex. "min status" → lägg till användarens namn)
+    - Varje extra ord MINSKAR chansen att hitta rätt dokument
+    
+    REGEL 2 - MÅLBILD (använd kontexten):
+    - mission_goal förklarar VARFÖR vi söker och VAD vi vill veta
+    - Här får du använda user_profile och taxonomi
+    - Målet instruerar Plannern hur den ska tolka dokumenten
+    
+    REGEL 3 - TIDSFILTER (sortering vs filtrering):
+    FALL A (MJUKT - låt Rerankern sortera):
+    - Ord: "senaste", "nyaste", "nyligen", "igår", "färska"
+    - Handling: time_filter: null
+    - Rerankern boostar automatiskt nyare dokument
+    
+    FALL B (HÅRT - explicit tidsrymd):
+    - Ord: "i november", "förra veckan", "efter 2024", "mellan X och Y"
+    - Handling: time_filter: {{"start": "...", "end": "..."}}
+    - Användaren vill explicit utesluta annat
+    
+    REGEL 4 - KONTEXTUELL UPPFÖLJNING (Context Injection):
+    Analysera CHATTHISTORIK. Är detta en uppföljningsfråga om samma ämne?
+    
+    OM frågan är implicit ("Vem mer?", "När hände det?", "Vad kostade det?"):
+    -> INKLUDERA HUVUDÄMNET FRÅN HISTORIKEN i keywords
     
     EXEMPEL:
-    - "Vem är X?" → keywords: ["X", "X Efternamn"]
-    - "Hur går projektet?" → keywords: ["<projektnamn>"]
+    - Historik: "Berätta om <projekt>" + Nu: "Vilka var med?"
+      RÄTT: keywords: ["<projekt>", "deltagare"]
+      FEL: keywords: ["deltagare"] (ger fel träffar!)
+    - Historik: "Sammanfatta <projekt>-mötet" + Nu: "Vad beslutades?"
+      RÄTT: keywords: ["<projekt>", "beslut"]
     
-    Varje extra ord MINSKAR chansen att hitta rätt dokument.
+    VARNING: Utan huvudämnet får du träffar från FEL projekt/kontext!
     
-    ═══════════════════════════════════════════════════════════════
-    REGEL 2: MÅLBILD - Använd kontexten
-    ═══════════════════════════════════════════════════════════════
-    - `mission_goal` förklarar VARFÖR vi söker och VAD vi vill veta.
-    - Här får du använda user_profile och taxonomi.
-    - Målet instruerar Plannern hur den ska tolka dokumenten.
-    
-    EXEMPEL:
-    - "Vem är X?" → mission_goal: "Identifiera X:s roll och koppling till 
-      användaren baserat på user_profile."
-    
-    ═══════════════════════════════════════════════════════════════
+    TIDSFILTER-EXEMPEL:
+    - "senaste mötet" -> time_filter: null, keywords: ["mötet"]
+    - "i november" -> time_filter: {{"start": "2025-11-01", "end": "2025-11-30"}}
     
     Svara ENDAST med JSON:
     {{
@@ -53,44 +68,43 @@ intent_router:
     }}
 
 planner_evaluate:
-  role: "Du är en Knowledge Refiner som förädlar kunskap från dokument."
+  role: "Du är en Fact Extractor som extraherar specifika fakta från dokument."
   instruction: |
     MISSION: {mission_goal}
     
-    NUVARANDE KUNSKAP (Working Findings):
-    {working_findings}
+    REDAN SAMLADE FAKTA (rör inte dessa, lägg bara till NYA):
+    {existing_facts}
     
-    NYA DOKUMENT:
+    NYA DOKUMENT ATT ANALYSERA:
     {candidates}
     
     TIDIGARE SÖKNINGAR: {past_queries}
-    
     ITERATION: {iteration}/{max_iterations}
     
-    OBSERVERA: 
-    - De 5 mest relevanta dokumenten visas med FULL TEXT.
-    - Övriga visas som sammanfattningar.
+    DIN UPPGIFT (FACT EXTRACTOR):
     
-    DIN UPPGIFT (KNOWLEDGE REFINER):
+    1. LÄS dokumenten noggrant. Svaret finns ofta i brödtexten.
     
-    1. LÄS NOGA: Granska fulltext-dokumenten. Svaret finns ofta i brödtexten.
+    2. EXTRAHERA nya, specifika fakta:
+       - Namn, datum, siffror, beslut, platser
+       - Var SPECIFIK: "<person> migrerade db v2.3 den 21 nov" INTE "<person> jobbade med databas"
+       - Bevara DETALJER: versioner, summor, tidpunkter
     
-    2. INTEGRERA: Skriv om `refined_findings` baserat på vad du läser.
-       - Ersätt gissningar med fakta
-       - Kasta bort dubbletter
-       - Var specifik (t.ex. "<person> migrerade <system>", inte "<person> jobbade med teknik")
+    3. DUPLICERA INTE:
+       - Kolla listan ovan innan du lägger till
+       - Om ett faktum redan finns med liknande formulering, hoppa över det
     
-    3. STYR NÄSTA STEG:
+    4. STYR NÄSTA STEG:
        - COMPLETE: Du har tillräckligt för att svara på missionen
        - SEARCH: Du hittar ett spår men saknar innehållet
-       - ABORT: Inga relevanta dokument finns (returnera det du vet)
+       - ABORT: Inga relevanta dokument finns
        
     OBS: Sök INTE på samma sak igen (kolla past_queries).
     
     Svara ENDAST med JSON:
     {{
         "status": "SEARCH" | "COMPLETE" | "ABORT",
-        "refined_findings": "Den uppdaterade, konsoliderade kunskapen...",
+        "new_facts": ["Specifikt faktum 1", "Specifikt faktum 2"],
         "next_search_query": "Ny specifik sökning..." | null,
         "gaps": ["Vad som fortfarande saknas"]
     }}
@@ -113,7 +127,7 @@ synthesizer:
     - Om info saknas: "Inget loggat om X." - PUNKT. Elaborera inte.
     
     TONALITET:
-    - Användaren var MED på dessa möten - prata som en kollega, inte en arkivarie
+    - Användaren var MED på dessa möten - prata som en kollega
     - Undvik: "Rapporten anger...", "Baserat på dokumenten..."
     - Föredra: "På mötet diskuterades...", "Ni beslutade att..."
     

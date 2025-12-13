@@ -6,6 +6,9 @@ watchdog
 # Config & Metadata
 pyyaml
 
+# Datumhantering (Time-Aware Reranking)
+python-dateutil
+
 # Text-extrahering (Dokument)
 pypdf
 python-docx
