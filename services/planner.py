@@ -301,7 +301,10 @@ def run_planner_loop(
         state.gaps = eval_result.get('gaps', [])
         
         # --- CONTEXT GAIN DELTA ---
-        context_gain = eval_result.get('context_gain', 0.5)
+        context_gain = eval_result.get('context_gain')
+        if context_gain is None:
+            LOGGER.warning("LLM returnerade inte context_gain, defaultar till 0.1 (lågt)")
+            context_gain = 0.1  # Pessimistiskt default - tvingar inte oändlig loop
         LOGGER.info(f"Context gain: {context_gain:.2f}")
         
         if context_gain < GAIN_THRESHOLD:
