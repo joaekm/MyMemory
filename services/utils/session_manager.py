@@ -11,11 +11,15 @@ Princip: HARDFAIL > Silent Fallback
 import logging
 from typing import Optional, List
 
-# Import PlannerState
+# Import PlannerState (hanterar olika körningskontexter)
 try:
     from services.utils.state_manager import PlannerState
 except ImportError:
-    from state_manager import PlannerState
+    try:
+        from utils.state_manager import PlannerState
+    except ImportError:
+        # Relativ import som fallback
+        from .state_manager import PlannerState
 
 LOGGER = logging.getLogger('SessionManager')
 
