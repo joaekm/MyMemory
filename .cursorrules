@@ -1,23 +1,30 @@
 # MyMemory Development Rules
 
-## Princip 1: Kör Validator Efter Varje Ändring
+## Princip 1: Kör Validatorer Efter Varje Ändring
 
-**Efter VARJE kodändring ska `tools/validate_rules.py` köras på den ändrade filen.**
+**Efter VARJE ändring ska relevant validator köras.**
 
-### Kommando:
+### Kommando för KOD-ändringar:
 ```bash
 python tools/validate_rules.py services/<ändrad_fil>.py
 ```
 
+### Kommando för PROMPT-ändringar:
+```bash
+python tools/validate_prompts.py config/chat_prompts.yaml
+python tools/validate_prompts.py --fix  # Autofixa med LLM
+```
+
 ### Regler:
 1. **0 violations** krävs innan nästa fil får ändras
-2. **Validatorn får ALDRIG ändras** utan explicit tillåtelse från användaren
-3. Validatorn enforcerar automatiskt: P2 (fallbacks), P7 (promptar), P8 (taxonomi), P9 (sökvägar)
+2. **Validatorerna får ALDRIG ändras** utan explicit tillåtelse från användaren
+3. Kod-validatorn enforcerar: P2 (fallbacks), P7 (promptar i kod), P8 (taxonomi), P9 (sökvägar)
+4. Prompt-validatorn enforcerar: P4 (AI-cringe), P7 (kategorier), OH (overhead), FB (legacy), RD (redundant)
 
 ### Varför?
 - Regler utan enforcement är önskemål
 - Deterministisk kod kan inte "glömma" regler
-- AI:n som skriver koden får inte ändra reglerna
+- AI:n som skriver koden/promptarna får inte ändra reglerna
 
 ---
 

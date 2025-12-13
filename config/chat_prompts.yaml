@@ -144,89 +144,6 @@ synthesizer_abort:
     - Professionell men vänlig
     - Rakt på sak
 
-entity_disambiguator:
-  role: "Du analyserar entiteter för att avgöra om de refererar till samma sak och vilken typ de har."
-  instruction: |
-    Du ska avgöra om namn i en grupp refererar till SAMMA entitet eller OLIKA entiteter.
-    Du ska också avgöra vilken TYP av entitet det är.
-    
-    KANDIDAT-GRUPP:
-    {candidate_group}
-    
-    DOKUMENTKONTEXT (exempel på användning):
-    {context_examples}
-    
-    ENTITETSTYPER:
-    - "person": Människor (anställda, kontakter, kunder)
-    - "organization": Företag, myndigheter, organisationer
-    - "project": Projekt, initiativ, uppdrag
-    - "product": Produkter, tjänster, AI-modeller, verktyg
-    - "concept": Abstrakta koncept, metoder, processer
-    
-    UPPGIFT:
-    1. Vilka namn refererar till SAMMA entitet?
-    2. Vilken TYP har varje entitet?
-    3. Vilka är OLIKA entiteter med liknande namn?
-    
-    EXEMPEL:
-    - "Kortnamn" och "Fullständigt Företagsnamn AB" → SAMMA, typ: organization
-    - "Produkt Pro" och "Produkt" → SAMMA, typ: product
-    - "Förnamn A" och "Förnamn B" → OLIKA personer (olika efternamn)
-    - "Förkortning" och "Fullständigt Namn" → SAMMA, typ: organization
-    
-    Svara JSON:
-    {{
-        "analysis": "Kort analys...",
-        "same_entity_groups": [
-            {{
-                "canonical": "Det mest kompletta namnet",
-                "aliases": ["Kortnamn", "Variant"],
-                "entity_type": "person|organization|project|product|concept",
-                "confidence": 0.0-1.0
-            }}
-        ],
-        "different_entities": ["Entitet A", "Entitet B som är något annat"]
-    }}
-
-consolidator:
-  role: "Du analyserar användarmönster för att föreslå förbättringar."
-  instruction: |
-    Du analyserar sökloggar från en användarsession.
-    
-    SIGNALER:
-    {signals}
-    
-    KÄNDA ENTITETER:
-    {known_entities}
-    
-    UPPGIFT:
-    Identifiera mönster och föreslå förbättringar:
-    
-    1. ALIAS-KANDIDATER:
-       - Keywords med 0 träffar som liknar kända namn
-       - Stavningsvarianter av kända entiteter
-    
-    2. TAXONOMI-KANDIDATER:
-       - Ofta sökta termer som inte finns i taxonomin
-       - Nya ämnesområden som verkar viktiga
-    
-    3. RE-INDEXERINGS-KANDIDATER:
-       - Dokument som ofta missas vid sökning
-    
-    Svara JSON:
-    {{
-        "alias_suggestions": [
-            {{"canonical": "<formellt namn>", "alias": "<variant>", "confidence": 0.9, "reason": "..."}}
-        ],
-        "taxonomy_suggestions": [
-            {{"term": "<nytt koncept>", "suggested_parent": "<masternode>", "reason": "..."}}
-        ],
-        "reindex_suggestions": [
-            {{"pattern": "<sökterm som missade>", "reason": "..."}}
-        ],
-        "insights": "Övergripande insikter om användarbeteende..."
-    }}
-
 # === SIMULATION (Interrogator) ===
 
 interrogator:
@@ -389,52 +306,6 @@ interrogator_check:
         "reason": "Kort motivering. Om abort: varför verktyget misslyckades."
     }}
 
-# === DREAMING / KONSOLIDERING ===
-
-conversation_analyzer:
-  role: "Du analyserar konversationer för att hitta lärdomar som systemet ska komma ihåg."
-  instruction: |
-    KONVERSATION:
-    {conversation}
-    
-    KÄNDA ENTITETER:
-    {known_entities}
-    
-    UPPGIFT:
-    Analysera konversationen och hitta explicita eller implicita lärdomar:
-    
-    1. ALIAS - När användaren säger att två namn är samma sak, eller korrigerar ett namn:
-       - 'canonical' = det KORREKTA/FORMELLA/FULLSTÄNDIGA namnet
-       - 'alias' = smeknamn, förkortning, felstavning, eller det felaktiga namnet
-       
-       Exempel på mönster:
-       - "X och Y är samma person" → canonical=Y (det formella), alias=X
-       - "Det finns ingen X, det heter Y" → canonical=Y, alias=X
-       - "Han heter egentligen Y" → canonical=Y, alias=det som refereras
-    
-    2. RELATIONER - När användaren beskriver kopplingar mellan entiteter
-    
-    3. FAKTA - Specifik information att komma ihåg (datum, kontaktuppgifter, etc.)
-    
-    Svara ENDAST med JSON:
-    {{
-        "learnings": [
-            {{
-                "type": "alias|relation|fact",
-                "confidence": 0.0-1.0,
-                "canonical": "Det korrekta/fullständiga namnet",
-                "alias": "Aliaset/smeknamnet/felstavningen (endast för type=alias)",
-                "entity_type": "Person|Aktör|Projekt|Koncept",
-                "subject": "Subjekt (för relationer)",
-                "predicate": "Relation (för relationer)",
-                "object": "Objekt (för relationer)",
-                "evidence": "Citat från konversationen som stödjer detta"
-            }}
-        ]
-    }}
-    
-    Om inga lärdomar hittas, returnera: {{"learnings": []}}
-
 # === SESSION LEARNINGS ===
 session_learnings_extractor:
   role: "Du analyserar chatt-sessioner för att extrahera alias-kopplingar."
@@ -469,14 +340,3 @@ session_learnings_extractor:
     }}
     
     Om inga alias-kopplingar hittas, returnera: {{"learned_aliases": []}}
-
-# === SESSION EXPORT ===
-session_export:
-  markdown_template: |
-    # Session {date}
-    
-    Avslutad: {reason}
-    
-    ## Konversation
-    
-    {messages}
