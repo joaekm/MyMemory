@@ -1,11 +1,11 @@
 """
-IntentRouter - Pipeline v6.0 Fas 1
+IntentRouter - Pipeline v7.0 "The System-Aware Router"
 
 Ansvar:
-- Klassificera intent: STRICT (specifik fakta) vs RELAXED (breda idéer)
-- Parsa tidsreferenser till absoluta datum
-- Upplösa kontextreferenser från chatthistorik
-- Extrahera sökord och semantisk söksträng
+- Skapa ett Kontextuellt Mission Goal
+- Använda Taxonomin som "Grafens Karta"
+- Använda User Profile för användarkontext
+- Extrahera keywords, entities och time_filter
 """
 
 import os
@@ -14,6 +14,16 @@ import yaml
 import datetime
 import logging
 from google import genai
+
+# Import robust JSON parser
+try:
+    from services.utils.json_parser import parse_llm_json
+except ImportError as _import_err:
+    # Direkt körning - försök utan services-prefix
+    try:
+        from utils.json_parser import parse_llm_json
+    except ImportError as e:
+        raise ImportError(f"HARDFAIL: Kan inte importera json_parser: {e}") from e
 
 # --- CONFIG LOADER ---
 def _load_config():
@@ -27,7 +37,7 @@ def _load_config():
             with open(p, 'r') as f:
                 config = yaml.safe_load(f)
             return config
-    raise FileNotFoundError("Config not found")
+    raise FileNotFoundError("HARDFAIL: Config not found")
 
 def _load_prompts():
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -39,7 +49,7 @@ def _load_prompts():
         if os.path.exists(p):
             with open(p, 'r', encoding='utf-8') as f:
                 return yaml.safe_load(f)
-    raise FileNotFoundError("Prompts not found")
+    raise FileNotFoundError("HARDFAIL: Prompts not found")
 
 CONFIG = _load_config()
 PROMPTS = _load_prompts()
@@ -48,6 +58,7 @@ LOGGER = logging.getLogger('IntentRouter')
 API_KEY = CONFIG['ai_engine']['api_key']
 MODEL_LITE = CONFIG['ai_engine']['models']['model_lite']
 TAXONOMY_FILE = os.path.expanduser(CONFIG['paths'].get('taxonomy_file', '~/MyMemory/Index/my_mem_taxonomy.json'))
+USER_PROFILE_FILE = os.path.expanduser(CONFIG['paths'].get('user_profile', '~/MyMemory/Index/user_profile.yaml'))
 
 
 def _load_taxonomy_nodes() -> list:
@@ -55,7 +66,7 @@ def _load_taxonomy_nodes() -> list:
     if not os.path.exists(TAXONOMY_FILE):
         raise FileNotFoundError(
             f"HARDFAIL: Taxonomifil saknas: {TAXONOMY_FILE}. "
-            "Skapa filen enligt Princip 7 i projektreglerna."
+            "Skapa filen enligt Princip 8 i projektreglerna."
         )
     
     try:
@@ -71,11 +82,8 @@ def _load_taxonomy_nodes() -> list:
         raise RuntimeError(f"HARDFAIL: Kunde inte ladda taxonomi: {e}") from e
 
 
-TAXONOMY_NODES = _load_taxonomy_nodes()
-
-
 def _load_taxonomy_str() -> str:
-    """Formatera taxonomin som läsbar kontext för LLM."""
+    """Formatera taxonomin som läsbar kontext för LLM (Grafens Karta)."""
     if not os.path.exists(TAXONOMY_FILE):
         return ""
     try:
@@ -95,7 +103,50 @@ def _load_taxonomy_str() -> str:
         return ""
 
 
+def _load_user_profile() -> str:
+    """Ladda och formatera användarprofil för prompt."""
+    if not os.path.exists(USER_PROFILE_FILE):
+        LOGGER.warning(f"User profile saknas: {USER_PROFILE_FILE}")
+        return "(Ingen användarprofil laddad)"
+    
+    try:
+        with open(USER_PROFILE_FILE, 'r', encoding='utf-8') as f:
+            profile = yaml.safe_load(f)
+        
+        # Formatera till läsbar text
+        identity = profile.get('identity', {})
+        context = profile.get('professional_context', {})
+        relations = profile.get('relations', {})
+        prefs = profile.get('preferences', {})
+        
+        lines = [
+            f"Namn: {identity.get('name', 'Okänd')}",
+            f"Roll: {identity.get('role', 'Okänd')}",
+            f"Företag: {identity.get('company', 'Okänt')}",
+        ]
+        
+        if context.get('current_focus'):
+            lines.append(f"Fokus: {', '.join(context['current_focus'])}")
+        
+        if relations.get('direct_reports'):
+            lines.append(f"Team: {', '.join(relations['direct_reports'])}")
+        
+        if relations.get('key_clients'):
+            lines.append(f"Nyckelkunder: {', '.join(relations['key_clients'])}")
+        
+        if prefs.get('communication_style'):
+            lines.append(f"Kommunikationsstil: {prefs['communication_style']}")
+        
+        return "\n".join(lines)
+    except Exception as e:
+        LOGGER.warning(f"Kunde inte ladda user profile: {e}")
+        return "(Kunde inte ladda användarprofil)"
+
+
+# Ladda vid uppstart
+TAXONOMY_NODES = _load_taxonomy_nodes()
 TAXONOMY_CONTEXT = _load_taxonomy_str()
+USER_PROFILE = _load_user_profile()
 
 # AI Client (lazy init)
 _AI_CLIENT = None
@@ -129,21 +180,22 @@ def _format_history(chat_history: list) -> str:
 
 def route_intent(query: str, chat_history: list = None, debug_trace: dict = None) -> dict:
     """
-    Analysera användarfråga och returnera sökparametrar.
+    Skapa Mission Goal baserat på användarfråga.
+    
+    Pipeline v7.0: Ersätter STRICT/RELAXED med mission_goal.
     
     Args:
         query: Användarens fråga
-        chat_history: Lista med tidigare meddelanden [{"role": "user/assistant", "content": "..."}]
+        chat_history: Lista med tidigare meddelanden
         debug_trace: Dict för att samla debug-info (optional)
     
     Returns:
         dict med:
-            - intent: "STRICT" eller "RELAXED"
+            - status: "OK" eller "ERROR"
             - keywords: Lista med sökord
-            - vector_query: Semantisk söksträng
-            - time_filter: {"after": "YYYY-MM-DD", "before": "YYYY-MM-DD"} eller None
-            - context_resolved: Dict med upplösta referenser
-            - reasoning: Kort motivering
+            - entities: Lista med entiteter (t.ex. "Person: Cenk")
+            - time_filter: {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"} eller None
+            - mission_goal: Detaljerat uppdrag för Planner
     """
     
     # Hämta prompt-template
@@ -163,6 +215,7 @@ def route_intent(query: str, chat_history: list = None, debug_trace: dict = None
         weekday=weekday,
         query=query,
         history=history_text,
+        user_profile=USER_PROFILE,
         taxonomy_context=TAXONOMY_CONTEXT
     )
     
@@ -173,32 +226,20 @@ def route_intent(query: str, chat_history: list = None, debug_trace: dict = None
             contents=full_prompt
         )
         
-        # Parsa JSON-svar
-        text = response.text.replace("```json", "").replace("```", "").strip()
+        # Parsa JSON-svar med robust parser
+        text = response.text
         LOGGER.debug(f"IntentRouter LLM-svar: {text[:500]}...")
-        result = json.loads(text)
+        result = parse_llm_json(text, context="intent_router")
         
-        # Validera och normalisera
-        intent = result.get('intent', 'RELAXED').upper()
-        if intent not in ['STRICT', 'RELAXED']:
-            intent = 'RELAXED'
-        
-        # Validera graph_paths mot kända huvudnoder
-        graph_paths = result.get('graph_paths', [])
-        valid_paths = [p for p in graph_paths if p in TAXONOMY_NODES]
-        if len(valid_paths) != len(graph_paths):
-            invalid = set(graph_paths) - set(valid_paths)
-            LOGGER.warning(f"IntentRouter angav ogiltiga graph_paths: {invalid}")
+        # Validera entities mot taxonomi-noder
+        entities = result.get('entities', [])
         
         output = {
             "status": "OK",
-            "intent": intent,
             "keywords": result.get('keywords', []),
-            "vector_query": result.get('vector_query', query),
+            "entities": entities,
             "time_filter": result.get('time_filter'),
-            "context_resolved": result.get('context_resolved', {}),
-            "graph_paths": valid_paths,
-            "reasoning": result.get('reasoning', '')
+            "mission_goal": result.get('mission_goal', query)
         }
         
         # Spara till debug_trace om tillgänglig
@@ -206,13 +247,13 @@ def route_intent(query: str, chat_history: list = None, debug_trace: dict = None
             debug_trace['intent_router'] = output
             debug_trace['intent_router_raw'] = text
         
-        LOGGER.info(f"IntentRouter: {intent} - keywords={output['keywords']}")
+        LOGGER.info(f"IntentRouter: keywords={output['keywords']}, entities={output['entities']}")
         return output
         
-    except json.JSONDecodeError as e:
-        LOGGER.error(f"HARDFAIL: IntentRouter JSON parse error: {e}")
-        LOGGER.error(f"Rå LLM-respons: {text}")
-        raise ValueError(f"HARDFAIL: IntentRouter kunde inte parsa AI-svar: {e}") from e
+    except ValueError as e:
+        # parse_llm_json kastar ValueError vid fel
+        LOGGER.error(f"HARDFAIL: IntentRouter: {e}")
+        raise
         
     except Exception as e:
         LOGGER.error(f"HARDFAIL: IntentRouter error: {e}")
@@ -230,4 +271,3 @@ if __name__ == "__main__":
     
     result = route_intent(test_query, test_history)
     print(json.dumps(result, indent=2, ensure_ascii=False))
-

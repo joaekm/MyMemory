@@ -53,9 +53,9 @@ doc_converter:
     - Marknad: Positionering, konkurrenter, omvärldsanalys, leads, varumärke.
     - Affär: Affärsmodeller, lönsamhet, kalkyl, prissättning, säljaktiviteter.
     - Kultur: Värderingar, "The Digitalist Way", psykologisk trygghet, samarbetsklimat.
-    - Projekt: Konkreta uppdrag, PoC (t.ex. Vulkan), backlogs, projektledning.
+    - Projekt: Konkreta uppdrag, PoC:er, backlogs, projektledning.
     - Metodik: Hur vi arbetar. Agile, Service Design, WoW, HIIT, principer.
-    - Erbjudande: Våra produkter och tjänster (MyMem, P-Bot, Konsulting).
+    - Erbjudande: Våra produkter och tjänster, konsulting.
     - Avtal: Offerter, ramavtal, licenser, upphandlingar (FKU).
     - Organisation: Rekrytering, team, roller, onboarding, personalfrågor.
     - Händelser: Möten, workshops, konferenser, daglig status, incidenter.
@@ -91,10 +91,9 @@ doc_converter:
     ALIAS-DETEKTION:
     Om texten innehåller namnvarianter som troligen refererar till samma entitet,
     rapportera dessa som "potential_aliases". Exempel:
-    - "Sänk" nämns i samma kontext som "Cenk" → potential alias
-    - "Adda-grejen" och "Adda PoC" → potential alias
-    - Smeknamn, förkortningar, felstavningar
-    - "CCM" och "Carbon Copy Machine" → potential alias
+    - Smeknamn i samma kontext som formellt namn → potential alias
+    - Informell benämning och officiellt projektnamn → potential alias
+    - Förkortningar och fullständiga namn → potential alias
     
     OUTPUT KRAV (Returnera ENDAST denna JSON):
     {
@@ -103,22 +102,22 @@ doc_converter:
         "Händelser": 0.7,
         "Teknologier": 0.3,
         "Person": {
-          "Tommy Olsson": 0.6
+          "<namn>": 0.6
         },
         "Aktör": {
-          "Adda": 0.8
+          "<organisationsnamn>": 0.8
         },
         "Projekt": {
-          "Adda PoC": 0.9
+          "<projektnamn>": 0.9
         }
       },
-      "dates_mentioned": ["YYYY-MM-DD format för alla datum nämnda i texten"],
-      "actions": ["Aktiviteter som nämns (t.ex. 'Användartester', 'Demo', 'Möte')"],
+      "dates_mentioned": ["YYYY-MM-DD"],
+      "actions": ["Aktiviteter som nämns"],
       "deadlines": [
         {"what": "Vad som ska ske", "when": "YYYY-MM-DD"}
       ],
       "potential_aliases": [
-        {"name_variant": "Smeknamn/variant", "likely_refers_to": "Formellt namn", "entity_type": "Person|Aktör|Projekt", "confidence": "low|medium|high"}
+        {"name_variant": "Variant", "likely_refers_to": "Formellt namn", "entity_type": "Person|Aktör|Projekt", "confidence": "low|medium|high"}
       ]
     }
     
@@ -128,11 +127,6 @@ doc_converter:
     - CUTOFF: Inkludera ENDAST noder med relevans >= 0.2
     - Dokumentet kan vara relevant för FLERA masternoder (viktat)
     - Använd EXAKT namn från KÄNDA PERSONER/PROJEKT om tillgängliga
-
-# --- Chatt-agenten (RAG-gränssnitt) ---
-chat:
-  system_prompt: |
-    Du är "MyMemory", en intelligent assistent. Svara baserat på bifogad kontext.
 
 # --- Dreamer (Taxonomi-konsolidering) ---
 dreamer:
@@ -156,6 +150,6 @@ dreamer:
     5. VARJE koncept MÅSTE placeras under en masternode - ingen får utelämnas
     
     RETURNERA ENDAST GILTIG JSON. Exempel på korrekt format:
-    {"Händelser": ["Sprint review", "Standup"], "Teknologier": ["Kubernetes"], "Person": ["Anna"], "aliases_detected": [{"alias": "K8s", "canonical": "Kubernetes", "confidence": "high"}]}
+    {"<Masternode>": ["koncept1", "koncept2"], "Person": ["<namn>"], "aliases_detected": [{"alias": "<förkortning>", "canonical": "<fullständigt namn>", "confidence": "high"}]}
     
     Nycklar MÅSTE vara exakta nodnamn från BEFINTLIGA MASTERNODER. Inkludera INTE noder utan nya koncept.

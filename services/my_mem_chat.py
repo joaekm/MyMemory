@@ -1,15 +1,26 @@
 import os
 import sys
+
+# Tysta tqdm/SentenceTransformer progress bars
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Patcha tqdm att vara tyst (innan SentenceTransformer importeras)
+import tqdm
+import tqdm.auto
+_orig_tqdm_init = tqdm.tqdm.__init__
+def _silent_tqdm_init(self, *args, **kwargs):
+    kwargs['disable'] = True
+    return _orig_tqdm_init(self, *args, **kwargs)
+tqdm.tqdm.__init__ = _silent_tqdm_init
+tqdm.auto.tqdm.__init__ = _silent_tqdm_init
 import time
 import yaml
 import json
 import logging
-import chromadb
 import datetime
 import argparse
 from google import genai
 from google.genai import types
-from chromadb.utils import embedding_functions
 from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
@@ -18,18 +29,18 @@ from rich.table import Table
 from rich import box
 from rich.live import Live
 
-# Pipeline v6.0 imports
+# Pipeline v7.0 imports
 try:
     from services.intent_router import route_intent
-    from services.context_builder import build_context
-    from services.planner import create_report
+    from services.context_builder import build_context, search
+    from services.planner import run_planner_loop
     from services.synthesizer import synthesize
-except ImportError:
+except ImportError as _import_err:
     # Direkt körning - försök importera utan services-prefix
     try:
         from intent_router import route_intent
-        from context_builder import build_context
-        from planner import create_report
+        from context_builder import build_context, search
+        from planner import run_planner_loop
         from synthesizer import synthesize
     except ImportError as e:
         raise ImportError(f"HARDFAIL: Kan inte importera pipeline-moduler: {e}") from e
@@ -273,10 +284,10 @@ def _handle_feedback(canonical: str, alias: str, entity_type: str) -> str:
 
 
 
-# === PIPELINE v6.0 ===
-def execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=None):
+# === PIPELINE v7.0 "The Reasoning Engine" ===
+def execute_pipeline_v7(query, chat_history, debug_mode=False, debug_trace=None):
     """
-    Pipeline v6.0: IntentRouter → ContextBuilder → Planner → Synthesizer
+    Pipeline v7.0: IntentRouter → ContextBuilder → Planner Loop → Synthesizer
     
     Args:
         query: Användarens fråga
@@ -286,17 +297,19 @@ def execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=None)
     
     Returns:
         dict: {
-            "status": "OK" | "NO_RESULTS" | "ERROR",
+            "status": "COMPLETE" | "ABORT" | "NO_RESULTS" | "ERROR",
             "report": Markdown-rapport för Synthesizer,
             "sources": Lista med filnamn,
-            "gaps": Lista med identifierade luckor
+            "gaps": Lista med identifierade luckor,
+            "reason": Anledning vid ABORT
         }
     """
+    import uuid
     start_time = time.time()
     
-    # Fas 1: IntentRouter (AI)
+    # Fas 1: IntentRouter (AI) - Skapa Mission Goal
     if debug_mode:
-        console.print("[dim]→ IntentRouter...[/dim]")
+        console.print("[dim]→ IntentRouter (Mission Goal)...[/dim]")
     
     intent_data = route_intent(query, chat_history, debug_trace=debug_trace)
     
@@ -305,17 +318,22 @@ def execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=None)
         raise RuntimeError(f"HARDFAIL: IntentRouter misslyckades: {intent_data.get('reason')}")
     
     if debug_mode:
-        debug_content = f"[bold]Intent:[/bold] {intent_data.get('intent')}\n"
+        debug_content = f"[bold]Mission Goal:[/bold] {intent_data.get('mission_goal', '')[:100]}...\n"
         debug_content += f"[cyan]Keywords:[/cyan] {intent_data.get('keywords')}\n"
-        debug_content += f"[green]Graf-paths:[/green] {intent_data.get('graph_paths')}\n"
+        debug_content += f"[green]Entities:[/green] {intent_data.get('entities')}\n"
         debug_content += f"[magenta]Tidsfilter:[/magenta] {intent_data.get('time_filter')}"
         debug_panel("1. INTENT", debug_content, style="magenta", debug_mode=debug_mode)
     
-    # Fas 2: ContextBuilder (Kod)
+    # Fas 2: ContextBuilder (Kod) - Initial sökning
     if debug_mode:
-        console.print("[dim]→ ContextBuilder...[/dim]")
+        console.print("[dim]→ ContextBuilder (Initial)...[/dim]")
     
-    context_result = build_context(intent_data, debug_trace=debug_trace)
+    context_result = build_context(
+        keywords=intent_data.get('keywords', []),
+        entities=intent_data.get('entities', []),
+        time_filter=intent_data.get('time_filter'),
+        debug_trace=debug_trace
+    )
     
     # Logga sökning för Dreaming
     stats = context_result.get('stats', {})
@@ -324,12 +342,12 @@ def execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=None)
         query=query,
         keywords=intent_data.get('keywords', []),
         hits=total_hits,
-        intent=intent_data.get('intent', 'RELAXED')
+        intent="v7.0"
     )
     
     if context_result.get('status') == 'NO_RESULTS':
         if debug_mode:
-            console.print(f"[yellow]HARDFAIL: {context_result.get('reason')}[/yellow]")
+            console.print(f"[yellow]Inga träffar: {context_result.get('reason')}[/yellow]")
         return {
             "status": "NO_RESULTS",
             "reason": context_result.get('reason'),
@@ -345,27 +363,42 @@ def execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=None)
         debug_content += f"[bold]Efter dedup:[/bold] {stats.get('after_dedup', 0)} kandidater"
         debug_panel("2. CONTEXT", debug_content, style="green", debug_mode=debug_mode)
     
-    # Fas 3: Planner (AI)
+    # Fas 3: Planner Loop (AI) - ReAct Loop
     if debug_mode:
-        console.print("[dim]→ Planner...[/dim]")
+        console.print("[dim]→ Planner Loop (ReAct)...[/dim]")
     
-    report_result = create_report(context_result, intent_data, debug_trace=debug_trace)
+    session_id = str(uuid.uuid4())[:8]
+    mission_goal = intent_data.get('mission_goal', query)
+    initial_candidates = context_result.get('candidates_full', [])
+    candidates_formatted = context_result.get('candidates_formatted', '')
     
-    if report_result.get('status') in ['ERROR', 'NO_CANDIDATES']:
-        if debug_mode:
-            console.print(f"[yellow]Planner-fel: {report_result.get('reason')}[/yellow]")
-        return {
-            "status": "ERROR",
-            "reason": report_result.get('reason'),
-            "report": "",
-            "sources": [],
-            "gaps": report_result.get('gaps', [])
-        }
+    planner_result = run_planner_loop(
+        mission_goal=mission_goal,
+        query=query,
+        initial_candidates=initial_candidates,
+        candidates_formatted=candidates_formatted,
+        session_id=session_id,
+        search_fn=search,  # Callback för extra sökningar
+        debug_trace=debug_trace
+    )
     
     if debug_mode:
-        debug_content = f"[bold]Använda källor:[/bold] {len(report_result.get('sources_used', []))}\n"
-        debug_content += f"[bold]Luckor:[/bold] {report_result.get('gaps', [])}\n"
-        debug_content += f"[bold]Confidence:[/bold] {report_result.get('confidence', 0)}"
+        # Visa info från varje iteration (Knowledge Refinement)
+        if debug_trace:
+            for key in sorted([k for k in debug_trace.keys() if k.startswith('planner_iter_')]):
+                iter_data = debug_trace[key]
+                iter_num = key.split('_')[-1]
+                status = iter_data.get('status', '')
+                next_search = iter_data.get('next_search', '')
+                console.print(f"[dim]  Iteration {iter_num}: {status}[/dim]")
+                if next_search:
+                    console.print(f"[dim]    → Nästa sökning: '{next_search}'[/dim]")
+        
+        debug_content = f"[bold]Status:[/bold] {planner_result.get('status')}\n"
+        if planner_result.get('reason'):
+            debug_content += f"[bold]Reason:[/bold] {planner_result.get('reason')[:100]}...\n"
+        debug_content += f"[bold]Använda källor:[/bold] {len(planner_result.get('sources_used', []))}\n"
+        debug_content += f"[bold]Luckor:[/bold] {planner_result.get('gaps', [])}"
         debug_panel("3. PLANNER", debug_content, style="blue", debug_mode=debug_mode)
     
     # Spara timing
@@ -373,11 +406,11 @@ def execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=None)
         debug_trace['pipeline_duration'] = round(time.time() - start_time, 2)
     
     return {
-        "status": "OK",
-        "report": report_result.get('report', ''),
-        "sources": report_result.get('sources_used', []),
-        "gaps": report_result.get('gaps', []),
-        "confidence": report_result.get('confidence', 0)
+        "status": planner_result.get('status', 'ERROR'),
+        "report": planner_result.get('report', ''),
+        "sources": planner_result.get('sources_used', []),
+        "gaps": planner_result.get('gaps', []),
+        "reason": planner_result.get('reason')
     }
 
 
@@ -386,7 +419,7 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
     """
     Bearbetar en fråga och returnerar ett strukturerat svar.
     
-    Pipeline v6.0: IntentRouter → ContextBuilder → Planner → Synthesizer
+    Pipeline v7.0: IntentRouter → ContextBuilder → Planner Loop → Synthesizer
     
     Args:
         query: Användarens fråga
@@ -406,8 +439,8 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
     debug_trace = {} if collect_debug else None
     start_time = time.time()
     
-    # === PIPELINE v6.0 ===
-    pipeline_result = execute_pipeline_v6(query, chat_history, debug_mode=False, debug_trace=debug_trace)
+    # === PIPELINE v7.0 ===
+    pipeline_result = execute_pipeline_v7(query, chat_history, debug_mode=False, debug_trace=debug_trace)
     
     if pipeline_result.get('status') == 'NO_RESULTS':
         return {
@@ -423,15 +456,19 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
             "debug_trace": debug_trace if collect_debug else {}
         }
     
-    # Syntes
+    # Syntes - v7.0 hanterar både COMPLETE och ABORT
     report = pipeline_result.get('report', '')
     sources = pipeline_result.get('sources', [])
     gaps = pipeline_result.get('gaps', [])
+    status = pipeline_result.get('status', 'COMPLETE')
+    reason = pipeline_result.get('reason')
     
     synth_result = synthesize(
         query=query,
         report=report,
         gaps=gaps,
+        status=status,
+        reason=reason,
         chat_history=chat_history,
         debug_trace=debug_trace
     )
@@ -441,7 +478,7 @@ def process_query(query: str, chat_history: list = None, collect_debug: bool = F
     # Spara timing
     if debug_trace is not None:
         debug_trace['total_duration'] = round(time.time() - start_time, 2)
-        debug_trace['pipeline_version'] = 'v6.0'
+        debug_trace['pipeline_version'] = 'v7.0'
     
     return {
         "answer": answer,
@@ -472,6 +509,8 @@ def _save_session_to_assets(chat_history: list, learnings: list = None, reason: 
     
     if not chat_history:
         return None
+    
+    return None  # TEMPORARILY DISABLED - sessions blir för stora
     
     # Läs sessions-mapp från config
     sessions_path = os.path.expanduser(CONFIG['paths']['asset_sessions'])
@@ -558,14 +597,14 @@ def chat_loop(debug_mode=False):
     """
     Interaktiv chattloop för CLI-användning.
     
-    Pipeline v6.0: IntentRouter → ContextBuilder → Planner → Synthesizer
+    Pipeline v7.0: IntentRouter → ContextBuilder → Planner Loop → Synthesizer
     
     Args:
         debug_mode: Om True, visa debug-paneler under körning
     """
     console.clear()
     product_name = CONFIG.get('system', {}).get('product_name', 'MyMemory')
-    console.print(Panel(f"[bold white]{product_name} v6.0[/bold white]", style="on blue", box=box.DOUBLE, expand=False))
+    console.print(Panel(f"[bold white]{product_name} v7.0[/bold white]", style="on blue", box=box.DOUBLE, expand=False))
     if debug_mode:
         console.print("[dim]Debug Mode: ON[/dim]")
         
@@ -614,8 +653,8 @@ def chat_loop(debug_mode=False):
             # Debug trace för CLI
             debug_trace = {} if debug_mode else None
             
-            # === PIPELINE v6.0 ===
-            pipeline_result = execute_pipeline_v6(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
+            # === PIPELINE v7.0 ===
+            pipeline_result = execute_pipeline_v7(query, chat_history, debug_mode=debug_mode, debug_trace=debug_trace)
             
             if pipeline_result.get('status') in ['NO_RESULTS', 'ERROR']:
                 console.print(f"[red]{pipeline_result.get('reason', 'Ingen information hittades.')}[/red]")
@@ -623,21 +662,37 @@ def chat_loop(debug_mode=False):
             
             report = pipeline_result.get('report', '')
             gaps = pipeline_result.get('gaps', [])
+            status = pipeline_result.get('status', 'COMPLETE')
+            reason = pipeline_result.get('reason')
             
             console.print("\n[bold purple]MyMem:[/bold purple]")
             
-            # Syntes med streaming
-            synth_template = PROMPTS.get('synthesizer_v6', {}).get('instruction', '')
-            if not synth_template:
-                LOGGER.error("HARDFAIL: synthesizer_v6 prompt saknas")
-                console.print("[red]Konfigurationsfel: synthesizer_v6 prompt saknas[/red]")
-                continue
-            
-            synth_prompt = synth_template.format(
-                report=report,
-                gaps=gaps if gaps else "Inga kända luckor",
-                query=query
-            )
+            # Välj rätt prompt baserat på status
+            if status == 'ABORT':
+                synth_template = PROMPTS.get('synthesizer_abort', {}).get('instruction', '')
+                if not synth_template:
+                    LOGGER.error("HARDFAIL: synthesizer_abort prompt saknas i chat_prompts.yaml")
+                    console.print("[red]Konfigurationsfel: synthesizer_abort prompt saknas[/red]")
+                    continue
+                
+                gaps_text = "\n".join(f"- {g}" for g in gaps) if gaps else "Ingen specifik information"
+                synth_prompt = synth_template.format(
+                    query=query,
+                    reason=reason or "Kunde inte hitta tillräcklig information",
+                    gaps=gaps_text
+                )
+            else:
+                synth_template = PROMPTS.get('synthesizer', {}).get('instruction', '')
+                if not synth_template:
+                    LOGGER.error("HARDFAIL: synthesizer prompt saknas")
+                    console.print("[red]Konfigurationsfel: synthesizer prompt saknas[/red]")
+                    continue
+                
+                synth_prompt = synth_template.format(
+                    report=report,
+                    gaps=gaps if gaps else "Inga kända luckor",
+                    query=query
+                )
             
             contents = []
             for msg in chat_history:

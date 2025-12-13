@@ -1,7 +1,7 @@
-# === PIPELINE v6.0 ===
+# === PIPELINE v7.0 "The Reasoning Engine" ===
 
 intent_router:
-  role: "Du analyserar användarfrågor för att avgöra sökstrategi och graf-expansion."
+  role: "Du tolkar användarfrågor och skapar sökparametrar + uppdragsmål."
   instruction: |
     TIDPUNKT: {timestamp} ({weekday})
     
@@ -10,70 +10,98 @@ intent_router:
     CHATTHISTORIK:
     {history}
     
-    KUNSKAPSGRAF (Taxonomi med beskrivningar och innehåll):
+    ANVÄNDARE (kontext för mission_goal):
+    {user_profile}
+    
+    TAXONOMI (Grafens Karta):
     {taxonomy_context}
     
-    UPPGIFT:
-    1. Klassificera intent:
-       - STRICT: Specifik fakta (datum, namn, citat, siffror)
-       - RELAXED: Idéer, sammanfattningar, bred förståelse
+    UPPGIFT: Tolka användarens fråga enligt två separata regler.
     
-    2. Parsa tidsreferenser till absoluta datum
+    ═══════════════════════════════════════════════════════════════
+    REGEL 1: SÖKORD - Trogen frågan
+    ═══════════════════════════════════════════════════════════════
+    - `keywords` ska vara TROGNA FRÅGAN - inget mer.
+    - Lägg INTE till ord från user_profile om de inte EXPLICIT nämns i frågan.
+    - Undantag: Lösa tvetydighet (t.ex. "min status" → lägg till användarens namn)
     
-    3. Upplös kontextreferenser från historiken
+    EXEMPEL:
+    - "Vem är X?" → keywords: ["X", "X Efternamn"]
+    - "Hur går projektet?" → keywords: ["<projektnamn>"]
     
-    4. Extrahera sökord (keywords):
-       - Analysera taxonomin för att hitta SPECIFIKA namn
-       - Om användaren nämner "Adda", leta i taxonomin och lägg till "Adda PoC" om det finns
-       - Inkludera både generella och specifika termer
+    Varje extra ord MINSKAR chansen att hitta rätt dokument.
     
-    5. Bestäm graf-expansion (graph_paths):
-       - Om STRICT: tom lista [] (ingen expansion behövs - du har redan valt specifika keywords)
-       - Om RELAXED: lista relevanta huvudnoder
+    ═══════════════════════════════════════════════════════════════
+    REGEL 2: MÅLBILD - Använd kontexten
+    ═══════════════════════════════════════════════════════════════
+    - `mission_goal` förklarar VARFÖR vi söker och VAD vi vill veta.
+    - Här får du använda user_profile och taxonomi.
+    - Målet instruerar Plannern hur den ska tolka dokumenten.
+    
+    EXEMPEL:
+    - "Vem är X?" → mission_goal: "Identifiera X:s roll och koppling till 
+      användaren baserat på user_profile."
+    
+    ═══════════════════════════════════════════════════════════════
     
     Svara ENDAST med JSON:
     {{
-        "intent": "STRICT" | "RELAXED",
-        "keywords": ["ord1", "ord2"],
-        "vector_query": "semantisk söksträng för vektorsökning",
-        "time_filter": {{"after": "YYYY-MM-DD", "before": "YYYY-MM-DD"}} | null,
-        "context_resolved": {{"referens": "upplöst värde"}},
-        "graph_paths": ["Huvudnod1", "Huvudnod2"],
-        "reasoning": "kort motivering av klassificering och graf-val"
+        "keywords": ["ord från frågan"],
+        "entities": ["Person: Namn"],
+        "time_filter": {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}} | null,
+        "mission_goal": "Uppdrag som förklarar varför och vad..."
     }}
 
-planner_select:
-  role: "Du väljer de mest relevanta dokumenten för att besvara en fråga."
+planner_evaluate:
+  role: "Du är en Knowledge Refiner som förädlar kunskap från dokument."
   instruction: |
-    ANVÄNDARENS FRÅGA: {query}
+    MISSION: {mission_goal}
     
-    INTENT: {intent}
+    NUVARANDE KUNSKAP (Working Findings):
+    {working_findings}
     
-    KANDIDAT-DOKUMENT (sorterade på relevans):
+    NYA DOKUMENT:
     {candidates}
     
-    UPPGIFT:
-    Välj de 10-15 dokument som är MEST relevanta för att besvara frågan.
+    TIDIGARE SÖKNINGAR: {past_queries}
     
-    URVALSKRITERIER:
-    - Om STRICT: Prioritera dokument med exakta matchningar
-    - Om RELAXED: Inkludera även dokument med relaterad kontext
-    - Undvik dokument som uppenbart är irrelevanta
-    - Prioritera dokument med högre score
+    ITERATION: {iteration}/{max_iterations}
     
-    Svara JSON:
+    OBSERVERA: 
+    - De 5 mest relevanta dokumenten visas med FULL TEXT.
+    - Övriga visas som sammanfattningar.
+    
+    DIN UPPGIFT (KNOWLEDGE REFINER):
+    
+    1. LÄS NOGA: Granska fulltext-dokumenten. Svaret finns ofta i brödtexten.
+    
+    2. INTEGRERA: Skriv om `refined_findings` baserat på vad du läser.
+       - Ersätt gissningar med fakta
+       - Kasta bort dubbletter
+       - Var specifik (t.ex. "<person> migrerade <system>", inte "<person> jobbade med teknik")
+    
+    3. STYR NÄSTA STEG:
+       - COMPLETE: Du har tillräckligt för att svara på missionen
+       - SEARCH: Du hittar ett spår men saknar innehållet
+       - ABORT: Inga relevanta dokument finns (returnera det du vet)
+       
+    OBS: Sök INTE på samma sak igen (kolla past_queries).
+    
+    Svara ENDAST med JSON:
     {{
-        "selected_ids": ["doc_id_1", "doc_id_2", "..."],
-        "reasoning": "kort motivering av urvalet"
+        "status": "SEARCH" | "COMPLETE" | "ABORT",
+        "refined_findings": "Den uppdaterade, konsoliderade kunskapen...",
+        "next_search_query": "Ny specifik sökning..." | null,
+        "gaps": ["Vad som fortfarande saknas"]
     }}
 
-synthesizer_v6:
+synthesizer:
   role: "Du är MyMem - ett personligt företagsminne."
   instruction: |
     Svara på användarens fråga baserat på följande rapport.
     
     RAPPORT (sammanställd från källdokument):
-    
+    {report}
     
     IDENTIFIERADE LUCKOR:
     {gaps}
@@ -85,45 +113,36 @@ synthesizer_v6:
     - Om info saknas: "Inget loggat om X." - PUNKT. Elaborera inte.
     
     TONALITET:
-    - Joakim var MED på dessa möten - prata som en kollega, inte en arkivarie
+    - Användaren var MED på dessa möten - prata som en kollega, inte en arkivarie
     - Undvik: "Rapporten anger...", "Baserat på dokumenten..."
     - Föredra: "På mötet diskuterades...", "Ni beslutade att..."
     
     FRÅGA: {query}
 
-planner_report:
-  role: "Du skapar en kurerad rapport baserad på källdokument."
+synthesizer_abort:
+  role: "Du är MyMem - ett personligt företagsminne."
   instruction: |
-    ANVÄNDARENS FRÅGA: {query}
+    Användaren frågade: {query}
     
-    INTENT: {intent}
+    Jag kunde inte hitta tillräcklig information för att ge ett komplett svar.
     
-    KÄLLDOKUMENT:
-    {documents}
+    Anledning: {reason}
+    
+    Vad som saknas:
+    {gaps}
     
     UPPGIFT:
-    Skapa en RAPPORT som kondenserar relevant information från dokumenten.
+    Förklara ärligt och hjälpsamt för användaren vad du inte kunde hitta.
     
-    RAPPORT-KRAV:
-    1. Strukturerad markdown med tydliga rubriker
-    2. Extrahera FAKTA: namn, datum, siffror, citat
-    3. Sammanfatta KONTEXT: bakgrund, relationer, sammanhang
-    4. Max 800 ord
-    5. Ange vilka dokument du använde
-    6. Notera LUCKOR: vad saknas för ett komplett svar?
+    RIKTLINJER:
+    - Var ärlig: "Jag hittade ingen information om X"
+    - Var kortfattad: Max 2-3 meningar
+    - Ge förslag om möjligt: "Försök fråga om Y istället" eller "Specifiera tidsperiod"
+    - Undvik: Ursäkter, omskrivningar, spekulationer
     
-    VIKTIGT:
-    - Citera inte hela dokument, extrahera det väsentliga
-    - Om information saknas, var tydlig med det
-    - Prioritera konkreta fakta över generella beskrivningar
-    
-    Svara JSON:
-    {{
-        "report": "## Rapport\\n\\n### Sammanfattning\\n...\\n\\n### Detaljer\\n...",
-        "sources_used": ["filnamn1.md", "filnamn2.md"],
-        "gaps": ["Information som saknas för komplett svar..."],
-        "confidence": 0.0-1.0
-    }}
+    TONALITET:
+    - Professionell men vänlig
+    - Rakt på sak
 
 entity_disambiguator:
   role: "Du analyserar entiteter för att avgöra om de refererar till samma sak och vilken typ de har."
@@ -150,10 +169,10 @@ entity_disambiguator:
     3. Vilka är OLIKA entiteter med liknande namn?
     
     EXEMPEL:
-    - "Digitalist" och "Digitalist Open Tech AB" → SAMMA, typ: organization
-    - "Gemini Pro" och "Gemini" → SAMMA, typ: product
-    - "Pontus Rosin" och "Pontus Nilsson" → OLIKA personer
-    - "SVT" och "Sveriges Television" → SAMMA, typ: organization
+    - "Kortnamn" och "Fullständigt Företagsnamn AB" → SAMMA, typ: organization
+    - "Produkt Pro" och "Produkt" → SAMMA, typ: product
+    - "Förnamn A" och "Förnamn B" → OLIKA personer (olika efternamn)
+    - "Förkortning" och "Fullständigt Namn" → SAMMA, typ: organization
     
     Svara JSON:
     {{
@@ -197,13 +216,13 @@ consolidator:
     Svara JSON:
     {{
         "alias_suggestions": [
-            {{"canonical": "Cenk Bisgen", "alias": "Sänk", "confidence": 0.9, "reason": "..."}}
+            {{"canonical": "<formellt namn>", "alias": "<variant>", "confidence": 0.9, "reason": "..."}}
         ],
         "taxonomy_suggestions": [
-            {{"term": "AI-strategi", "suggested_parent": "Strategi", "reason": "..."}}
+            {{"term": "<nytt koncept>", "suggested_parent": "<masternode>", "reason": "..."}}
         ],
         "reindex_suggestions": [
-            {{"pattern": "möten från 2025", "reason": "..."}}
+            {{"pattern": "<sökterm som missade>", "reason": "..."}}
         ],
         "insights": "Övergripande insikter om användarbeteende..."
     }}
@@ -328,8 +347,8 @@ feedback_interpreter:
     }}
     
     EXEMPEL:
-    - "Cenk och Sänk är samma person" -> {{"is_feedback": true, "type": "alias", "canonical": "Cenk", "alias": "Sänk", "entity_type": "persons", "confidence": 0.9}}
-    - "Adda-grejen är Adda PoC" -> {{"is_feedback": true, "type": "alias", "canonical": "Adda PoC", "alias": "Adda-grejen", "entity_type": "projects", "confidence": 0.8}}
+    - "X och Y är samma person" -> {{"is_feedback": true, "type": "alias", "canonical": "X", "alias": "Y", "entity_type": "persons", "confidence": 0.9}}
+    - "Projektet kallas också Z" -> {{"is_feedback": true, "type": "alias", "canonical": "<projektnamn>", "alias": "Z", "entity_type": "projects", "confidence": 0.8}}
     - "Vad hände igår?" -> {{"is_feedback": false, "type": null, "canonical": null, "alias": null, "entity_type": null, "confidence": 0.0}}
 
 interrogator_check:

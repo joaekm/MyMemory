@@ -1,12 +1,11 @@
 """
-ContextBuilder - Pipeline v6.0 Fas 2
+ContextBuilder - Pipeline v7.0
 
 Ansvar:
 - Deterministisk informationshämtning (INGEN AI)
-- Kör ALLTID båda: search_lake + vector_db (kvalitet > hastighet)
-- Graf-expansion baserat på graph_paths från IntentRouter
-- Viktning baserat på intent (STRICT prioriterar LAKE)
-- Deduplicera och returnera max ~50 kandidater med metadata+summary
+- Kör Lake + Vektor parallellt
+- Returnera topp 50 kandidater med metadata+summary
+- Ingen intent-logik (Planner hanterar urval)
 
 ID-format: Alla IDs normaliseras till UUID för korrekt deduplicering
 """
@@ -16,6 +15,7 @@ import re
 import json
 import yaml
 import logging
+
 import chromadb
 from chromadb.utils import embedding_functions
 
@@ -34,7 +34,7 @@ def _load_config():
             with open(p, 'r') as f:
                 config = yaml.safe_load(f)
             return config
-    raise FileNotFoundError("Config not found")
+    raise FileNotFoundError("HARDFAIL: Config not found")
 
 CONFIG = _load_config()
 LOGGER = logging.getLogger('ContextBuilder')
@@ -42,14 +42,9 @@ LOGGER = logging.getLogger('ContextBuilder')
 LAKE_PATH = os.path.expanduser(CONFIG['paths'].get('lake_store', '~/MyMemory/Lake'))
 CHROMA_PATH = os.path.expanduser(CONFIG['paths']['chroma_db'])
 TAXONOMY_FILE = os.path.expanduser(CONFIG['paths'].get('taxonomy_file', '~/MyMemory/Index/my_mem_taxonomy.json'))
-API_KEY = CONFIG['ai_engine']['api_key']
 
 # Max kandidater att returnera
 MAX_CANDIDATES = 50
-
-# Viktningsfaktorer
-LAKE_BOOST_STRICT = 1.3   # STRICT: LAKE-träffar får 30% boost
-LAKE_BOOST_RELAXED = 1.0  # RELAXED: Ingen boost
 
 
 def _load_taxonomy() -> dict:
@@ -64,28 +59,6 @@ def _load_taxonomy() -> dict:
 
 
 TAXONOMY = _load_taxonomy()
-
-
-def _expand_keywords_via_graph(keywords: list, graph_paths: list) -> list:
-    """
-    Lägg till huvudnoder som extra söktermer (ingen sub_node-expansion).
-    IntentRouter ansvarar nu för specifika urval.
-    
-    Args:
-        keywords: Ursprungliga sökord
-        graph_paths: Lista med huvudnoder att lägga till
-    
-    Returns:
-        Expanderad lista med sökord
-    """
-    expanded = set(keywords)
-    
-    for path in graph_paths:
-        if path in TAXONOMY:
-            expanded.add(path)  # Bara huvudnoden
-            LOGGER.debug(f"La till huvudnod '{path}' som sökterm")
-    
-    return list(expanded)
 
 
 def _search_lake(keywords: list) -> dict:
@@ -123,8 +96,8 @@ def _search_lake(keywords: list) -> dict:
                     yaml_content = content[3:yaml_end]
                     metadata = yaml.safe_load(yaml_content)
                     summary = metadata.get('summary', '')[:200]
-                except:
-                    pass
+                except Exception as e:
+                    LOGGER.debug(f"Kunde inte parsa YAML-header i {filename}: {e}")
             
             if not summary:
                 summary = content[:200].replace("\n", " ")
@@ -151,8 +124,8 @@ def _search_lake(keywords: list) -> dict:
                     "summary": summary,
                     "source": "LAKE",
                     "matched_keywords": matched_keywords,
-                    "score": len(matched_keywords) / len(keywords),  # Hur många keywords matchade
-                    "content": content  # Behålls för Planner
+                    "score": len(matched_keywords) / len(keywords),
+                    "content": content
                 }
                 
         except Exception as e:
@@ -169,8 +142,11 @@ def _search_vector(query: str, n_results: int = 30) -> dict:
     """
     hits = {}
     
+    if not query:
+        return hits
+    
     try:
-        # Initiera ChromaDB (matchar my_mem_vector_indexer.py)
+        # Initiera ChromaDB
         emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
         client = chromadb.PersistentClient(path=CHROMA_PATH)
         collection = client.get_collection(name="dfm_knowledge_base", embedding_function=emb_fn)
@@ -179,7 +155,6 @@ def _search_vector(query: str, n_results: int = 30) -> dict:
         
         if results and results['ids'] and results['ids'][0]:
             for i, raw_id in enumerate(results['ids'][0]):
-                # Normalisera ID till lowercase för konsekvent matchning med Lake
                 doc_id = raw_id.lower()
                 distance = results['distances'][0][i] if results['distances'] else 1.0
                 metadata = results['metadatas'][0][i] if results['metadatas'] else {}
@@ -204,31 +179,23 @@ def _search_vector(query: str, n_results: int = 30) -> dict:
     return hits
 
 
-def _dedupe_and_rank(lake_hits: dict, vector_hits: dict, intent: str) -> list:
+def _dedupe_and_rank(lake_hits: dict, vector_hits: dict) -> list:
     """
     Deduplicera och ranka kandidater.
-    
-    Args:
-        lake_hits: Träffar från Lake-sökning
-        vector_hits: Träffar från vektorsökning  
-        intent: "STRICT" eller "RELAXED"
+    Ingen intent-baserad viktning - neutral kombination.
     
     Returns:
         Sorterad lista med kandidater (max MAX_CANDIDATES)
     """
-    # Slå ihop och deduplicera
     all_candidates = {}
     
-    # LAKE-träffar (med boost för STRICT)
-    boost = LAKE_BOOST_STRICT if intent == "STRICT" else LAKE_BOOST_RELAXED
+    # Lake-träffar
     for doc_id, doc in lake_hits.items():
-        doc['score'] = doc.get('score', 0.5) * boost
         all_candidates[doc_id] = doc
     
     # Vektor-träffar (lägg till om inte redan finns, annars kombinera score)
     for doc_id, doc in vector_hits.items():
         if doc_id in all_candidates:
-            # Kombinera scores om dokumentet finns i båda
             existing = all_candidates[doc_id]
             existing['score'] = (existing['score'] + doc['score']) / 2
             existing['source'] = "LAKE+VECTOR"
@@ -238,88 +205,131 @@ def _dedupe_and_rank(lake_hits: dict, vector_hits: dict, intent: str) -> list:
     # Sortera på score (högst först)
     ranked = sorted(all_candidates.values(), key=lambda x: x.get('score', 0), reverse=True)
     
-    # Begränsa till MAX_CANDIDATES
     return ranked[:MAX_CANDIDATES]
 
 
-def build_context(intent_data: dict, debug_trace: dict = None) -> dict:
+def format_candidates_for_planner(candidates: list, top_n_fulltext: int = 5) -> str:
     """
-    Bygg kontext baserat på IntentRouter-output.
+    Formatera kandidater för Planner-prompten.
+    Topp N dokument får FULLTEXT, övriga får SUMMARY.
     
     Args:
-        intent_data: Output från IntentRouter med:
-            - intent: "STRICT" eller "RELAXED"
-            - keywords: Lista med sökord
-            - vector_query: Söksträng för vektorsökning
-            - graph_paths: Lista med huvudnoder att expandera
-            - time_filter: Tidsfilter (ej implementerat än)
+        candidates: Lista med kandidat-dokument
+        top_n_fulltext: Antal dokument som får fulltext (default 5)
+    
+    Returns:
+        Formaterad sträng för Planner-prompten
+    """
+    formatted_output = []
+    
+    for i, doc in enumerate(candidates):
+        is_top_tier = i < top_n_fulltext
+        
+        # Välj innehåll baserat på position
+        if is_top_tier:
+            content = doc.get('content', doc.get('summary', ''))[:8000]  # Max 8000 tecken per doc
+            type_label = "FULL_TEXT"
+        else:
+            content = doc.get('summary', '')[:300]
+            type_label = "SUMMARY"
+        
+        entry = (
+            f"=== DOKUMENT {i+1} [{type_label}] ===\n"
+            f"ID: {doc.get('id', 'unknown')[:12]}...\n"
+            f"Fil: {doc.get('filename', 'Unknown')}\n"
+            f"Källa: {doc.get('source', 'Unknown')}\n"
+            f"Score: {doc.get('score', 0):.2f}\n"
+            f"INNEHÅLL:\n{content}\n"
+            f"{'=' * 40}\n"
+        )
+        formatted_output.append(entry)
+    
+    return "\n".join(formatted_output)
+
+
+def build_context(keywords: list, entities: list = None, time_filter: dict = None, 
+                  vector_query: str = None, debug_trace: dict = None) -> dict:
+    """
+    Bygg kontext genom att söka i Lake och Vektor parallellt.
+    
+    Pipeline v7.0: Förenklad signatur utan intent-logik.
+    
+    Args:
+        keywords: Lista med sökord
+        entities: Lista med entiteter (t.ex. ["Person: Cenk"]) - används för utökad sökning
+        time_filter: {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"} (ej implementerat än)
+        vector_query: Söksträng för vektorsökning (om None, bygg från keywords)
         debug_trace: Dict för att samla debug-info (optional)
     
     Returns:
         dict med:
             - status: "OK" eller "NO_RESULTS"
-            - candidates: Lista med kandidat-dokument
+            - candidates: Lista med kandidat-dokument (slim)
+            - candidates_full: Lista med fullständiga dokument
             - stats: Statistik över sökningen
     """
-    intent = intent_data.get('intent', 'RELAXED')
-    keywords = intent_data.get('keywords', [])
-    vector_query = intent_data.get('vector_query', '')
-    graph_paths = intent_data.get('graph_paths', [])
+    # Expandera keywords med entity-namn
+    search_keywords = list(keywords) if keywords else []
+    if entities:
+        for entity in entities:
+            # Extrahera namn från "Person: Cenk" -> "Cenk"
+            if ':' in entity:
+                name = entity.split(':', 1)[1].strip()
+                if name and name not in search_keywords:
+                    search_keywords.append(name)
+            elif entity not in search_keywords:
+                search_keywords.append(entity)
     
-    # Steg 1: Expandera keywords via graf (om RELAXED och graph_paths angivna)
-    if intent == "RELAXED" and graph_paths:
-        expanded_keywords = _expand_keywords_via_graph(keywords, graph_paths)
-        LOGGER.info(f"Graf-expansion: {len(keywords)} → {len(expanded_keywords)} keywords")
-    else:
-        expanded_keywords = keywords
+    # Bygg vector_query om inte angiven
+    if not vector_query and search_keywords:
+        vector_query = " ".join(search_keywords)
     
-    # Steg 2: Sök i Lake (alltid)
-    lake_hits = _search_lake(expanded_keywords)
+    # Sök i Lake
+    lake_hits = _search_lake(search_keywords)
     LOGGER.info(f"Lake-sökning: {len(lake_hits)} träffar")
     
-    # Steg 3: Sök i vektor (alltid - kvalitet > hastighet)
+    # Sök i vektor
     vector_hits = _search_vector(vector_query) if vector_query else {}
     LOGGER.info(f"Vektor-sökning: {len(vector_hits)} träffar")
     
-    # Steg 4: Deduplicera och ranka
-    candidates = _dedupe_and_rank(lake_hits, vector_hits, intent)
+    # Deduplicera och ranka
+    candidates = _dedupe_and_rank(lake_hits, vector_hits)
     
     # Bygg statistik
     stats = {
-        "original_keywords": len(keywords),
-        "expanded_keywords": len(expanded_keywords),
+        "keywords": search_keywords,
         "lake_hits": len(lake_hits),
         "vector_hits": len(vector_hits),
-        "after_dedup": len(candidates),
-        "graph_paths_used": graph_paths
+        "after_dedup": len(candidates)
     }
     
     # Spara till debug_trace
     if debug_trace is not None:
         debug_trace['context_builder'] = {
-            "intent": intent,
-            "keywords_original": keywords,
-            "keywords_expanded": expanded_keywords if expanded_keywords != keywords else None,
+            "keywords": search_keywords,
+            "entities": entities,
+            "vector_query": vector_query,
             "stats": stats
         }
         debug_trace['context_builder_candidates'] = [
             {"id": c['id'], "source": c['source'], "score": round(c.get('score', 0), 3)}
-            for c in candidates[:10]  # Logga top 10
+            for c in candidates[:10]
         ]
     
     # HARDFAIL om inga träffar
     if not candidates:
-        LOGGER.warning(f"HARDFAIL: Inga träffar för keywords={keywords}, vector_query={vector_query}")
+        LOGGER.warning(f"Inga träffar för keywords={search_keywords}")
         return {
             "status": "NO_RESULTS",
-            "reason": f"Sökning returnerade 0 träffar för keywords={keywords}",
-            "suggestion": "Försök med bredare söktermer eller annan formulering",
+            "reason": f"Sökning returnerade 0 träffar för keywords={search_keywords}",
+            "suggestion": "Försök med bredare söktermer",
             "candidates": [],
+            "candidates_full": [],
+            "candidates_formatted": "",
             "stats": stats
         }
     
-    # Ta bort fulltext-content från kandidater (Planner får hämta det själv)
-    # Behåll bara metadata + summary
+    # Skapa slim version för debug/logging
     slim_candidates = []
     for c in candidates:
         slim_candidates.append({
@@ -330,28 +340,46 @@ def build_context(intent_data: dict, debug_trace: dict = None) -> dict:
             "score": round(c.get('score', 0), 3)
         })
     
+    # Formatera för Planner: Topp 5 får FULLTEXT, övriga får SUMMARY
+    formatted_output = format_candidates_for_planner(candidates)
+    
     return {
         "status": "OK",
         "candidates": slim_candidates,
-        "candidates_full": candidates,  # Fullständig data för Planner
+        "candidates_full": candidates,
+        "candidates_formatted": formatted_output,
         "stats": stats
     }
+
+
+def search(query: str, n_results: int = 30) -> dict:
+    """
+    Enkel sökfunktion för Planner-loopens extra sökningar.
+    
+    Args:
+        query: Söksträng (används för både Lake och Vektor)
+        n_results: Max antal resultat
+    
+    Returns:
+        dict med candidates
+    """
+    keywords = query.split()
+    return build_context(
+        keywords=keywords,
+        vector_query=query
+    )
 
 
 # --- TEST ---
 if __name__ == "__main__":
     # Enkel test
-    test_intent = {
-        "intent": "RELAXED",
-        "keywords": ["Strategi", "AI"],
-        "vector_query": "AI-strategi och framtidsplaner",
-        "graph_paths": ["Strategi", "Teknologier"]
-    }
-    
-    result = build_context(test_intent)
+    result = build_context(
+        keywords=["Strategi", "AI"],
+        entities=["Person: Cenk Bisgen"],
+        vector_query="AI-strategi och framtidsplaner"
+    )
     print(f"Status: {result['status']}")
     print(f"Stats: {result['stats']}")
     print(f"Kandidater: {len(result['candidates'])}")
     for c in result['candidates'][:5]:
         print(f"  - {c['filename']} ({c['source']}, score={c['score']})")
-

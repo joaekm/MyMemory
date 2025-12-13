@@ -178,7 +178,7 @@ def log_search(query: str, keywords: list, hits: int, intent: str) -> None:
         query: Användarens fråga
         keywords: Extraherade nyckelord
         hits: Antal träffar
-        intent: STRICT/RELAXED/FACT/INSPIRATION
+        intent: Pipeline-version (t.ex. "v7.0")
     """
     if not _SESSION.session_id:
         # Starta implicit session om ingen finns
