@@ -388,15 +388,40 @@ def chat_loop(debug_mode=False):
                 console.print(f"[yellow]{result.get('answer', 'Ingen information hittades.')}[/yellow]")
                 continue
             
+            # Debug: Visa Tornbygget
+            if debug_mode and debug_trace:
+                console.print("\n[bold cyan]🏗️ TORNBYGGET[/bold cyan]")
+                for key in sorted([k for k in debug_trace.keys() if k.startswith('planner_iter_')]):
+                    data = debug_trace[key]
+                    iter_num = int(key.split('_')[-1]) + 1
+                    gain = data.get('context_gain', 0)
+                    status = data.get('status', '?')
+                    patience = data.get('patience', 0)
+                    preview = data.get('synthesis_preview', '')[:150]
+                    
+                    # Färgkoda gain
+                    if gain >= 0.5:
+                        gain_color = "green"
+                    elif gain >= 0.1:
+                        gain_color = "yellow"
+                    else:
+                        gain_color = "red"
+                    
+                    console.print(f"[dim]─── Iteration {iter_num} ───[/dim]")
+                    console.print(f"  [{gain_color}]Gain: {gain:.2f}[/{gain_color}] | Status: {status} | Patience: {patience}")
+                    console.print(f"  [italic]Torn: \"{preview}...\"[/italic]")
+                    
+                    if data.get('next_search'):
+                        console.print(f"  [cyan]→ Söker: '{data['next_search']}'[/cyan]")
+                
+                # Slutstatus
+                synthesis_len = len(engine.get_synthesis())
+                facts_count = len(engine.get_facts())
+                console.print(f"\n[bold]Slutresultat:[/bold] Torn: {synthesis_len} chars | Facts: {facts_count}")
+            
             # Visa svar
             console.print("\n[bold purple]MyMem:[/bold purple]")
             console.print(Markdown(result.get('answer', '')))
-            
-            # Debug: Visa Torn-status
-            if debug_mode:
-                synthesis_len = len(engine.get_synthesis())
-                facts_count = len(engine.get_facts())
-                console.print(f"[dim]Torn: {synthesis_len} chars | Facts: {facts_count}[/dim]")
     
     except KeyboardInterrupt:
         reset_engine()
