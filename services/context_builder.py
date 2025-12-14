@@ -21,8 +21,7 @@ from datetime import datetime
 import chromadb
 from chromadb.utils import embedding_functions
 import dateutil.parser
-
-from services.my_mem_graph_builder import get_graph_context_for_search
+import kuzu
 
 # UUID-mönster för att extrahera från filnamn
 UUID_PATTERN = re.compile(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', re.IGNORECASE)
@@ -46,6 +45,7 @@ LOGGER = logging.getLogger('ContextBuilder')
 
 LAKE_PATH = os.path.expanduser(CONFIG['paths'].get('lake_store', '~/MyMemory/Lake'))
 CHROMA_PATH = os.path.expanduser(CONFIG['paths']['chroma_db'])
+KUZU_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])
 TAXONOMY_FILE = os.path.expanduser(CONFIG['paths'].get('taxonomy_file', '~/MyMemory/Index/my_mem_taxonomy.json'))
 
 # Max kandidater att returnera
@@ -72,6 +72,102 @@ def _load_taxonomy() -> dict:
 
 
 TAXONOMY = _load_taxonomy()
+
+
+# --- GRAF-LÄSNING (KuzuDB) ---
+
+# Singleton för read-only connection
+_KUZU_DB = None
+_KUZU_CONN = None
+
+def _get_kuzu_connection():
+    """Readonly connection till KuzuDB för grafsökningar."""
+    global _KUZU_DB, _KUZU_CONN
+    
+    if _KUZU_CONN is not None:
+        return _KUZU_CONN
+    
+    if not os.path.exists(KUZU_PATH):
+        LOGGER.warning(f"KuzuDB finns inte: {KUZU_PATH}")
+        return None
+    
+    try:
+        _KUZU_DB = kuzu.Database(KUZU_PATH)
+        _KUZU_CONN = kuzu.Connection(_KUZU_DB)
+        return _KUZU_CONN
+    except Exception as e:
+        LOGGER.error(f"Kunde inte ansluta till KuzuDB: {e}")
+        return None
+
+
+def get_graph_context_for_search(keywords: list, entities: list) -> str:
+    """
+    Hämta graf-kontext för söktermerna.
+    Hjälper Planner att hitta kreativa spår att utforska.
+    
+    Args:
+        keywords: Sökord från IntentRouter
+        entities: Entiteter från IntentRouter
+    
+    Returns:
+        Formaterad sträng med grafkopplingar
+    """
+    conn = _get_kuzu_connection()
+    if conn is None:
+        return "(Graf ej tillgänglig)"
+    
+    try:
+        lines = []
+        search_terms = keywords + [e.split(':')[-1] if ':' in e else e for e in entities]
+        
+        for term in search_terms[:5]:  # Max 5 termer
+            # Fuzzy match mot Entity-namn och aliases
+            result = conn.execute("""
+                MATCH (e:Entity)
+                WHERE e.id CONTAINS $term OR list_any(e.aliases, x -> x CONTAINS $term)
+                RETURN e.id, e.type, e.aliases
+                LIMIT 3
+            """, {"term": term})
+            
+            matches = []
+            while result.has_next():
+                row = result.get_next()
+                entity_id = row[0]
+                entity_type = row[1]
+                aliases = row[2] or []
+                
+                # Hitta relaterade dokument (Units)
+                rel_result = conn.execute("""
+                    MATCH (u:Unit)-[:UNIT_MENTIONS]->(e:Entity {id: $id})
+                    RETURN u.title
+                    LIMIT 3
+                """, {"id": entity_id})
+                
+                related_docs = []
+                while rel_result.has_next():
+                    doc_row = rel_result.get_next()
+                    if doc_row[0]:
+                        related_docs.append(doc_row[0][:30])
+                
+                match_info = f"  - {entity_id} ({entity_type})"
+                if aliases:
+                    match_info += f" [alias: {', '.join(aliases[:3])}]"
+                if related_docs:
+                    match_info += f"\n    → Nämns i: {', '.join(related_docs)}"
+                matches.append(match_info)
+            
+            if matches:
+                lines.append(f'"{term}":')
+                lines.extend(matches)
+        
+        if not lines:
+            return "(Inga grafkopplingar hittades för söktermerna)"
+        
+        return "\n".join(lines)
+    
+    except Exception as e:
+        LOGGER.error(f"get_graph_context_for_search error: {e}")
+        return f"(Kunde inte hämta grafkontext: {e})"
 
 
 # --- RERANKING FUNCTIONS (Pipeline v7.5) ---
