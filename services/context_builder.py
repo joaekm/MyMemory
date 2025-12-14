@@ -22,6 +22,8 @@ import chromadb
 from chromadb.utils import embedding_functions
 import dateutil.parser
 
+from services.my_mem_graph_builder import get_graph_context_for_search
+
 # UUID-mönster för att extrahera från filnamn
 UUID_PATTERN = re.compile(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', re.IGNORECASE)
 
@@ -449,11 +451,15 @@ def build_context(keywords: list, entities: list = None, time_filter: dict = Non
     # Formatera för Planner: Topp 5 får FULLTEXT, övriga får SUMMARY
     formatted_output = format_candidates_for_planner(candidates)
     
+    # Hämta graf-kontext för att hjälpa Planner hitta kreativa spår
+    graph_context = get_graph_context_for_search(search_keywords, entities or [])
+    
     return {
         "status": "OK",
         "candidates": slim_candidates,
         "candidates_full": candidates,
         "candidates_formatted": formatted_output,
+        "graph_context": graph_context,
         "stats": stats
     }
 

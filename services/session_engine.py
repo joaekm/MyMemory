@@ -191,6 +191,9 @@ class SessionEngine:
             initial_facts = self.planner_state.facts
             LOGGER.info(f"Pivot or Persevere: Torn={len(initial_synthesis)} chars, Facts={len(initial_facts)}")
         
+        # Hämta graf-kontext för kreativa sökspår
+        graph_context = context_result.get('graph_context', '')
+        
         planner_result = run_planner_loop(
             mission_goal=mission_goal,
             query=query,
@@ -201,7 +204,8 @@ class SessionEngine:
             initial_facts=initial_facts,
             search_fn=search,
             debug_trace=debug_trace,
-            on_iteration=on_iteration
+            on_iteration=on_iteration,
+            graph_context=graph_context
         )
         
         # Spara nytt state (Plannern har redan gjort Pivot or Persevere)

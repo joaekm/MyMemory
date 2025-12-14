@@ -110,6 +110,9 @@ planner_evaluate:
     === TAXONOMI (för smarta sökningar) ===
     {taxonomy_context}
     
+    === GRAFKOPPLINGAR (kreativa spår) ===
+    {entity_relations}
+    
     TIDIGARE SÖKNINGAR: {past_queries}
     ITERATION: {iteration}/{max_iterations}
     

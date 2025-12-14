@@ -379,6 +379,74 @@ def get_all_entities() -> list:
         return []
 
 
+def get_graph_context_for_search(keywords: list, entities: list) -> str:
+    """
+    Hämta graf-kontext för söktermerna.
+    Hjälper Planner att hitta kreativa spår att utforska.
+    
+    Args:
+        keywords: Sökord från IntentRouter
+        entities: Entiteter från IntentRouter
+    
+    Returns:
+        Formaterad sträng med grafkopplingar
+    """
+    try:
+        _, conn = _get_db_connection()
+        
+        lines = []
+        search_terms = keywords + [e.split(':')[-1] if ':' in e else e for e in entities]
+        
+        for term in search_terms[:5]:  # Max 5 termer
+            # Fuzzy match mot Entity-namn och aliases
+            result = conn.execute("""
+                MATCH (e:Entity)
+                WHERE e.id CONTAINS $term OR list_any(e.aliases, x -> x CONTAINS $term)
+                RETURN e.id, e.type, e.aliases
+                LIMIT 3
+            """, {"term": term})
+            
+            matches = []
+            while result.has_next():
+                row = result.get_next()
+                entity_id = row[0]
+                entity_type = row[1]
+                aliases = row[2] or []
+                
+                # Hitta relaterade dokument (Units)
+                rel_result = conn.execute("""
+                    MATCH (u:Unit)-[:UNIT_MENTIONS]->(e:Entity {id: $id})
+                    RETURN u.title
+                    LIMIT 3
+                """, {"id": entity_id})
+                
+                related_docs = []
+                while rel_result.has_next():
+                    doc_row = rel_result.get_next()
+                    if doc_row[0]:
+                        related_docs.append(doc_row[0][:30])
+                
+                match_info = f"  - {entity_id} ({entity_type})"
+                if aliases:
+                    match_info += f" [alias: {', '.join(aliases[:3])}]"
+                if related_docs:
+                    match_info += f"\n    → Nämns i: {', '.join(related_docs)}"
+                matches.append(match_info)
+            
+            if matches:
+                lines.append(f'"{term}":')
+                lines.extend(matches)
+        
+        if not lines:
+            return "(Inga grafkopplingar hittades för söktermerna)"
+        
+        return "\n".join(lines)
+    
+    except Exception as e:
+        LOGGER.error(f"get_graph_context_for_search error: {e}")
+        return f"(Kunde inte hämta grafkontext: {e})"
+
+
 def upgrade_canonical(old_canonical: str, new_canonical: str) -> bool:
     """
     Uppgradera canonical name för en Entity.

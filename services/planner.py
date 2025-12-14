@@ -146,7 +146,7 @@ def _format_existing_facts(facts: list) -> str:
     return "\n".join([f"- {fact}" for fact in facts])
 
 
-def _evaluate_state(state: PlannerState, candidates_formatted: str) -> dict:
+def _evaluate_state(state: PlannerState, candidates_formatted: str, graph_context: str = "") -> dict:
     """
     Evaluera aktuellt state mot mission_goal.
     v8.1 Rolling Hypothesis: Jämför ny info med befintlig syntes (Tornet).
@@ -154,6 +154,7 @@ def _evaluate_state(state: PlannerState, candidates_formatted: str) -> dict:
     Args:
         state: PlannerState med current_synthesis, facts och past_queries
         candidates_formatted: Formaterade kandidater (topp 3 med fulltext)
+        graph_context: Graf-relationer för kreativa sökspår
     
     Returns:
         dict med:
@@ -184,7 +185,8 @@ def _evaluate_state(state: PlannerState, candidates_formatted: str) -> dict:
             past_queries=past_queries,
             iteration=state.iteration + 1,
             max_iterations=MAX_ITERATIONS,
-            taxonomy_context=TAXONOMY_CONTEXT
+            taxonomy_context=TAXONOMY_CONTEXT,
+            entity_relations=graph_context if graph_context else "(Inga grafkopplingar)"
         )
     except KeyError as e:
         # Fallback för legacy prompt
@@ -238,7 +240,8 @@ def run_planner_loop(
     initial_facts: list = None,
     search_fn=None,
     debug_trace: dict = None,
-    on_iteration=None  # Callback för live-output
+    on_iteration=None,  # Callback för live-output
+    graph_context: str = ""  # Graf-relationer för smarta sökningar
 ) -> dict:
     """
     ReAct-loop med Pivot or Persevere (v8.2).
@@ -303,7 +306,7 @@ def run_planner_loop(
         LOGGER.info(f"Planner iteration {state.iteration + 1}/{MAX_ITERATIONS}")
         
         # Evaluate: LLM läser dokument och uppdaterar hypotes
-        eval_result = _evaluate_state(state, current_candidates_formatted)
+        eval_result = _evaluate_state(state, current_candidates_formatted, graph_context)
         
         # v8.1: Uppdatera TORNET (current_synthesis)
         # SPARA GAMLA LÄNGDEN FÖRST (för context_gain fallback)
