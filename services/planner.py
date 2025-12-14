@@ -302,9 +302,25 @@ def run_planner_loop(
         
         # --- CONTEXT GAIN DELTA ---
         context_gain = eval_result.get('context_gain')
+        
+        # Smart Fallback om LLM missar context_gain
         if context_gain is None:
-            LOGGER.warning("LLM returnerade inte context_gain, defaultar till 0.1 (lågt)")
-            context_gain = 0.1  # Pessimistiskt default - tvingar inte oändlig loop
+            old_len = len(state.current_synthesis) if state.current_synthesis else 0
+            new_len = len(eval_result.get('updated_synthesis', ''))
+            
+            if old_len == 0 and new_len > 0:
+                # Tornet gick från tomt till något -> MAX GAIN
+                LOGGER.warning(f"LLM missade context_gain. Fallback: Syntes skapad ({new_len} chars) -> 1.0")
+                context_gain = 1.0
+            elif new_len > old_len * 1.2:
+                # Texten växte med mer än 20% -> Bra gain
+                LOGGER.warning(f"LLM missade context_gain. Fallback: Syntes växte ({old_len}->{new_len}) -> 0.5")
+                context_gain = 0.5
+            else:
+                # Marginell skillnad
+                LOGGER.warning(f"LLM missade context_gain. Fallback: Marginell ändring ({old_len}->{new_len}) -> 0.1")
+                context_gain = 0.1
+        
         LOGGER.info(f"Context gain: {context_gain:.2f}")
         
         if context_gain < GAIN_THRESHOLD:
