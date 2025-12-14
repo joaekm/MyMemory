@@ -401,7 +401,7 @@ def get_graph_context_for_search(keywords: list, entities: list) -> str:
             # Fuzzy match mot Entity-namn och aliases
             result = conn.execute("""
                 MATCH (e:Entity)
-                WHERE e.id CONTAINS $term OR list_any(e.aliases, x -> x CONTAINS $term)
+                WHERE e.id CONTAINS $term OR any(x IN e.aliases WHERE x CONTAINS $term)
                 RETURN e.id, e.type, e.aliases
                 LIMIT 3
             """, {"term": term})
