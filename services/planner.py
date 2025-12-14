@@ -277,6 +277,9 @@ def run_planner_loop(
         eval_result = _evaluate_state(state, current_candidates_formatted)
         
         # v8.1: Uppdatera TORNET (current_synthesis)
+        # SPARA GAMLA LÄNGDEN FÖRST (för context_gain fallback)
+        old_synthesis_len = len(state.current_synthesis) if state.current_synthesis else 0
+        
         updated_synthesis = eval_result.get('updated_synthesis', '')
         if updated_synthesis:
             state.current_synthesis = updated_synthesis
@@ -305,20 +308,19 @@ def run_planner_loop(
         
         # Smart Fallback om LLM missar context_gain
         if context_gain is None:
-            old_len = len(state.current_synthesis) if state.current_synthesis else 0
-            new_len = len(eval_result.get('updated_synthesis', ''))
+            new_len = len(state.current_synthesis) if state.current_synthesis else 0
             
-            if old_len == 0 and new_len > 0:
+            if old_synthesis_len == 0 and new_len > 0:
                 # Tornet gick från tomt till något -> MAX GAIN
-                LOGGER.warning(f"LLM missade context_gain. Fallback: Syntes skapad ({new_len} chars) -> 1.0")
+                LOGGER.warning(f"LLM missade context_gain. Fallback: Syntes skapad (0->{new_len}) -> 1.0")
                 context_gain = 1.0
-            elif new_len > old_len * 1.2:
+            elif new_len > old_synthesis_len * 1.2:
                 # Texten växte med mer än 20% -> Bra gain
-                LOGGER.warning(f"LLM missade context_gain. Fallback: Syntes växte ({old_len}->{new_len}) -> 0.5")
+                LOGGER.warning(f"LLM missade context_gain. Fallback: Syntes växte ({old_synthesis_len}->{new_len}) -> 0.5")
                 context_gain = 0.5
             else:
                 # Marginell skillnad
-                LOGGER.warning(f"LLM missade context_gain. Fallback: Marginell ändring ({old_len}->{new_len}) -> 0.1")
+                LOGGER.warning(f"LLM missade context_gain. Fallback: Marginell ändring ({old_synthesis_len}->{new_len}) -> 0.1")
                 context_gain = 0.1
         
         LOGGER.info(f"Context gain: {context_gain:.2f}")
