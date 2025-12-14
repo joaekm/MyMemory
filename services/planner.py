@@ -64,6 +64,34 @@ LOGGER = logging.getLogger('Planner')
 
 API_KEY = CONFIG['ai_engine']['api_key']
 MODEL_LITE = CONFIG['ai_engine']['models']['model_lite']
+TAXONOMY_FILE = os.path.expanduser(CONFIG['paths'].get('taxonomy_file', '~/MyMemory/Index/my_mem_taxonomy.json'))
+
+
+def _load_taxonomy_context() -> str:
+    """Ladda taxonomi som kontext för smarta sökningar."""
+    if not os.path.exists(TAXONOMY_FILE):
+        LOGGER.warning(f"Taxonomi-fil saknas: {TAXONOMY_FILE}")
+        return "(Ingen taxonomi tillgänglig)"
+    
+    try:
+        with open(TAXONOMY_FILE, 'r', encoding='utf-8') as f:
+            taxonomy = json.load(f)
+        
+        lines = []
+        for node, data in taxonomy.items():
+            desc = data.get('description', '')
+            subs = data.get('sub_nodes', [])
+            if subs:
+                lines.append(f"- {node}: {', '.join(subs[:10])}")
+            else:
+                lines.append(f"- {node}: {desc[:50]}")
+        return "\n".join(lines[:15])  # Max 15 noder för att inte spränga context
+    except Exception as e:
+        LOGGER.error(f"Kunde inte ladda taxonomi: {e}")
+        return "(Fel vid laddning av taxonomi)"
+
+
+TAXONOMY_CONTEXT = _load_taxonomy_context()
 
 # Konstanter
 MAX_ITERATIONS = 30     # Säkerhetsspärr (exhaustion avslutar tidigare)
@@ -155,7 +183,8 @@ def _evaluate_state(state: PlannerState, candidates_formatted: str) -> dict:
             candidates=candidates_formatted,
             past_queries=past_queries,
             iteration=state.iteration + 1,
-            max_iterations=MAX_ITERATIONS
+            max_iterations=MAX_ITERATIONS,
+            taxonomy_context=TAXONOMY_CONTEXT
         )
     except KeyError as e:
         # Fallback för legacy prompt
@@ -369,14 +398,15 @@ def run_planner_loop(
         
         # Check för COMPLETE
         if eval_result['status'] == 'COMPLETE':
-            # Om vi fortfarande hittar mycket nytt, fortsätt!
-            if context_gain >= HIGH_GAIN_THRESHOLD:
-                LOGGER.info(f"Hög gain ({context_gain:.2f} >= {HIGH_GAIN_THRESHOLD}), fortsätter trots COMPLETE")
+            # Om vi fortfarande hittar mycket nytt OCH har en sökning, fortsätt!
+            if context_gain >= HIGH_GAIN_THRESHOLD and eval_result.get('next_search_query'):
+                LOGGER.info(f"Hög gain ({context_gain:.2f} >= {HIGH_GAIN_THRESHOLD}), fortsätter med ny sökning")
                 eval_result['status'] = 'SEARCH'
-                if not eval_result.get('next_search_query'):
-                    eval_result['next_search_query'] = f"{mission_goal} fler detaljer"
             else:
-                # Verkligen klar - gain är lågt nog
+                # Acceptera COMPLETE
+                if context_gain >= HIGH_GAIN_THRESHOLD:
+                    LOGGER.info(f"Hög gain men ingen sökning given - accepterar COMPLETE")
+                
                 LOGGER.info(f"Planner COMPLETE efter {state.iteration + 1} iterationer (gain={context_gain:.2f})")
                 
                 sources = [c.get('filename', 'unknown') for c in state.candidates[:10]]

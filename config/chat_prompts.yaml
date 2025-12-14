@@ -107,52 +107,54 @@ planner_evaluate:
     === NYA DOKUMENT ===
     {candidates}
     
+    === TAXONOMI (för smarta sökningar) ===
+    {taxonomy_context}
+    
     TIDIGARE SÖKNINGAR: {past_queries}
     ITERATION: {iteration}/{max_iterations}
     
-    === DIN UPPGIFT: PIVOT OR PERSEVERE ===
+    === DIN UPPGIFT ===
     
-    Bedöm hur den nya missionen förhåller sig till Tornet:
+    1. BYGG TORNET:
+       - Integrera ny information från dokumenten
+       - Var SPECIFIK: datum, namn, belopp, versioner
+       - Max 400 ord
     
-    BEDÖM RELEVANS (tänk högt i "reasoning"):
-    - FORTSÄTTNING: Ny mission bygger på Tornet → Bygg vidare
-    - JÄMFÖRELSE: "Hur var det med X då?" → Använd Tornet som referens
-    - HELT NYTT ÄMNE: → Skriv NY syntes, MEN återanvänd relevanta fakta
+    2. BEDÖM CONTEXT GAIN:
+       - 0.0 = Inget nytt (allt fanns redan i Tornet)
+       - 0.3 = Lite nytt (detaljer)
+       - 0.6 = Substantiellt nytt (nya fakta)
+       - 1.0 = Allt är nytt (Tornet var tomt)
+    
+    3. PLANERA NÄSTA SÖKNING (om status=SEARCH):
+       - ANVÄND TAXONOMIN för att hitta relaterade kategorier
+       - Sök på SPECIFIKA saker: projekt, datum, personer, händelser
+       - VARIERA perspektiv - inte samma generiska sökning igen
+       - Exempel på BRA sökningar:
+         * "Ammi Bohlin SVT upphandling" (person + projekt)
+         * "Vulkan budget november 2025" (projekt + aspekt + tid)
+         * "Beläggning forecasting möte" (koncept + händelse)
+       - Exempel på DÅLIGA sökningar:
+         * "Ammi Bohlin information" (för generisk)
+         * "Berätta om projektet" (ingen specificitet)
     
     REGLER:
-    1. Du är INTE låst. Du FÅR skriva om Tornet helt om fokus bytt.
-    2. Men RIV INTE i onödan. Sök den röda tråden om den finns.
-    3. Håll dig strikt till fakta (gamla + nya).
-    4. Var SPECIFIK: datum, namn, belopp, versioner.
-    5. Max 300 ord i updated_synthesis.
-    
-    BEDÖM CONTEXT GAIN (VIKTIGT!):
-    Beräkna hur mycket NYTT du lärde dig i denna iteration jämfört med vad Tornet redan innehöll.
-    - 0.0 = Dokumenten gav ingen ny insikt (allt fanns redan i Tornet)
-    - 0.2 = Marginella tillägg (små detaljer, förtydliganden)
-    - 0.5 = Substantiellt nytt (nya fakta som berikar bilden)
-    - 0.8 = Betydande genombrott (helt nya perspektiv eller avgörande information)
-    - 1.0 = Tornet var tomt, allt är nytt
-    
-    STYR NÄSTA STEG:
-    - COMPLETE: Missionen är besvarad
-    - SEARCH: Saknar viktigt (ange next_search_query)
-    - ABORT: Inga relevanta dokument
-    
-    OBS: Sök INTE på samma sak igen (kolla past_queries).
+    - Om status=SEARCH MÅSTE du ange en SPECIFIK next_search_query
+    - Kolla past_queries - SÖK INTE på samma sak igen
+    - Om du inte hittar nytt efter 3 iterationer - säg COMPLETE
     
     Svara ENDAST med JSON:
     {{
         "context_gain": 0.5,
-        "reasoning": "Kort: Fortsättning/Jämförelse/Nytt ämne?",
+        "reasoning": "Vad hittade jag? Vad saknas?",
         "status": "SEARCH" | "COMPLETE" | "ABORT",
-        "updated_synthesis": "Den text som bäst beskriver NU-läget",
+        "updated_synthesis": "Sammanhängande text med alla fakta...",
         "new_evidence": ["Specifikt bevis 1 (datum)", "Bevis 2"],
-        "next_search_query": "Ny sökning..." | null,
-        "gaps": ["Vad som saknas"]
+        "next_search_query": "Specifik sökning baserad på gaps" | null,
+        "gaps": ["Vad som fortfarande saknas"]
     }}
     
-    OBS: Ersätt 0.5 i context_gain med din beräkning (0.0-1.0)!
+    OBS: Ersätt 0.5 i context_gain med din beräkning!
 
 synthesizer:
   role: "Du är MyMem - ett personligt företagsminne."
