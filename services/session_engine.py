@@ -63,16 +63,24 @@ class PlannerState:
     status: str = "IN_PROGRESS"
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    # Librarian Loop: Track documents that have been "Deep Read" this session
+    read_document_ids: set = field(default_factory=set)
     
     def to_dict(self) -> dict:
         """Konvertera till dict för serialisering."""
-        return asdict(self)
+        result = asdict(self)
+        # Convert set to list for JSON serialization
+        result['read_document_ids'] = list(self.read_document_ids)
+        return result
     
     @classmethod
     def from_dict(cls, data: dict) -> 'PlannerState':
         """Skapa PlannerState från dict."""
         valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
         filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+        # Convert list back to set for read_document_ids
+        if 'read_document_ids' in filtered_data and isinstance(filtered_data['read_document_ids'], list):
+            filtered_data['read_document_ids'] = set(filtered_data['read_document_ids'])
         return cls(**filtered_data)
 
 
@@ -94,7 +102,8 @@ class SessionEngine:
         self._session_id = str(uuid.uuid4())[:8]
         LOGGER.info(f"SessionEngine initierad: {self._session_id}")
     
-    def run_query(self, query: str, debug_mode: bool = False, debug_trace: dict = None, on_iteration=None) -> dict:
+    def run_query(self, query: str, debug_mode: bool = False, debug_trace: dict = None, 
+                  on_iteration=None, on_scan=None) -> dict:
         """
         Kör hela pipelinen: IntentRouter → ContextBuilder → Planner → Synthesizer
         
@@ -106,6 +115,7 @@ class SessionEngine:
             debug_mode: Om True, logga debug-info
             debug_trace: Dict att samla debug-info till
             on_iteration: Callback för live-output av Tornbygget
+            on_scan: Callback för Librarian Loop reasoning display
         
         Returns:
             dict med answer, sources, status, etc.
@@ -124,9 +134,6 @@ class SessionEngine:
             from planner import run_planner_loop
             from synthesizer import synthesize
             from session_logger import log_search
-        
-        if debug_trace is None:
-            debug_trace = {}
         
         start_time = time.time()
         
@@ -205,6 +212,7 @@ class SessionEngine:
             search_fn=search,
             debug_trace=debug_trace,
             on_iteration=on_iteration,
+            on_scan=on_scan,
             graph_context=graph_context
         )
         
@@ -240,8 +248,9 @@ class SessionEngine:
         
         # Timing
         duration = round(time.time() - start_time, 2)
-        debug_trace['total_duration'] = duration
-        debug_trace['pipeline_version'] = 'v8.2'
+        if debug_trace is not None:
+            debug_trace['total_duration'] = duration
+            debug_trace['pipeline_version'] = 'v8.2'
         
         LOGGER.info(f"Pipeline klar: {duration}s")
         

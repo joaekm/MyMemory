@@ -8,6 +8,7 @@ Körs vid uppstart om >24h sedan senaste körning.
 """
 
 import os
+import sys
 import json
 import yaml
 import logging
@@ -17,6 +18,9 @@ import time
 from typing import Optional
 from google import genai
 from google.genai import types
+
+# Lägg till projekt-root i path för import
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 # --- CONFIG LOADER ---
 def _load_config():
@@ -49,7 +53,7 @@ CONFIG = _load_config()
 PROMPTS = _load_prompts()
 
 # --- PATHS ---
-KUZU_PATH = CONFIG['paths']['kuzu_db']
+GRAPH_PATH = CONFIG['paths']['kuzu_db']  # Återanvänder config-nyckel för DuckDB
 TAXONOMY_FILE = CONFIG['paths'].get('taxonomy_file')
 LOG_FILE = CONFIG['logging']['log_file_path']
 # Timestamp-fil ligger i samma mapp som taxonomin
@@ -77,7 +81,7 @@ API_KEY = CONFIG.get('ai_engine', {}).get('api_key', '')
 MODEL_FAST = CONFIG.get('ai_engine', {}).get('models', {}).get('model_fast', 'models/gemini-flash-latest')
 AI_CLIENT = genai.Client(api_key=API_KEY) if API_KEY else None
 
-LOGGER.info(f"Dreamer initierad: MODEL={MODEL_FAST}, KUZU={KUZU_PATH}, TAXONOMY={TAXONOMY_FILE}")
+LOGGER.info(f"Dreamer initierad: MODEL={MODEL_FAST}, GRAPH={GRAPH_PATH}, TAXONOMY={TAXONOMY_FILE}")
 
 # --- DREAMING INTERVAL ---
 DREAMING_INTERVAL_HOURS = 24
@@ -143,11 +147,7 @@ def collect_from_graph() -> dict:
         - entities: Dict med type -> [names]
         - aliases: Lista med (alias, canonical) tuples
     """
-    try:
-        import kuzu
-    except ImportError:
-        LOGGER.error("HARDFAIL: kuzu-paketet saknas")
-        raise RuntimeError("HARDFAIL: kuzu-paketet saknas")
+    from services.graph_service import GraphStore
     
     result = {
         "concepts": [],
@@ -155,29 +155,30 @@ def collect_from_graph() -> dict:
         "aliases": []
     }
     
+    if not os.path.exists(GRAPH_PATH):
+        LOGGER.warning(f"Graf-databas finns inte: {GRAPH_PATH}")
+        return result
+    
     try:
-        db = kuzu.Database(KUZU_PATH)
-        conn = kuzu.Connection(db)
+        graph = GraphStore(GRAPH_PATH, read_only=True)
         
         # 1. Hämta alla Concept-noder
         try:
-            concepts_result = conn.execute("MATCH (c:Concept) RETURN c.id")
-            while concepts_result.has_next():
-                row = concepts_result.get_next()
-                if row and row[0]:
-                    result["concepts"].append(row[0])
+            concepts = graph.find_nodes_by_type("Concept")
+            for node in concepts:
+                if node.get('id'):
+                    result["concepts"].append(node['id'])
         except Exception as e:
             LOGGER.warning(f"Kunde inte hämta Concept-noder: {e}")
         
         # 2. Hämta alla Entity-noder med typ
         try:
-            entities_result = conn.execute("MATCH (e:Entity) RETURN e.id, e.type, e.aliases")
-            while entities_result.has_next():
-                row = entities_result.get_next()
-                if row and row[0]:
-                    entity_id = row[0]
-                    entity_type = row[1] or "Unknown"
-                    entity_aliases = row[2] or []
+            entities = graph.find_nodes_by_type("Entity")
+            for node in entities:
+                if node.get('id'):
+                    entity_id = node['id']
+                    entity_type = node.get('properties', {}).get('entity_type', 'Unknown')
+                    entity_aliases = node.get('aliases', [])
                     
                     if entity_type not in result["entities"]:
                         result["entities"][entity_type] = []
@@ -191,19 +192,17 @@ def collect_from_graph() -> dict:
         
         # 3. Hämta Person-noder (legacy)
         try:
-            persons_result = conn.execute("MATCH (p:Person) RETURN p.id")
-            while persons_result.has_next():
-                row = persons_result.get_next()
-                if row and row[0]:
+            persons = graph.find_nodes_by_type("Person")
+            for node in persons:
+                if node.get('id'):
                     if "Person" not in result["entities"]:
                         result["entities"]["Person"] = []
-                    if row[0] not in result["entities"]["Person"]:
-                        result["entities"]["Person"].append(row[0])
+                    if node['id'] not in result["entities"]["Person"]:
+                        result["entities"]["Person"].append(node['id'])
         except Exception as e:
             LOGGER.warning(f"Kunde inte hämta Person-noder: {e}")
         
-        del conn
-        del db
+        graph.close()
         
     except Exception as e:
         LOGGER.error(f"Fel vid graf-anslutning: {e}")

@@ -98,66 +98,75 @@ planner_evaluate:
   instruction: |
     MISSION: {mission_goal}
     
+    ITERATION: {iteration}/{max_iterations}
+    TIDIGARE SÖKNINGAR: {past_queries}
+    
     === VÅRT ARBETSMINNE (TORNET) ===
     {current_synthesis}
     
     === BEVIS I LÅDAN ===
     {existing_facts}
     
-    === NYA DOKUMENT ===
+    === NYA DOKUMENT (Att utvärdera) ===
     {candidates}
     
-    === TAXONOMI (för smarta sökningar) ===
-    {taxonomy_context}
+    === INSTRUKTION ===
+    Du ska utvärdera om de NYA DOKUMENTEN tillför värde till TORNET.
     
-    === GRAFKOPPLINGAR (kreativa spår) ===
-    {entity_relations}
+    STEG 1: BERÄKNA CONTEXT GAIN (0.0 - 1.0)
+    - Jämför NYA DOKUMENT med TORNET.
+    - 0.0: Ingen ny info. (Upprepar bara vad vi redan vet).
+    - 0.3: Lite detaljer (Datum, namn som saknades).
+    - 0.8: Genombrott! (Svarar på kärnfrågan).
     
-    TIDIGARE SÖKNINGAR: {past_queries}
-    ITERATION: {iteration}/{max_iterations}
+    STEG 2: UPPDATERA TORNET
+    - Skriv om texten. Integrera den nya faktan.
+    - Var extremt konkret. Inget fluff.
     
-    === DIN UPPGIFT ===
+    STEG 3: BESLUTA NÄSTA STEG
+    - STATUS "SEARCH": Om gain > 0.1 och information saknas. -> Ange "next_search_query".
+    - STATUS "COMPLETE": Om gain < 0.1 (vi hittar inget nytt) ELLER uppdraget är klart.
+    - STATUS "ABORT": Om vi kört fast helt.
     
-    1. BYGG TORNET:
-       - Integrera ny information från dokumenten
-       - Var SPECIFIK: datum, namn, belopp, versioner
-       - Max 400 ord
-    
-    2. BEDÖM CONTEXT GAIN:
-       - 0.0 = Inget nytt (allt fanns redan i Tornet)
-       - 0.3 = Lite nytt (detaljer)
-       - 0.6 = Substantiellt nytt (nya fakta)
-       - 1.0 = Allt är nytt (Tornet var tomt)
-    
-    3. PLANERA NÄSTA SÖKNING (om status=SEARCH):
-       - ANVÄND TAXONOMIN för att hitta relaterade kategorier
-       - Sök på SPECIFIKA saker: projekt, datum, personer, händelser
-       - VARIERA perspektiv - inte samma generiska sökning igen
-       - Exempel på BRA sökningar:
-         * "Ammi Bohlin SVT upphandling" (person + projekt)
-         * "Vulkan budget november 2025" (projekt + aspekt + tid)
-         * "Beläggning forecasting möte" (koncept + händelse)
-       - Exempel på DÅLIGA sökningar:
-         * "Ammi Bohlin information" (för generisk)
-         * "Berätta om projektet" (ingen specificitet)
-    
-    REGLER:
-    - Om status=SEARCH MÅSTE du ange en SPECIFIK next_search_query
-    - Kolla past_queries - SÖK INTE på samma sak igen
-    - Om du inte hittar nytt efter 3 iterationer - säg COMPLETE
-    
-    Svara ENDAST med JSON:
+    JSON OUTPUT FORMAT (Strikt):
     {{
-        "context_gain": 0.5,
-        "reasoning": "Vad hittade jag? Vad saknas?",
+        "context_gain": <float 0.0-1.0>,
         "status": "SEARCH" | "COMPLETE" | "ABORT",
-        "updated_synthesis": "Sammanhängande text med alla fakta...",
-        "new_evidence": ["Specifikt bevis 1 (datum)", "Bevis 2"],
-        "next_search_query": "Specifik sökning baserad på gaps" | null,
-        "gaps": ["Vad som fortfarande saknas"]
+        "reasoning": "Kort förklaring av gain",
+        "updated_synthesis": "Den uppdaterade texten...",
+        "new_evidence": ["Nytt fakta 1", "Nytt fakta 2"],
+        "next_search_query": "Specifik söksträng" | null,
+        "gaps": ["Vad som saknas"]
     }}
     
-    OBS: Ersätt 0.5 i context_gain med din beräkning!
+    ANVÄND KONTEXTEN NEDAN FÖR SÖKNINGAR:
+    {taxonomy_context}
+    {entity_relations}
+
+planner_scan:
+  op_mode: "scan"
+  model: "model_lite"
+  role: "Du är en strikt bibliotekarie."
+  instruction: |
+    UPPDRAG: Avgör vilka dokument som är relevanta för sökningen.
+    
+    ÖVERGRIPANDE MÅL (Kontext): {mission_goal}
+    FOKUS JUST NU (Sökfråga): {current_query}
+    
+    DOKUMENTLISTA:
+    {candidates_list}
+    
+    REGLER FÖR URVAL:
+    1. DIREKT RELEVANS: BEHÅLL endast om sammanfattningen indikerar att dokumentet innehåller konkreta svar eller bevis för FOKUS JUST NU.
+    2. KRITISK KONTEXT: BEHÅLL endast om informationen bedöms vara avgörande för att förstå ÖVERGRIPANDE MÅL.
+    3. DISKVALIFICERING: KASTA dokument som är vaga, perifera, eller där kopplingen till målen är svag.
+    4. PRINCIP: Maximera precision. Vid osäkerhet om dokumentets värde -> KASTA.
+
+    Svara ENDAST med JSON:
+    {{
+      "keep_ids": ["id_1", "id_3"],
+      "discard_ids": ["id_2"]
+    }}
 
 synthesizer:
   role: "Du är MyMem - ett personligt företagsminne."

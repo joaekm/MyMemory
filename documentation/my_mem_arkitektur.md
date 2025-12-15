@@ -1,5 +1,5 @@
 
-# Systemarkitektur (v6.0 - Strukturerad Assets)
+# Systemarkitektur (v8.2 - Pivot or Persevere)
 
 Detta dokument beskriver den tekniska sanningen om systemets implementation, uppdaterad December 2025.
 
@@ -85,56 +85,46 @@ Hela systemet orkestreras av `start_services.py` (för realtidstjänster) och ma
 
 ## 4. Konsumtion & Gränssnitt
 
-### MyMem Chat (v5.2 - Full Transparency)
+### MyMem Chat - Pipeline v8.2 "Pivot or Persevere"
 
-**Pipeline:**
+**Arkitektur:**
 ```
-Planering (Flash Lite)
-    ↓
-Jägaren (Search Lake) + Vektorn (ChromaDB)
-    ↓
-Domaren (Flash Lite - Re-ranking)
-    ↓
-Syntes (Gemini Pro)
+Input → IntentRouter → ContextBuilder → Planner (ReAct) → Synthesizer → Output
+             (AI)           (Kod)           (AI)              (AI)
+         Mission Goal    Hämta data     Bygg Tornet         Svara
+                         + Reranking    + Bevis
 ```
 
 **Komponenter:**
-- **Jägaren:** Python-baserad "brute force"-scanning av `/Lake` för exakta nyckelord. Löser "Vector Blindness".
-- **Domaren:** LLM-baserad filtrering som prioriterar innehåll över format.
-- **Syntesen:** Genererar svar med källhänvisning.
 
-**Prestandaproblem (Simulering 2025-12-03):**
-- Snitttid per runda: **50.6 sekunder**
-- Max tid: **130 sekunder**
-- `MAX_CHARS = 100000` → skickar upp till 100k tecken till Gemini Pro
-- **Lösning:** OBJEKT-43 (Summary-First Search)
+| Komponent | Version | Typ | Ansvar | Fil |
+|-----------|---------|-----|--------|-----|
+| **SessionEngine** | v8.2 | Kod | Orchestrator, session state, Pivot or Persevere | `session_engine.py` |
+| **IntentRouter** | v7.0 | AI (Flash Lite) | Skapa Mission Goal, parsa tid, extrahera keywords/entities | `intent_router.py` |
+| **ContextBuilder** | v7.5 | Kod | Time-Aware Reranking, parallel Lake+Vektor-sökning | `context_builder.py` |
+| **Planner** | v8.2 | AI (Flash Lite) | ReAct-loop, bygger "Tornet" iterativt | `planner.py` |
+| **Synthesizer** | - | AI (Pro) | Generera svar från Planner-rapport | `synthesizer.py` |
+
+**Nyckelkoncept:**
+
+- **Tornet (current_synthesis):** Iterativt byggd arbetshypotes. Uppdateras varje ReAct-loop.
+- **Bevisen (facts):** Append-only lista med extraherade fakta. Växer monotont.
+- **Pivot or Persevere:** SessionEngine skickar befintligt Torn + Facts till ny fråga. Planner avgör om det är relevant.
+- **Librarian Loop:** Two-stage retrieval med scan (summary) + deep read (fulltext).
+- **Time-Aware Reranking:** `hybrid_score = original_score * (1 + time_boost)` boostar nyare dokument.
+
+**ReAct-loopen (Planner):**
+```
+1. Evaluate: Läs kandidater, uppdatera Tornet, extrahera Bevis
+2. Decide: COMPLETE | SEARCH | ABORT
+3. If SEARCH: Kör ny sökning → Librarian Scan → Loop
+4. If COMPLETE: Returnera Tornet som rapport
+```
 
 **Konfiguration:**
-- `chat_prompts.yaml`: Alla system-instruktioner (Planering, Domare, Syntes).
-- **Refresh:** Initierar nya DB-anslutningar vid varje sökning för att se nydata direkt.
-
-### Pipeline v6.0 (Planerad - OBJEKT-46)
-
-**Beslut 2025-12-03:** Ny arkitektur med tydligare separation of concerns.
-
-```
-Input → IntentRouter → ContextBuilder → Planner → Synthesizer → Output
-             (AI)           (Kod)         (AI)        (AI)
-         Klassificera     Hämta data   Bygg rapport   Svara
-```
-
-| Komponent | Typ | Ansvar | Fil |
-|-----------|-----|--------|-----|
-| **IntentRouter** | AI (Flash Lite) | Klassificera intent (FACT/INSPIRATION), parsa tid, upplös kontext | `intent_router.py` |
-| **ContextBuilder** | **Kod** | Deterministisk sökning baserad på strategi | `context_builder.py` |
-| **Planner** | AI (Flash Lite) | Skapa kurerad rapport från kandidater | `planner.py` |
-| **Synthesizer** | AI (Pro) | Generera svar från rapport | (befintlig) |
-
-**Nyckelskillnader mot v5.2:**
-- Synthesizer får en **rapport**, inte råa dokument
-- ContextBuilder är **deterministisk kod**, inte AI
-- Tydlig SOC: Varje komponent har ETT ansvar
-- Förberedd för agentic loop (v7.0)
+- `chat_prompts.yaml`: Alla system-instruktioner
+- `my_mem_config.yaml`: Reranking-parametrar (boost_strength, top_n_fulltext)
+- **Refresh:** Nya DB-anslutningar vid varje sökning för realtidsdata
 
 ### Launcher (macOS)
 - **Fil:** `MyMemory.app/Contents/Resources/Scripts/main.scpt`
@@ -174,7 +164,7 @@ paths:
   asset_failed: "~/MyMemory/Assets/Failed"
   # Index
   chroma_db: "~/MyMemory/Index/ChromaDB"
-  kuzu_db: "~/MyMemory/Index/KuzuDB"
+  kuzu_db: "~/MyMemory/Index/KuzuDB"  # Pekar på DuckDB-fil (LÖST-54)
   taxonomy_file: "~/MyMemory/Index/my_mem_taxonomy.json"
 ```
 
@@ -184,7 +174,7 @@ paths:
 |----------|-----------|
 | **Språk** | Python 3.12 |
 | **Vektordatabas** | ChromaDB |
-| **Grafdatabas** | KùzuDB (inbäddad) |
+| **Grafdatabas** | DuckDB (relationell graf via nodes/edges) |
 | **Parsing** | pandas, pypdf, python-docx |
 | **UI** | Rich (CLI) |
 | **AI-klient** | google-genai (v1.0+ syntax) |
@@ -198,14 +188,16 @@ paths:
 | **Syntes** | Gemini Pro | **~70% av svarstiden** |
 | Embeddings | all-MiniLM-L6-v2 | Lokal CPU |
 
-## 7. Kända Begränsningar (2025-12-03)
+## 7. Kända Begränsningar (2025-12-15)
 
-Identifierade under första stresstestet:
+Aktuell status efter Pipeline v8.2:
 
-| Problem | Objekt | Prio |
-|---------|--------|------|
-| Ingen aggregerad insikt | OBJEKT-41 | 0 (KRITISK) |
-| Förstår inte "igår"/"förra veckan" | OBJEKT-42 | 0 (KRITISK) |
-| Långsam syntes (50-130s) | OBJEKT-43 | 0.5 |
-| Felstavade namn i transkribering | OBJEKT-44 | 1 |
-| Insamlingsagenter jobbar i mörkret | OBJEKT-45 | 1 |
+| Problem | Objekt | Status |
+|---------|--------|--------|
+| Aggregerad insikt | OBJEKT-41 | ⚠️ Utvärdera - Tornet kan lösa detta |
+| Temporal filtering | OBJEKT-42 | ⚠️ Delvis löst - IntentRouter parsar tid, filtering saknas |
+| Långsam syntes | LÖST-57 | ✅ Time-Aware Reranking + TOP_N_FULLTEXT |
+| Entity Resolution | OBJEKT-44 | ⚠️ Delvis löst - Infrastruktur finns, inlärning saknas |
+| Context Injection vid insamling | OBJEKT-45 | ⚠️ Delvis löst - Graf-kontext finns, ej i prompts |
+| Entiteter i taxonomin | OBJEKT-51 | ⚠️ Delvis löst - Graf har Entity-noder, taxonomi ej städad |
+| Embedding-migration | OBJEKT-47 | ⚠️ DEADLINE 2026-01-14 |

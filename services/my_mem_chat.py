@@ -399,6 +399,14 @@ def chat_loop(debug_mode=False):
                 if data.get('next_search'):
                     console.print(f"  [cyan]→ Söker: '{data['next_search']}'[/cyan]")
             
+            # Live callback för Librarian Loop - "Thinking Out Loud"
+            def print_scan_live(data):
+                console.print(f"\n[bold cyan]FOKUS:[/bold cyan] \"{data['current_query']}\"")
+                console.print(f"[dim]Scannar {data['scanned']} dok -> Behåller {data['kept']}, Kastar {data['discarded']}[/dim]")
+                if data.get('kept_titles'):
+                    titles = ', '.join(data['kept_titles'][:3])
+                    console.print(f"[green]Läser:[/green] {titles}")
+            
             if debug_mode:
                 console.print("\n[bold cyan]🏗️ TORNBYGGET (live)[/bold cyan]")
             
@@ -407,7 +415,8 @@ def chat_loop(debug_mode=False):
                     query, 
                     debug_mode=debug_mode, 
                     debug_trace=debug_trace,
-                    on_iteration=print_iteration_live if debug_mode else None
+                    on_iteration=print_iteration_live if debug_mode else None,
+                    on_scan=print_scan_live if debug_mode else None
                 )
             except Exception as e:
                 LOGGER.error(f"Pipeline error: {e}")

@@ -22,7 +22,7 @@ tabulate            # Krävs för df.to_markdown()
 google-genai
 
 # --- NYTT FÖR INDEXERAREN (OBJEKT-4) ---
-kuzu                # Grafdatabas (Inbäddad)
+duckdb              # Relationell databas (Graf via SQL)
 chromadb            # Vektordatabas (Inbäddad)
 sentence-transformers # För att skapa embeddings lokalt (sparar pengar/tid)
 

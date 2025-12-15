@@ -11,7 +11,7 @@ policy_tags: []
 original_binary_ref: null
 ---
 
-# Projektets Konceptuella Sammanfattning (v5.0)
+# Projektets Konceptuella Sammanfattning (v8.2)
 
 Detta dokument är en "torr" sammanfattning av de slutsatser som framkommit. För fullständigt resonemang, se `my_mem_koncept_logg.md`.
 
@@ -59,23 +59,23 @@ DropZone → File Retriever → Asset Store
                                 ChromaDB             KùzuDB
 ```
 
-## 4. Konsumtion: MyMem Chat (v5.2)
+## 4. Konsumtion: MyMem Chat (v8.2 "Pivot or Persevere")
 
 **Pipeline:**
-1. **Planering:** Analyserar intention, extraherar nyckelord och formulerar semantiska frågor.
-2. **Insamling (Jägaren + Vektorn):** Fysisk textsökning + semantisk sökning.
-3. **Bedömning (Domaren):** Re-rankar kandidater baserat på relevans.
-4. **Syntes (Hjärnan):** Genererar svaret med strikt källhänvisning.
+```
+SessionEngine → IntentRouter → ContextBuilder → Planner (ReAct) → Synthesizer
+```
 
-**Styrkor:**
-- Hittar exakta nyckelord (löser "Vector Blindness")
-- Separerar innehåll från format
-- Full transparens via debug-läge
+1. **IntentRouter (v7.0):** Skapar Mission Goal, parsar tid, extraherar keywords/entities.
+2. **ContextBuilder (v7.5):** Time-Aware Reranking, parallel Lake+Vektor-sökning.
+3. **Planner (v8.2):** ReAct-loop som bygger "Tornet" (arbetshypotes) + "Bevisen" (fakta).
+4. **Synthesizer:** Genererar svar från Planner-rapport.
 
-**Prestandaproblem (Simulering 2025-12-03):**
-- Snitttid: 50.6 sekunder per fråga
-- Max: 130 sekunder
-- Syntesen står för ~70% av tiden
+**Nyckelkoncept:**
+- **Tornet:** Iterativt byggd arbetshypotes
+- **Bevisen:** Append-only faktalista
+- **Pivot or Persevere:** Befintligt Torn+Facts skickas till nya frågor
+- **Librarian Loop:** Two-stage retrieval (scan + deep read)
 
 ## 5. Stresstestning: Första Simuleringen
 
@@ -102,33 +102,41 @@ DropZone → File Retriever → Asset Store
 - Långsam responstid
 - Ingen aggregerad insikt
 
-## 6. Senaste Förbättringar (v6.1)
+## 6. Senaste Förbättringar (v8.2)
 
-### DateService (OBJEKT-50) ✅
+### Pipeline v8.2 "Pivot or Persevere" (LÖST-55)
+Helt ny pipeline-arkitektur med:
+- **SessionEngine:** Central orchestrator för session state
+- **IntentRouter v7.0:** Mission Goal + temporal parsing
+- **ContextBuilder v7.5:** Time-Aware Reranking
+- **Planner v8.2:** ReAct-loop med Tornet + Bevisen
+
+### DuckDB Pivot (LÖST-54)
+Migrerade från KuzuDB till DuckDB med:
+- `GraphStore`-klass i `graph_service.py`
+- `aliases`-kolumn för Entity Resolution
+- `upgrade_canonical()` för flytande canonical
+
+### DateService (LÖST-56)
 Central datumhantering med prioritet: Frontmatter → Filnamn → PDF-metadata → Filesystem → HARDFAIL.
 
-### Transcriber Pro+Pro Retry
-Flash transkribering med kvalitetskontroll. Vid fel: automatisk retry med Pro-modell för både transkribering och analys.
+### Summary-First Search (LÖST-57)
+- `TOP_N_FULLTEXT = 3`: Endast topp 3 får fulltext
+- Time-Aware Reranking boostar nyare dokument
+- Relevance Gate förhindrar spam-boost
 
-### Staged Rebuild Tool
-Nytt verktyg (`tools/tool_staged_rebuild.py`) för kronologisk åter-indexering med:
-- Per-fil skip-logik (kollar Lake + Failed)
-- 30 min timeout med graceful recovery
-- Automatisk backup/restore vid avbrott
+## 7. Nästa Fas: Prioriterade Objekt
 
-### Slack Collector → One-shot
-Ändrat från daemon till engångsprocess vid startup.
-
-## 7. Nästa Fas: Kritiska Objekt
-
-| Prio | Objekt | Titel | Problem |
-|------|--------|-------|---------|
-| **0** | OBJEKT-41 | Aggregerad Insikt | Ger data, inte insikt |
-| **0** | OBJEKT-42 | Temporal Intelligence | Förstår inte "igår" |
-| **0.5** | OBJEKT-43 | Summary-First Search | 50-130s svarstid |
-| **1** | OBJEKT-44 | Entity Resolution | "Sänk" ≠ "Cenk Bisgen" |
-| **1** | OBJEKT-51 | Separera Entiteter | Entiteter i graf, ej taxonomi |
-| **1** | OBJEKT-53 | Kurerad Entity-session | Proaktiv användarinput |
+| Prio | Objekt | Titel | Status |
+|------|--------|-------|--------|
+| **0.5** | OBJEKT-42 | Temporal Intelligence | ⚠️ Delvis - filtering saknas |
+| **1** | OBJEKT-41 | Aggregerad Insikt | ⚠️ Utvärdera Tornet |
+| **1** | OBJEKT-44 | Entity Resolution | ⚠️ Delvis - inlärning saknas |
+| **1** | OBJEKT-45 | Levande Metadata | ⚠️ Delvis - Context Injection saknas |
+| **1.5** | OBJEKT-47 | Embedding-migration | ⚠️ **DEADLINE 2026-01-14** |
+| **1.5** | OBJEKT-51 | Separera Entiteter | ⚠️ Delvis - städning behövs |
+| **2** | OBJEKT-48 | Sessioner som Lärdomar | Öppen |
+| **2** | OBJEKT-49 | MyMemory Engine | ⚠️ Delvis - SessionEngine finns |
 
 ## 8. Utvecklingsregler
 
@@ -144,12 +152,12 @@ Definierade i `.cursorrules`:
 |-----------|-----------|
 | Språk | Python 3.12 |
 | Vektordatabas | ChromaDB |
-| Grafdatabas | KùzuDB |
+| Grafdatabas | DuckDB (relationell graf via nodes/edges) |
 | AI-modeller | Gemini Pro/Flash (Google) |
 | Embeddings | all-MiniLM-L6-v2 (Lokal) |
 | UI | Rich (CLI) |
 
 ---
-*Senast uppdaterad: 2025-12-12*
+*Senast uppdaterad: 2025-12-15*
 *Se `my_mem_arkitektur.md` för teknisk implementation.*
 *Se `my_mem_backlogg.md` för aktiva objekt.*

@@ -12,6 +12,7 @@ ID-format: Alla IDs normaliseras till UUID för korrekt deduplicering
 """
 
 import os
+import sys
 import re
 import json
 import yaml
@@ -21,7 +22,11 @@ from datetime import datetime
 import chromadb
 from chromadb.utils import embedding_functions
 import dateutil.parser
-import kuzu
+
+# Lägg till projekt-root i path för import
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from services.graph_service import GraphStore
 
 # UUID-mönster för att extrahera från filnamn
 UUID_PATTERN = re.compile(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', re.IGNORECASE)
@@ -45,7 +50,7 @@ LOGGER = logging.getLogger('ContextBuilder')
 
 LAKE_PATH = os.path.expanduser(CONFIG['paths'].get('lake_store', '~/MyMemory/Lake'))
 CHROMA_PATH = os.path.expanduser(CONFIG['paths']['chroma_db'])
-KUZU_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])
+GRAPH_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])  # Återanvänder config-nyckel för DuckDB
 TAXONOMY_FILE = os.path.expanduser(CONFIG['paths'].get('taxonomy_file', '~/MyMemory/Index/my_mem_taxonomy.json'))
 
 # Max kandidater att returnera
@@ -74,29 +79,30 @@ def _load_taxonomy() -> dict:
 TAXONOMY = _load_taxonomy()
 
 
-# --- GRAF-LÄSNING (KuzuDB) ---
+# --- GRAF-LÄSNING (DuckDB GraphStore) ---
 
 # Singleton för read-only connection
-_KUZU_DB = None
-_KUZU_CONN = None
+_GRAPH_STORE = None
 
-def _get_kuzu_connection():
-    """Readonly connection till KuzuDB för grafsökningar."""
-    global _KUZU_DB, _KUZU_CONN
+def _get_graph_store() -> GraphStore:
+    """
+    Lazy singleton - VIKTIGT: read_only=True för concurrency!
+    Säkerställer att ContextBuilder (realtid/läs) inte blockerar GraphBuilder (batch/skriv).
+    """
+    global _GRAPH_STORE
     
-    if _KUZU_CONN is not None:
-        return _KUZU_CONN
+    if _GRAPH_STORE is not None:
+        return _GRAPH_STORE
     
-    if not os.path.exists(KUZU_PATH):
-        LOGGER.warning(f"KuzuDB finns inte: {KUZU_PATH}")
+    if not os.path.exists(GRAPH_PATH):
+        LOGGER.warning(f"Graf-databas finns inte: {GRAPH_PATH}")
         return None
     
     try:
-        _KUZU_DB = kuzu.Database(KUZU_PATH)
-        _KUZU_CONN = kuzu.Connection(_KUZU_DB)
-        return _KUZU_CONN
+        _GRAPH_STORE = GraphStore(GRAPH_PATH, read_only=True)
+        return _GRAPH_STORE
     except Exception as e:
-        LOGGER.error(f"Kunde inte ansluta till KuzuDB: {e}")
+        LOGGER.error(f"Kunde inte ansluta till graf-databasen: {e}")
         return None
 
 
@@ -112,8 +118,8 @@ def get_graph_context_for_search(keywords: list, entities: list) -> str:
     Returns:
         Formaterad sträng med grafkopplingar
     """
-    conn = _get_kuzu_connection()
-    if conn is None:
+    graph = _get_graph_store()
+    if graph is None:
         return "(Graf ej tillgänglig)"
     
     try:
@@ -122,43 +128,36 @@ def get_graph_context_for_search(keywords: list, entities: list) -> str:
         
         for term in search_terms[:5]:  # Max 5 termer
             # Fuzzy match mot Entity-namn och aliases
-            result = conn.execute("""
-                MATCH (e:Entity)
-                WHERE e.id CONTAINS $term OR any(x IN e.aliases WHERE x CONTAINS $term)
-                RETURN e.id, e.type, e.aliases
-                LIMIT 3
-            """, {"term": term})
+            matches = graph.find_nodes_fuzzy(term)
             
-            matches = []
-            while result.has_next():
-                row = result.get_next()
-                entity_id = row[0]
-                entity_type = row[1]
-                aliases = row[2] or []
+            entity_matches = []
+            for node in matches:
+                if node.get('type') != 'Entity':
+                    continue
+                    
+                entity_id = node['id']
+                entity_type = node.get('properties', {}).get('entity_type', 'Unknown')
+                aliases = node.get('aliases', [])
                 
-                # Hitta relaterade dokument (Units)
-                rel_result = conn.execute("""
-                    MATCH (u:Unit)-[:UNIT_MENTIONS]->(e:Entity {id: $id})
-                    RETURN u.title
-                    LIMIT 3
-                """, {"id": entity_id})
-                
+                # Hitta relaterade dokument (Units) via edges
+                edges = graph.get_edges_to(entity_id, edge_type="UNIT_MENTIONS")
                 related_docs = []
-                while rel_result.has_next():
-                    doc_row = rel_result.get_next()
-                    if doc_row[0]:
-                        related_docs.append(doc_row[0][:30])
+                for edge in edges[:3]:
+                    unit = graph.get_node(edge['source'])
+                    if unit:
+                        title = unit.get('properties', {}).get('title', unit['id'][:30])
+                        related_docs.append(title)
                 
                 match_info = f"  - {entity_id} ({entity_type})"
                 if aliases:
                     match_info += f" [alias: {', '.join(aliases[:3])}]"
                 if related_docs:
                     match_info += f"\n    → Nämns i: {', '.join(related_docs)}"
-                matches.append(match_info)
+                entity_matches.append(match_info)
             
-            if matches:
+            if entity_matches:
                 lines.append(f'"{term}":')
-                lines.extend(matches)
+                lines.extend(entity_matches)
         
         if not lines:
             return "(Inga grafkopplingar hittades för söktermerna)"

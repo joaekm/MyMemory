@@ -20,6 +20,10 @@ import json
 import yaml
 import logging
 from google import genai
+from rich.console import Console
+
+# Console för "Thinking Out Loud" output
+_CONSOLE = Console()
 
 # Import utilities
 try:
@@ -146,7 +150,114 @@ def _format_existing_facts(facts: list) -> str:
     return "\n".join([f"- {fact}" for fact in facts])
 
 
-def _evaluate_state(state: PlannerState, candidates_formatted: str, graph_context: str = "") -> dict:
+def _print_scan_summary(query: str, total_candidates: int, kept_docs: list):
+    """
+    Visar Librarian-arbetet i terminalen ("Thinking Out Loud").
+    Sparsmakat format utan AI-cringe.
+    """
+    kept_count = len(kept_docs)
+    discarded_count = total_candidates - kept_count
+    
+    # Hämta filnamn (max 3)
+    filenames = []
+    for d in kept_docs[:3]:
+        name = d.get('filename') or d.get('title') or d.get('id', 'Okänd')[:20]
+        filenames.append(name)
+    
+    files_str = ", ".join(filenames)
+    if len(kept_docs) > 3:
+        files_str += f" (+{len(kept_docs) - 3} till)"
+    
+    # Skriv ut
+    _CONSOLE.print(f"\n[bold cyan]Undersöker:[/bold cyan] {query}")
+    _CONSOLE.print(f"[dim]Scannade:[/dim] {total_candidates} kandidater -> [green]Behåller {kept_count}[/green], [red]Kastar {discarded_count}[/red]")
+    if filenames:
+        _CONSOLE.print(f"[dim]Läste:[/dim] {files_str}")
+
+
+# === LIBRARIAN LOOP HELPERS ===
+
+def _format_candidate_for_scan(doc: dict) -> str:
+    """
+    Format a candidate for the Librarian scan.
+    Extract only: id, date, title/filename, summary.
+    Strip all other metadata to reduce noise.
+    """
+    doc_id = doc.get('id', 'unknown')[:12]
+    date = doc.get('timestamp_created', doc.get('date', 'N/A'))
+    title = doc.get('title', doc.get('filename', 'Untitled'))
+    summary = doc.get('summary', '')[:300]
+    return f"[ID: {doc_id}] {date} | {title}\nSummary: {summary}"
+
+
+def _scan_candidates(candidates: list, mission_goal: str, current_query: str, debug_mode: bool = False) -> list:
+    """
+    Librarian Scan: Filter candidates using LLM-based summary review.
+    
+    Active Retrieval: Uses BOTH global context (mission_goal) and 
+    local context (current_query/sub-goal) to prevent tunnel vision.
+    
+    Args:
+        candidates: List of candidate documents to scan
+        mission_goal: The overall goal (global context)
+        current_query: The current search query (local context/sub-goal)
+        debug_mode: If True, print raw LLM response
+    
+    Returns:
+        List of document IDs to keep for deep reading
+    """
+    if not candidates:
+        return []
+    
+    prompt_template = PROMPTS.get('planner_scan', {}).get('instruction', '')
+    if not prompt_template:
+        LOGGER.warning("planner_scan prompt saknas, behåller alla kandidater")
+        return [c['id'] for c in candidates]
+    
+    # Format candidates for scan
+    candidates_list = "\n\n".join([
+        f"DOK {i+1}: {_format_candidate_for_scan(c)}"
+        for i, c in enumerate(candidates)
+    ])
+    
+    try:
+        full_prompt = prompt_template.format(
+            mission_goal=mission_goal,
+            current_query=current_query,
+            candidates_list=candidates_list
+        )
+    except KeyError as e:
+        LOGGER.error(f"Prompt formatting failed: {e}")
+        return [c['id'] for c in candidates]
+    
+    try:
+        client = _get_ai_client()
+        response = client.models.generate_content(
+            model=MODEL_LITE,
+            contents=full_prompt
+        )
+        
+        text = response.text
+        
+        if debug_mode:
+            print(f"\n[DEBUG RAW LIBRARIAN SCAN]:\n{text}\n[END RAW]\n")
+        
+        LOGGER.debug(f"Librarian scan response: {text[:300]}...")
+        result = parse_llm_json(text, context="planner_scan")
+        
+        keep_ids = result.get('keep_ids', [])
+        discard_ids = result.get('discard_ids', [])
+        
+        LOGGER.info(f"Librarian scan: {len(keep_ids)} behålls, {len(discard_ids)} kastas")
+        
+        return keep_ids
+        
+    except Exception as e:
+        LOGGER.error(f"Librarian scan failed: {e}, behåller alla kandidater")
+        return [c['id'] for c in candidates]
+
+
+def _evaluate_state(state: PlannerState, candidates_formatted: str, graph_context: str = "", debug_mode: bool = False) -> dict:
     """
     Evaluera aktuellt state mot mission_goal.
     v8.1 Rolling Hypothesis: Jämför ny info med befintlig syntes (Tornet).
@@ -208,11 +319,16 @@ def _evaluate_state(state: PlannerState, candidates_formatted: str, graph_contex
         )
         
         text = response.text
+        
+        if debug_mode:
+            print(f"\n[DEBUG RAW LLM RESPONSE]:\n{text}\n[END RAW]\n")
+        
         LOGGER.debug(f"Planner evaluate LLM-svar: {text[:500]}...")
         result = parse_llm_json(text, context="planner_evaluate")
         
         return {
             "status": result.get('status', 'ABORT'),
+            "context_gain": result.get('context_gain'),  # Skicka vidare LLM:ens bedömning
             # v8.1: Rolling Hypothesis
             "updated_synthesis": result.get('updated_synthesis', ''),
             "new_evidence": result.get('new_evidence', []),
@@ -241,6 +357,7 @@ def run_planner_loop(
     search_fn=None,
     debug_trace: dict = None,
     on_iteration=None,  # Callback för live-output
+    on_scan=None,  # Callback för Librarian Loop reasoning display
     graph_context: str = ""  # Graf-relationer för smarta sökningar
 ) -> dict:
     """
@@ -299,6 +416,12 @@ def run_planner_loop(
     # Nuvarande kandidater formaterade för prompt
     current_candidates_formatted = candidates_formatted
     
+    # Debug mode: aktiveras om debug_trace finns
+    debug_mode = debug_trace is not None
+    
+    # Librarian Loop: Track discarded documents for this query (query-scoped)
+    local_discarded_ids = set()
+    
     # Context Gain Delta - "Nöjd eller Utmattad"
     patience = 0
     
@@ -306,7 +429,7 @@ def run_planner_loop(
         LOGGER.info(f"Planner iteration {state.iteration + 1}/{MAX_ITERATIONS}")
         
         # Evaluate: LLM läser dokument och uppdaterar hypotes
-        eval_result = _evaluate_state(state, current_candidates_formatted, graph_context)
+        eval_result = _evaluate_state(state, current_candidates_formatted, graph_context, debug_mode=debug_mode)
         
         # v8.1: Uppdatera TORNET (current_synthesis)
         # SPARA GAMLA LÄNGDEN FÖRST (för context_gain fallback)
@@ -492,16 +615,68 @@ def run_planner_loop(
             search_result = search_fn(next_query)
             new_candidates = search_result.get('candidates_full', [])
             
-            # Lägg till nya kandidater (undvik dubbletter)
+            # === LIBRARIAN LOOP: Two-Stage Retrieval ===
+            
+            # 1. Hard Filter (Dedup) - Remove already read or discarded documents
+            candidates_to_scan = [c for c in new_candidates 
+                                  if c['id'] not in state.read_document_ids
+                                  and c['id'] not in local_discarded_ids]
+            
+            # 2. Exhaustion Check
+            if not candidates_to_scan:
+                LOGGER.info("Librarian: No new candidates after dedup - exhausted")
+                state.iteration += 1
+                continue
+            
+            # 3. Determine current_query (sub-goal for Active Retrieval)
+            current_query = state.past_queries[-1] if state.past_queries else state.mission_goal
+            
+            # 4. Scan (Soft Filter) - with BOTH global and local context
+            kept_ids = _scan_candidates(
+                candidates=candidates_to_scan,
+                mission_goal=state.mission_goal,
+                current_query=current_query,
+                debug_mode=debug_mode
+            )
+            
+            # 5. Update discarded
+            for c in candidates_to_scan:
+                if c['id'] not in kept_ids:
+                    local_discarded_ids.add(c['id'])
+            
+            # 6. Select for Deep Read
+            final_candidates = [c for c in candidates_to_scan if c['id'] in kept_ids]
+            
+            # 7. "Thinking Out Loud" - visa vad vi gör i terminalen
+            _print_scan_summary(current_query, len(candidates_to_scan), final_candidates)
+            
+            # 8. Commit to session memory
+            for c in final_candidates:
+                state.read_document_ids.add(c['id'])
+            
+            # 9. Call on_scan callback (för debug_pipeline_trace.py)
+            if on_scan:
+                on_scan({
+                    "current_query": current_query,
+                    "mission_goal": state.mission_goal,
+                    "scanned": len(candidates_to_scan),
+                    "kept": len(kept_ids),
+                    "discarded": len(candidates_to_scan) - len(kept_ids),
+                    "kept_titles": [c.get('filename', c['id'][:12]) for c in final_candidates]
+                })
+            
+            # === END LIBRARIAN LOOP ===
+            
+            # Lägg till nya kandidater till state (undvik dubbletter)
             existing_ids = {c['id'] for c in state.candidates}
             added = 0
-            for c in new_candidates:
+            for c in final_candidates:
                 if c['id'] not in existing_ids:
                     state.candidates.append(c)
                     existing_ids.add(c['id'])
                     added += 1
             
-            LOGGER.info(f"Lade till {added} nya kandidater")
+            LOGGER.info(f"Librarian: Scannade {len(candidates_to_scan)}, behöll {len(kept_ids)}, lade till {added} nya kandidater")
             
             # Formatera nya kandidater för nästa iteration
             # v7.5: Använder TOP_N_FULLTEXT (3) från config

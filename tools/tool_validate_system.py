@@ -1,11 +1,15 @@
 import os
+import sys
 import yaml
 import chromadb
-import kuzu
 import re
 import datetime
 import logging
 from chromadb.utils import embedding_functions
+
+# Lägg till services i path för import
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from services.graph_service import GraphStore
 
 # Enkel loggning för CLI-verktyg
 logging.basicConfig(level=logging.WARNING, format='%(levelname)s - %(message)s')
@@ -37,7 +41,7 @@ SESSIONS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_sessions'])
 ASSET_SUBFOLDERS = [RECORDINGS_FOLDER, TRANSCRIPTS_FOLDER, DOCUMENTS_FOLDER, SLACK_FOLDER, SESSIONS_FOLDER]
 
 CHROMA_PATH = os.path.expanduser(CONFIG['paths']['chroma_db'])
-KUZU_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])
+GRAPH_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])  # Återanvänder config-nyckel för DuckDB
 LOG_FILE = os.path.expanduser(CONFIG['logging']['log_file_path'])
 
 # Hämta extensions
@@ -162,45 +166,57 @@ def validera_chroma(expected_count, lake_ids):
         LOGGER.error(f"Kunde inte läsa ChromaDB: {e}")
         print(f"❌ KRITISKT FEL: Kunde inte läsa ChromaDB: {e}")
 
-def validera_kuzu(expected_count, lake_ids):
-    print_header("3. GRAF-AUDIT (KUZU)")
+def validera_graf(expected_count, lake_ids):
+    """Validera graf-databasen (DuckDB GraphStore)."""
+    print_header("3. GRAF-AUDIT (DuckDB)")
+    
+    if not os.path.exists(GRAPH_PATH):
+        print(f"⚠️ Graf-databas finns inte: {GRAPH_PATH}")
+        print("   Tips: Kör 'python services/my_mem_graph_builder.py' för att skapa")
+        return
+    
     try:
-        db = kuzu.Database(KUZU_PATH)
-        conn = kuzu.Connection(db)
+        graph = GraphStore(GRAPH_PATH, read_only=True)
+        stats = graph.get_stats()
         
-        res = conn.execute("MATCH (u:Unit) RETURN count(u)").get_next()
-        unit_count = res[0]
-        print(f"🕸️  Graf-noder (Units): {unit_count} st")
+        unit_count = stats['nodes'].get('Unit', 0)
+        entity_count = stats['nodes'].get('Entity', 0)
+        concept_count = stats['nodes'].get('Concept', 0)
+        
+        print(f"🕸️  Graf-noder:")
+        print(f"   - Units:    {unit_count} st")
+        print(f"   - Entities: {entity_count} st")
+        print(f"   - Concepts: {concept_count} st")
+        print(f"   - Kanter:   {stats['total_edges']} st")
         
         if unit_count == expected_count:
             print("✅ SYNKAD: Grafen matchar Sjön.")
         else:
             print(f"❌ OSYNKAD: Grafen diffar med {abs(expected_count - unit_count)} noder.")
             
-            # Hämta alla ID från grafen
-            graph_ids = set()
-            result = conn.execute("MATCH (u:Unit) RETURN u.id")
-            while result.has_next():
-                graph_ids.add(result.get_next()[0])
+            # Hämta alla Unit-ID från grafen
+            units = graph.find_nodes_by_type("Unit")
+            graph_ids = {u['id'] for u in units}
             
             lake_id_set = set(lake_ids.keys())
             
             missing_in_graph = lake_id_set - graph_ids
             if missing_in_graph:
                 print(f"\n   Saknas i Graf ({len(missing_in_graph)} st):")
-                for uid in missing_in_graph:
+                for uid in list(missing_in_graph)[:10]:
                     filename = lake_ids.get(uid, uid)
                     # Visa namn utan UUID för läsbarhet
                     display_name = filename.rsplit('_', 1)[0] if '_' in filename else filename
                     print(f"   - {display_name}")
+                if len(missing_in_graph) > 10:
+                    print(f"   ... och {len(missing_in_graph) - 10} till")
                 print(f"\n   Tips: Kör 'python services/my_mem_graph_builder.py' för att synka")
         
-        del conn
-        del db
+        graph.close()
 
     except Exception as e:
-        LOGGER.error(f"Kunde inte läsa KuzuDB: {e}")
-        print(f"❌ KRITISKT FEL: Kunde inte läsa KuzuDB: {e}")
+        LOGGER.error(f"Kunde inte läsa graf-databasen: {e}")
+        print(f"❌ KRITISKT FEL: Kunde inte läsa graf-databasen: {e}")
 
 def rensa_gammal_logg():
     """Rensar loggfilen på rader äldre än 24 timmar."""
@@ -279,18 +295,17 @@ def run_startup_checks():
             LOGGER.error(f"Kunde inte läsa ChromaDB: {e}")
             print(f"❌ KRITISKT FEL: Kunde inte läsa ChromaDB: {e}")
         
-        # Kuzu
+        # Graf (DuckDB)
         try:
-            db = kuzu.Database(KUZU_PATH)
-            conn = kuzu.Connection(db)
-            res = conn.execute("MATCH (u:Unit) RETURN count(u)").get_next()
-            graph_count = res[0]
-            del conn
-            del db
-            validera_kuzu(lake_c, lake_ids)
+            if os.path.exists(GRAPH_PATH):
+                graph = GraphStore(GRAPH_PATH, read_only=True)
+                stats = graph.get_stats()
+                graph_count = stats['nodes'].get('Unit', 0)
+                graph.close()
+            validera_graf(lake_c, lake_ids)
         except Exception as e:
-            LOGGER.error(f"Kunde inte läsa KuzuDB: {e}")
-            print(f"❌ KRITISKT FEL: Kunde inte läsa KuzuDB: {e}")
+            LOGGER.error(f"Kunde inte läsa graf-databasen: {e}")
+            print(f"❌ KRITISKT FEL: Kunde inte läsa graf-databasen: {e}")
     else:
         print("\nIngen data att validera i databaserna.")
     
@@ -304,7 +319,7 @@ def run_startup_checks():
         'graph_count': graph_count,
         'lake_store': LAKE_STORE,
         'chroma_path': CHROMA_PATH,
-        'kuzu_path': KUZU_PATH,
+        'graph_path': GRAPH_PATH,
         'lake_ids': lake_ids
     }
 

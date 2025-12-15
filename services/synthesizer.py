@@ -136,7 +136,9 @@ def synthesize(
     op_mode: str = "query",
     delivery_format: str = "Narrativ Analys",
     current_synthesis: str = "",
-    facts: list = None
+    facts: list = None,
+    # Debug mode
+    debug_mode: bool = False
 ) -> dict:
     """
     Generera svar baserat på Planner-resultat.
@@ -238,6 +240,9 @@ def synthesize(
         client = _get_ai_client()
         response = client.models.generate_content(model=target_model, contents=contents)
         answer = response.text
+        
+        if debug_mode:
+            print(f"\n[DEBUG RAW SYNTHESIZER RESPONSE]:\n{answer}\n[END RAW]\n")
         
         LOGGER.debug(f"Synthesizer LLM-svar: {answer[:500]}...")
         LOGGER.info(f"Synthesizer {status}: svarslängd={len(answer)} tecken")

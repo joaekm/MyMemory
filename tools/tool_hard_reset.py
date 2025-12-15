@@ -6,7 +6,7 @@ HARD DATA RESET - MyMemory v6
     - Lake (alla .md filer)
     - Transcripts (transkriberade filer)
     - ChromaDB (vektorer)
-    - KuzuDB (graf)
+    - DuckDB Graf (noder och kanter)
     - Taxonomi-subnoder (behåller huvudnoder)
 
 Användning:
@@ -40,7 +40,7 @@ CONFIG = ladda_yaml('my_mem_config.yaml')
 LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 TRANSCRIPTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_transcripts'])
 CHROMA_PATH = os.path.expanduser(CONFIG['paths']['chroma_db'])
-KUZU_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])
+GRAPH_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])  # Återanvänder config-nyckel för DuckDB
 TAXONOMY_FILE = os.path.expanduser(CONFIG['paths']['taxonomy_file'])
 
 # MyMemory root (parent of Lake, Index, Assets) - deriverat från lake_store
@@ -70,7 +70,7 @@ def clear_index(path, name, recreate_dir=True):
         path: Sökväg att radera
         name: Namn för loggning
         recreate_dir: Om True, skapa tom katalog efter radering (för ChromaDB).
-                      Om False, lämna sökvägen tom (för KuzuDB som vill skapa själv).
+                      Om False, lämna sökvägen tom.
     """
     if not os.path.exists(path):
         print(f"  ⏭️  {name}: Finns inte")
@@ -86,6 +86,26 @@ def clear_index(path, name, recreate_dir=True):
         print(f"  🗑️  {name}: Raderad och återskapad")
     else:
         print(f"  🗑️  {name}: Raderad")
+
+
+def clear_duckdb(path, name):
+    """Radera DuckDB-filer (huvudfil + WAL).
+    
+    DuckDB skapar två filer:
+    - path (huvudfilen)
+    - path.wal (Write-Ahead Log)
+    """
+    deleted = []
+    for ext in ['', '.wal']:
+        fpath = path + ext
+        if os.path.exists(fpath):
+            os.remove(fpath)
+            deleted.append(os.path.basename(fpath))
+    
+    if deleted:
+        print(f"  🗑️  {name}: Raderade {', '.join(deleted)}")
+    else:
+        print(f"  ⏭️  {name}: Finns inte")
 
 
 def create_backup():
@@ -162,7 +182,7 @@ def main():
 ║  • Alla filer i Lake/                                        ║
 ║  • Alla filer i Assets/Transcripts/                          ║
 ║  • Hela ChromaDB (vektorer)                                  ║
-║  • Hela KuzuDB (graf)                                        ║
+║  • Hela DuckDB (graf)                                        ║
 ║  • Alla subnoder i taxonomin                                 ║
 ║                                                              ║
 ║  Recordings, Documents, Slack behålls!                       ║
@@ -195,8 +215,8 @@ Skippa backup: python tools/tool_hard_reset.py --confirm --no-backup
     # 3. ChromaDB (återskapas som tom katalog)
     clear_index(CHROMA_PATH, "ChromaDB", recreate_dir=True)
     
-    # 4. KuzuDB (ska INTE återskapas - KuzuDB skapar själv)
-    clear_index(KUZU_PATH, "KuzuDB", recreate_dir=False)
+    # 4. DuckDB Graf (fil + WAL)
+    clear_duckdb(GRAPH_PATH, "DuckDB Graf")
     
     # 5. Taxonomi
     reset_taxonomy()
