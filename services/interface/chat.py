@@ -398,8 +398,18 @@ def chat_loop(debug_mode=False):
                     gain_color = "red"
                 
                 console.print(f"[dim]─── Iteration {data['iteration']} ───[/dim]")
+                
+                # v8.4: Thinking Out Loud - visa interface_reasoning (ENDAST UX, inte logik)
+                if data.get('interface_reasoning'):
+                    console.print(f"  [dim italic]💭 {data['interface_reasoning'][:200]}...[/dim italic]")
+                
                 console.print(f"  [{gain_color}]Gain: {gain:.2f}[/{gain_color}] | Status: {status} | Patience: {patience}")
                 console.print(f"  [italic]Torn: \"{preview}...\"[/italic]")
+                
+                # Visa vilka agenter som skickades ut
+                if data.get('agents_dispatched'):
+                    agents = ", ".join(data['agents_dispatched'])
+                    console.print(f"  [magenta]🐿️ Skickar ut: {agents}[/magenta]")
                 
                 if data.get('next_search'):
                     console.print(f"  [cyan]→ Söker: '{data['next_search']}'[/cyan]")

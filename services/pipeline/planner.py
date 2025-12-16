@@ -411,7 +411,11 @@ def _evaluate_state(state: PlannerState, candidates_formatted: str, graph_contex
             "refined_findings": result.get('refined_findings', ''),
             "next_search_query": result.get('next_search_query'),
             "gaps": result.get('gaps', []),
-            "llm_raw": text
+            "llm_raw": text,
+            # v8.4: LLM-driven delegation
+            # interface_reasoning: ENDAST för UX (Thinking Out Loud), används ALDRIG för logik
+            "interface_reasoning": result.get('interface_reasoning', ''),
+            "agent_tasks": result.get('agent_tasks', [])
         }
         
     except ValueError as e:
@@ -515,37 +519,6 @@ def run_planner_loop(
     # search_fn för extra sökningar i loopen
     search_fn = search
     
-    # --- FAS 2.5: AGENT DELEGATION (v8.3 Bygglaget) ---
-    # Detektera om frågan kräver temporal analys
-    temporal_keywords = ['när', 'vecka', 'datum', 'igår', 'idag', 'förra', 'senaste', 
-                         'december', 'november', 'januari', 'februari', 'mars', 'april',
-                         'maj', 'juni', 'juli', 'augusti', 'september', 'oktober']
-    query_lower = query.lower()
-    is_temporal = any(kw in query_lower for kw in temporal_keywords)
-    
-    if is_temporal and "chronologist" not in state.agents_run:
-        LOGGER.info("Planner: Temporal fråga detekterad, delegerar till Kronologen")
-        try:
-            from services.agents.chronologist import extract_temporal
-            time_filter = intent_data.get('time_filter')
-            fragments = extract_temporal(
-                docs=initial_candidates,
-                anchor_date=datetime.now().strftime("%Y-%m-%d"),
-                time_filter=time_filter
-            )
-            if fragments:
-                state.fragments.extend(fragments)
-                state.agents_run.append("chronologist")
-                LOGGER.info(f"Kronologen extraherade {len(fragments)} temporal fragments")
-                # Lägg till fragments som fakta i Tornet
-                for f in fragments:
-                    if f.content not in state.facts:
-                        state.facts.append(f.content)
-        except ImportError as e:
-            LOGGER.warning(f"Kunde inte ladda Kronologen: {e}")
-        except Exception as e:
-            LOGGER.error(f"Kronologen misslyckades: {e}")
-    
     # Debug mode: aktiveras om debug_trace finns
     debug_mode = debug_trace is not None
     
@@ -587,6 +560,44 @@ def run_planner_loop(
             state.working_findings = eval_result.get('refined_findings', state.working_findings)
         
         state.gaps = eval_result.get('gaps', [])
+        
+        # --- v8.4: AGENT DELEGATION (Bygglaget) ---
+        # LLM:en bestämmer vilka agenter som ska köras baserat på sitt resonemang
+        agent_tasks = eval_result.get('agent_tasks', [])
+        if agent_tasks:
+            try:
+                from services.agents.chronologist import extract_temporal
+            except ImportError as e:
+                LOGGER.debug(f"Fallback import agents: {e}")
+                from agents.chronologist import extract_temporal
+            
+            for task in agent_tasks:
+                agent_name = task.get('agent')
+                agent_task = task.get('task', '')
+                
+                if agent_name == 'chronologist' and 'chronologist' not in state.agents_run:
+                    LOGGER.info(f"Planner delegerar till Kronologen: {agent_task}")
+                    try:
+                        time_filter = intent_data.get('time_filter')
+                        fragments = extract_temporal(
+                            docs=state.candidates,
+                            anchor_date=datetime.now().strftime("%Y-%m-%d"),
+                            time_filter=time_filter
+                        )
+                        if fragments:
+                            state.fragments.extend(fragments)
+                            state.agents_run.append("chronologist")
+                            LOGGER.info(f"Kronologen extraherade {len(fragments)} temporal fragments")
+                            # Lägg till fragments som fakta i Tornet
+                            for f in fragments:
+                                if f.content not in state.facts:
+                                    state.facts.append(f.content)
+                    except Exception as e:
+                        LOGGER.error(f"Kronologen misslyckades: {e}")
+                
+                # Framtida agenter kan läggas till här:
+                # elif agent_name == 'economist' and 'economist' not in state.agents_run:
+                #     ...
         
         # --- CONTEXT GAIN DELTA ---
         context_gain = eval_result.get('context_gain')
@@ -642,7 +653,10 @@ def run_planner_loop(
             "facts_preview": state.facts[:3] if state.facts else [],
             "new_evidence_added": len(new_evidence) if new_evidence else 0,
             "gaps": state.gaps,
-            "next_search": eval_result.get('next_search_query')
+            "next_search": eval_result.get('next_search_query'),
+            # v8.4: Thinking Out Loud - visas i chatten, används INTE för logik
+            "interface_reasoning": eval_result.get('interface_reasoning', ''),
+            "agents_dispatched": [t.get('agent') for t in agent_tasks] if agent_tasks else []
         }
         
         if debug_trace is not None:

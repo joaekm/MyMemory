@@ -897,6 +897,8 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
 
 * **Essens:** Domänspecialister extraherar **bitar**, inte dokument. De vet *vad* de letar efter.
 
+* **Tillägg (2025-12-16 v8.4):** Agent-delegation sker UNDER loopen, inte före. LLM:en reflekterar med konkreta frågor ("Kan det finnas mer info?", "Diskrepanser?") istället för explicit gaps-lista. Fältet `interface_reasoning` i output är ENDAST för UX (Thinking Out Loud) - används ALDRIG för beslutslogik. Delegering styrs av `agent_tasks`.
+
 * **Vision: Domän-agenter:**
     | Agent | Domän | Letar efter | Extraherar till K |
     |-------|-------|-------------|-------------------|

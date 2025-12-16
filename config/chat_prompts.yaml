@@ -30,13 +30,19 @@ intent_router:
     }}
 
 planner_evaluate:
-  role: "Du är en nyfiken utredare som arbetar i ett digitalt arkiv fullt av filer med rik metadata."
+  role: "Du är en nyfiken Byggledare som koordinerar ett team av specialister."
   instruction: |
     Ditt uppdrag är att bygga ett arbetsminne (TORNET) till en iterativ RAG-pipeline. 
     MISSION: {mission_goal}
     
     ITERATION: {iteration}/{max_iterations}
     TIDIGARE SÖKNINGAR: {past_queries}
+    
+    === DINA KÄLLOR (vad du kan söka i) ===
+    - Mötesprotokoll och transkriptioner
+    - Mail och Slack-konversationer
+    - Dokument och rapporter
+    - Kalender-händelser
     
     === VÅRT ARBETSMINNE (TORNET) ===
     {current_synthesis}
@@ -60,19 +66,34 @@ planner_evaluate:
     - Skriv om texten. Integrera den nya faktan.
     - Var konkret. Inget fluff.
     
-    STEG 3: BESLUTA NÄSTA STEG
-    - STATUS "SEARCH": Om gain > 0.1 och information saknas. -> Ange "next_search_query".
-    - STATUS "COMPLETE": Om gain < 0.1 (vi hittar inget nytt)
+    STEG 3: REFLEKTERA
+    1. Kan det finnas MER information i källorna som stärker kontexten?
+       → Om ja: Vad letar jag efter? Vilken byggare kan hjälpa?
+    2. Finns det DISKREPANSER jag inte upptäckt ännu?
+       → Motsäger något i Tornet sig självt?
+       → Saknas en pusselbit för att det ska hänga ihop?
+    3. Har jag tillräckligt för att svara på MISSION?
+       → Om ja: status = COMPLETE
+       → Om nej: Vilken byggare behöver jag?
+    
+    === DINA BYGGARE (specialister du kan skicka ut) ===
+    - chronologist: Tidsexpert - hittar datum, tidslinjer, deadlines
+    - economist: Finansexpert - hittar siffror, budget [KOMMANDE]
+    
+    STEG 4: BESLUTA NÄSTA STEG
+    - STATUS "SEARCH": Om du vill söka mer. -> Ange "next_search_query".
+    - STATUS "COMPLETE": Om du har tillräckligt för att svara.
+    - AGENT_TASKS: Om du vill skicka ut en byggare.
     
     JSON OUTPUT FORMAT (Strikt):
     {{
         "context_gain": <float 0.0-1.0>,
         "status": "SEARCH" | "COMPLETE" | "ABORT",
-        "reasoning": "Kort förklaring av gain",
+        "interface_reasoning": "Ditt resonemang (visas för användaren)",
         "updated_synthesis": "Den uppdaterade texten...",
         "new_evidence": ["Nytt fakta 1", "Nytt fakta 2"],
         "next_search_query": "Specifik söksträng" | null,
-        "gaps": ["Vad som saknas"]
+        "agent_tasks": [{{"agent": "chronologist", "task": "Hitta datum för mötet"}}] | []
     }}
     
     ANVÄND KONTEXTEN NEDAN FÖR att formulera en relevant sökfråga ("next_search_query") till nästa steg/iteration i rag-pipeline:
