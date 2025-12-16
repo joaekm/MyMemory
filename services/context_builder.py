@@ -47,6 +47,9 @@ API_KEY = CONFIG['ai_engine']['api_key']
 # Max kandidater att returnera
 MAX_CANDIDATES = 50
 
+# Token Economy: Hur många dokument som får fulltext i Planner-prompten
+TOP_N_FULLTEXT = 3
+
 # Viktningsfaktorer
 LAKE_BOOST_STRICT = 1.3   # STRICT: LAKE-träffar får 30% boost
 LAKE_BOOST_RELAXED = 1.0  # RELAXED: Ingen boost
@@ -206,6 +209,44 @@ def _search_vector(query: str, n_results: int = 30) -> dict:
     return hits
 
 
+def format_candidates_for_planner(candidates: list, top_n_fulltext: int = 3) -> str:
+    """
+    Formatera kandidater för Planner-prompten.
+    
+    Token Economy: Endast topp N kandidater får fulltext,
+    resten får bara summary för att spara tokens.
+    
+    Args:
+        candidates: Lista med kandidat-dicts (med 'content', 'summary', 'filename')
+        top_n_fulltext: Antal som får fulltext (default 3)
+    
+    Returns:
+        Formaterad sträng för prompt
+    """
+    if not candidates:
+        return "Inga dokument hittades."
+    
+    lines = []
+    for i, c in enumerate(candidates):
+        filename = c.get('filename', 'unknown')
+        score = c.get('score', 0)
+        
+        if i < top_n_fulltext:
+            # Topp N: Inkludera fulltext
+            content = c.get('content', c.get('summary', ''))
+            lines.append(f"### [{i+1}] {filename} (score: {score:.2f})")
+            lines.append(content[:5000] if content else '')  # Max 5000 chars per dokument
+            lines.append("")
+        else:
+            # Resten: Bara summary
+            summary = c.get('summary', '')[:200]
+            lines.append(f"### [{i+1}] {filename} (score: {score:.2f}) [SUMMARY ONLY]")
+            lines.append(summary)
+            lines.append("")
+    
+    return "\n".join(lines)
+
+
 def _dedupe_and_rank(lake_hits: dict, vector_hits: dict, intent: str) -> list:
     """
     Deduplicera och ranka kandidater.
@@ -332,10 +373,14 @@ def build_context(intent_data: dict, debug_trace: dict = None) -> dict:
             "score": round(c.get('score', 0), 3)
         })
     
+    # Formatera för Planner (Token Economy)
+    candidates_formatted = format_candidates_for_planner(candidates, TOP_N_FULLTEXT)
+    
     return {
         "status": "OK",
         "candidates": slim_candidates,
         "candidates_full": candidates,  # Fullständig data för Planner
+        "candidates_formatted": candidates_formatted,  # Formaterad för prompt
         "stats": stats
     }
 
