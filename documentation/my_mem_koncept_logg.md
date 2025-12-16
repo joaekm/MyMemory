@@ -879,6 +879,24 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
     - En "Lake-agent" hittar dokumentet men förstår inte *vad* som är viktigt
     - En **Ekonom-agent** vet att leta efter siffror, belopp, "budget" – oavsett var
 
+* **Konkret jämförelse:**
+    ```
+    Fråga: "Hur går Adda-budgeten?"
+    
+    DATAKÄLLSPECIALIST-approach:
+    ├── Lake-agent: Hittar 47 dokument som nämner "Adda"
+    ├── Vektor-agent: Hittar 30 semantiskt liknande
+    └── Resultat: 77 kandidater, ingen förstår vad som är viktigt
+    
+    DOMÄNSPECIALIST-approach:
+    ├── Ekonomen: "Jag letar efter siffror" → "450k budget, 280k förbrukat"
+    ├── Kronologen: "Jag letar efter senaste" → "Budgetmöte 2025-12-12"
+    ├── Projektledaren: "Jag letar efter ansvar" → "Joakim äger uppföljning"
+    └── Resultat: K med struktur {siffror, tid, ansvar}
+    ```
+
+* **Essens:** Domänspecialister extraherar **bitar**, inte dokument. De vet *vad* de letar efter.
+
 * **Vision: Domän-agenter:**
     | Agent | Domän | Letar efter | Extraherar till K |
     |-------|-------|-------------|-------------------|
@@ -911,6 +929,13 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
                ▼
          Analysera: Vad saknas? → Ny iteration
     ```
+
+* **Iterativt teamarbete:**
+    - Agenterna bygger **en våning** av Tornet per iteration
+    - Efter varje våning: titta på I och K **tillsammans**, analysera vad som saknas
+    - Skapa ny plan → dyka ner i MD → hämta nya bitar → bygga ny våning
+    - **Repetera** tills K är komplett (agenterna "känner sig nöjda")
+    - Planner är **koordinator**, inte utförare – delegerar till domänexperterna
 
 * **Koppling till OTS-taxonomin:**
     - Strategen ↔ Strategisk nivå (Vision, Kultur, Affär)
