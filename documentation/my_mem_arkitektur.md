@@ -143,7 +143,7 @@ Input → IntentRouter → ContextBuilder → Planner (ReAct) → Synthesizer �
 |----------|----------|
 | `/show` | Visa filnamn (utan UUID) från senaste sökningen |
 | `/export` | Skapa symlinks i hotfolder (top 10 på score) |
-| `/learn` | Lär systemet nya alias (Entity Resolution) |
+| `/context` | Exportera K (syntes + bevis + källor) som markdown |
 
 **Konfiguration:**
 - `chat_prompts.yaml`: Alla system-instruktioner

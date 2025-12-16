@@ -182,49 +182,6 @@ def debug_panel(title, content, style="yellow", debug_mode=False, debug_trace=No
 
 # --- FEEDBACK HANDLING ---
 
-def _parse_learn_command(text: str) -> tuple:
-    """
-    Parsa /learn kommandot.
-    
-    Format: /learn X = Y (person|projekt|koncept)
-    
-    Returns:
-        (canonical, alias, entity_type) eller (None, None, None)
-    """
-    # Matcha: /learn X = Y eller /learn X = Y (typ)
-    pattern = r'^/learn\s+(.+?)\s*=\s*(.+?)(?:\s*\((\w+)\))?\s*$'
-    match = re.match(pattern, text.strip(), re.IGNORECASE)
-    
-    if not match:
-        return None, None, None
-    
-    canonical = match.group(1).strip()
-    alias = match.group(2).strip()
-    entity_type = match.group(3) if match.group(3) else "Person"
-    
-    # Normalisera entity_type till taxonomins kategorier
-    # Användaren kan skriva svenska eller engelska
-    type_map = {
-        # Svenska (taxonomin)
-        "person": "Person",
-        "aktör": "Aktör",
-        "organisation": "Aktör",
-        "projekt": "Projekt",
-        "teknologi": "Teknologier",
-        "produkt": "Teknologier",
-        "metodik": "Metodik",
-        "koncept": "Metodik",
-        # Engelska alternativ
-        "organization": "Aktör",
-        "project": "Projekt",
-        "product": "Teknologier",
-        "concept": "Metodik"
-    }
-    entity_type = type_map.get(entity_type.lower(), entity_type)
-    
-    return canonical, alias, entity_type
-
-
 def _interpret_feedback(text: str) -> dict:
     """
     Tolka naturligt språk som potentiell feedback.
@@ -342,6 +299,7 @@ def chat_loop(debug_mode=False):
     
     # v8.2: SessionEngine hanterar allt
     engine = get_engine()
+    last_query = ""  # Spara senaste frågan för /context
 
     try:
         while True:
@@ -352,18 +310,6 @@ def chat_loop(debug_mode=False):
                 break
             if not query.strip(): continue
 
-            # === HANTERA /learn KOMMANDO ===
-            if query.startswith('/learn'):
-                canonical, alias, entity_type = _parse_learn_command(query)
-                if canonical and alias:
-                    result = _handle_feedback(canonical, alias, entity_type)
-                    console.print(f"[bold purple]MyMem:[/bold purple] {result}")
-                    continue
-                else:
-                    console.print("[yellow]Format: /learn NAMN = ALIAS (Person|Aktör|Projekt)[/yellow]")
-                    console.print("[dim]Exempel: /learn Cenk Bisgen = Sänk[/dim]")
-                    continue
-            
             # === /show KOMMANDO - Visa senaste sökresultat ===
             if query.strip() == '/show':
                 candidates = engine.get_last_candidates()
@@ -398,6 +344,25 @@ def chat_loop(debug_mode=False):
                         console.print(f"[green]✓ Exporterade {result['count']} filer till {result['folder']}[/green]")
                 else:
                     console.print("[yellow]Inga filer att exportera.[/yellow]")
+                continue
+            
+            # === /context KOMMANDO - Exportera K som markdown ===
+            if query.strip() == '/context':
+                synthesis = engine.get_synthesis()
+                facts = engine.get_facts()
+                candidates = engine.get_last_candidates()
+                
+                if not synthesis and not facts and not candidates:
+                    console.print("[yellow]Ingen kontext att exportera. Kör en sökning först.[/yellow]")
+                    continue
+                
+                from services.utils.export_context import export_context
+                import subprocess
+                hot_folder = CONFIG['paths'].get('hot_folder', '~/Downloads/MyMem Hotfiles')
+                
+                filepath = export_context(last_query, synthesis, facts, candidates, hot_folder)
+                console.print(f"[green]✓ Exporterade kontext till {filepath}[/green]")
+                subprocess.run(['open', '-R', filepath])
                 continue
             
             # === KOLLA OM DET ÄR NATURLIGT SPRÅK FEEDBACK ===
@@ -448,6 +413,9 @@ def chat_loop(debug_mode=False):
             
             if debug_mode:
                 console.print("\n[bold cyan]🏗️ TORNBYGGET (live)[/bold cyan]")
+            
+            # Spara query för /context export
+            last_query = query
             
             try:
                 result = engine.run_query(
