@@ -287,7 +287,7 @@ paths:
   lake_store: "~/MyMemory/Lake"
   asset_store: "~/MyMemory/Assets"
   chroma_db: "~/MyMemory/Index/ChromaDB"
-  kuzu_db: "~/MyMemory/Index/KuzuDB"
+  graph_db: "~/MyMemory/Index/GraphDB"
   taxonomy_file: "~/MyMemory/Index/my_mem_taxonomy.json"
 ```
 
@@ -295,7 +295,7 @@ paths:
 
 ```python
 # ❌ DÅLIGT: Hårdkodad sökväg
-KUZU_PATH = os.path.expanduser("~/MyMemory/Index/my_mem_kuzu")
+GRAPH_PATH = os.path.expanduser("~/MyMemory/Index/my_mem_graph")
 LAKE_PATH = "/Users/jekman/MyMemory/Lake"
 ```
 
@@ -304,6 +304,35 @@ LAKE_PATH = "/Users/jekman/MyMemory/Lake"
 ```python
 # ✅ BRA: Läs från config
 CONFIG = load_config('my_mem_config.yaml')
-KUZU_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])
+GRAPH_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
 LAKE_PATH = os.path.expanduser(CONFIG['paths']['lake_store'])
 ```
+
+---
+
+## Princip 10: Skydda Kritiska Filer
+
+**Innan radering eller omskrivning av hela filer, FRÅGA användaren.**
+
+### Skyddade filer (får ALDRIG raderas utan explicit godkännande):
+
+```
+services/utils/document_dna.py
+services/my_mem_*_collector.py
+services/graph_service.py
+services/session_engine.py
+config/my_mem_config.yaml
+```
+
+### Riskabla operationer som kräver bekräftelse:
+
+1. Ta bort en hel fil
+2. Ta bort en funktion som exporteras (finns i `__all__` eller importeras)
+3. Byta namn på filer i `services/`
+4. Ändra i `.cursorrules` själv
+
+### Workflow:
+
+- Vid stora refaktoreringar: **Byt till Ask mode först**
+- Committa efter varje lyckad filändring
+- Vid osäkerhet: Fråga innan du raderar
