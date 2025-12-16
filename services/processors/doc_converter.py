@@ -67,10 +67,16 @@ atexit.register(close_db_connection)
 # --- CONFIG LOADER ---
 def ladda_yaml(filnamn, strict=True):
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    paths = [os.path.join(script_dir, 'config', filnamn), os.path.join(script_dir, '..', 'config', filnamn), os.path.join(script_dir, '..', filnamn)]
+    paths = [
+        os.path.join(script_dir, '..', '..', 'config', filnamn),
+        os.path.join(script_dir, '..', 'config', filnamn),
+        os.path.join(script_dir, 'config', filnamn),
+    ]
     for p in paths:
         if os.path.exists(p):
             with open(p, 'r') as f: return yaml.safe_load(f)
+    if strict:
+        print(f"[CRITICAL] Kunde inte hitta: {filnamn}")
     return {}
 
 CONFIG = ladda_yaml('my_mem_config.yaml', strict=True)

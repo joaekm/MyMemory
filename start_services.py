@@ -14,13 +14,13 @@ LOGGER = logging.getLogger('StartServices')
 # Import validering från tool_validate_system
 from tools.tool_validate_system import run_startup_checks
 
-# Tjänsterna som ska startas
+# Tjänsterna som ska startas (som moduler för korrekt PYTHONPATH)
 SERVICES = [
-    {"path": "services/collectors/file_retriever.py", "name": "File Retriever"},
-    {"path": "services/collectors/slack_collector.py", "name": "Slack Collector"},
-    {"path": "services/processors/doc_converter.py", "name": "Doc Converter"},
-    {"path": "services/processors/transcriber.py", "name": "Transcriber"},
-    {"path": "services/indexers/vector_indexer.py", "name": "Vector Indexer"},
+    {"module": "services.collectors.file_retriever", "name": "File Retriever"},
+    {"module": "services.collectors.slack_collector", "name": "Slack Collector"},
+    {"module": "services.processors.doc_converter", "name": "Doc Converter"},
+    {"module": "services.processors.transcriber", "name": "Transcriber"},
+    {"module": "services.indexers.vector_indexer", "name": "Vector Indexer"},
 ]
 
 processes = []
@@ -109,7 +109,7 @@ def auto_repair(health_info):
         print(f"{_ts()} 🔧 REPAIR: Kör Graph Builder för {lake_count - graph_count} saknade noder...")
         try:
             result = subprocess.run(
-                [sys.executable, "services/my_mem_graph_builder.py"],
+                [sys.executable, "-m", "services.indexers.graph_builder"],
                 capture_output=True,
                 text=True,
                 timeout=120
@@ -164,13 +164,9 @@ def start_all():
     python_exec = sys.executable
 
     for service in SERVICES:
-        script_path = service["path"]
-        if not os.path.exists(script_path):
-            print(f"{_ts()} ❌ {service['name']}: fil saknas")
-            continue
-            
+        module_name = service["module"]
         try:
-            p = subprocess.Popen([python_exec, script_path])
+            p = subprocess.Popen([python_exec, "-m", module_name])
             processes.append(p)
             time.sleep(0.8)  # Låt tjänsten starta och skriva sin egen output
         except Exception as e:

@@ -12,8 +12,9 @@ from watchdog.events import FileSystemEventHandler
 def ladda_yaml(filnamn):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
+        os.path.join(script_dir, '..', '..', 'config', filnamn),
+        os.path.join(script_dir, '..', 'config', filnamn),
         os.path.join(script_dir, 'config', filnamn),
-        os.path.join(script_dir, '..', 'config', filnamn)
     ]
     for p in paths:
         if os.path.exists(p):
