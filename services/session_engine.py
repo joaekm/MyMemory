@@ -159,9 +159,7 @@ class SessionEngine:
         LOGGER.debug("ContextBuilder...")
         
         context_result = build_context(
-            keywords=intent_data.get('keywords', []),
-            entities=intent_data.get('entities', []),
-            time_filter=intent_data.get('time_filter'),
+            intent_data=intent_data,
             debug_trace=debug_trace
         )
         

@@ -85,9 +85,7 @@ def run_trace(query: str):
     try:
         console.print("[dim]2. Running ContextBuilder...[/dim]")
         context = build_context(
-            keywords=intent.get('keywords', []),
-            entities=intent.get('entities', []),
-            time_filter=intent.get('time_filter'),
+            intent_data=intent,
             debug_trace=debug_trace
         )
         
