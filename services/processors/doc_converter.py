@@ -38,7 +38,7 @@ except ImportError as e:
 
 # Entity Register för context injection (OBJEKT-44) - Använder graph_builder direkt
 try:
-    from services.my_mem_graph_builder import (
+    from services.indexers.graph_builder import (
         get_all_entities as get_known_entities,
         get_canonical_from_graph as get_canonical,
         add_entity_alias,

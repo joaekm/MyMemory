@@ -15,9 +15,9 @@ def hitta_och_ladda_config():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     # Sök uppåt i hierarkin
     paths_to_check = [
-        os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
+        os.path.join(script_dir, '..', '..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
-        os.path.join(script_dir, '..', 'my_mem_config.yaml')
+        os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
     ]
     config_path = None
     for p in paths_to_check:

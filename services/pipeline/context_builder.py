@@ -26,6 +26,7 @@ UUID_PATTERN = re.compile(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 def _load_config():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
+        os.path.join(script_dir, '..', '..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
     ]

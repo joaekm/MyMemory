@@ -20,7 +20,7 @@ from rich.markdown import Markdown
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
-    from services.session_engine import SessionEngine
+    from services.engine.session_engine import SessionEngine
 except ImportError as e:
     print(f"CRITICAL: Kunde inte importera SessionEngine: {e}")
     sys.exit(1)
@@ -100,6 +100,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

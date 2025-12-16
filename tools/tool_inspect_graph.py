@@ -8,7 +8,7 @@ import yaml
 
 # Lägg till services i path för import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from services.graph_service import GraphStore
+from services.utils.graph_service import GraphStore
 
 # --- CONFIG ---
 def ladda_yaml(filnamn):

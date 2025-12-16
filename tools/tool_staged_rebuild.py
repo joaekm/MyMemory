@@ -359,7 +359,7 @@ def run_dreamer():
     try:
         # Importera och kör consolidate direkt
         sys.path.insert(0, project_root)
-        from services.my_mem_dreamer import consolidate
+        from services.processors.dreamer import consolidate
         
         result = consolidate()
         if result.get("status") == "OK":

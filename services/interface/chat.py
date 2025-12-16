@@ -34,7 +34,7 @@ from rich.live import Live
 
 # Pipeline v8.2 imports - SessionEngine
 try:
-    from services.session_engine import SessionEngine, get_engine, reset_engine
+    from services.engine.session_engine import SessionEngine, get_engine, reset_engine
 except ImportError as _import_err:
     try:
         from session_engine import SessionEngine, get_engine, reset_engine
@@ -43,7 +43,7 @@ except ImportError as _import_err:
 
 # Entity Register (OBJEKT-44) - Använder graph_builder direkt
 try:
-    from services.my_mem_graph_builder import (
+    from services.indexers.graph_builder import (
         add_entity_alias as add_alias,
         get_canonical_from_graph as get_canonical,
         get_all_entities as get_known_entities
@@ -62,7 +62,7 @@ except ImportError:
 
 # Session Logger (OBJEKT-48) - ännu ej implementerat
 try:
-    from services.session_logger import (
+    from services.engine.session_logger import (
         start_session, end_session, log_search, log_feedback, log_abort
     )
 except ImportError:
@@ -88,9 +88,9 @@ def parse_args():
 def hitta_och_ladda_config():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths_to_check = [
-        os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
+        os.path.join(script_dir, '..', '..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
-        os.path.join(script_dir, '..', 'my_mem_config.yaml')
+        os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
     ]
     config_path = None
     for p in paths_to_check:
@@ -112,6 +112,7 @@ CONFIG = hitta_och_ladda_config()
 def ladda_chat_prompts():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
+        os.path.join(script_dir, '..', '..', 'config', 'chat_prompts.yaml'),
         os.path.join(script_dir, '..', 'config', 'chat_prompts.yaml'),
         os.path.join(script_dir, 'config', 'chat_prompts.yaml'),
     ]

@@ -21,14 +21,15 @@ from google.genai import types
 # Lägg till projektroten i sys.path för att hitta services-paketet
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.graph_service import GraphStore
+from services.utils.graph_service import GraphStore
 
 # --- CONFIG LOADER ---
 def _load_config():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths_to_check = [
-        os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
+        os.path.join(script_dir, '..', '..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
+        os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
     ]
     for p in paths_to_check:
         if os.path.exists(p):
@@ -43,10 +44,14 @@ def _load_config():
 
 def _load_prompts():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    prompts_path = os.path.join(script_dir, '..', 'config', 'services_prompts.yaml')
-    if os.path.exists(prompts_path):
-        with open(prompts_path, 'r') as f:
-            return yaml.safe_load(f)
+    paths = [
+        os.path.join(script_dir, '..', '..', 'config', 'services_prompts.yaml'),
+        os.path.join(script_dir, '..', 'config', 'services_prompts.yaml'),
+    ]
+    for prompts_path in paths:
+        if os.path.exists(prompts_path):
+            with open(prompts_path, 'r') as f:
+                return yaml.safe_load(f)
     raise RuntimeError("HARDFAIL: Prompts not found")
 
 

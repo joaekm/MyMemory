@@ -19,8 +19,9 @@ from typing import Optional
 def _ladda_yaml(filnamn, strict=True):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
+        os.path.join(script_dir, '..', '..', 'config', filnamn),
+        os.path.join(script_dir, '..', 'config', filnamn),
         os.path.join(script_dir, 'config', filnamn),
-        os.path.join(script_dir, '..', 'config', filnamn)
     ]
     for p in paths:
         if os.path.exists(p):

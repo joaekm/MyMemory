@@ -24,14 +24,14 @@ LOGGER = logging.getLogger('DebugPipelineTrace')
 # --- CRITICAL IMPORTS ---
 # Alla imports måste lyckas, annars HARDFAIL
 try:
-    from services.intent_router import route_intent
+    from services.pipeline.intent_router import route_intent
     console.print("[green]✓ Imported: intent_router.route_intent[/green]")
 except ImportError as e:
     console.print(f"[bold red]CRITICAL IMPORT ERROR (intent_router): {e}[/bold red]")
     sys.exit(1)
 
 try:
-    from services.context_builder import build_context, search
+    from services.pipeline.context_builder import build_context, search
     console.print("[green]✓ Imported: context_builder.build_context[/green]")
     console.print("[green]✓ Imported: context_builder.search[/green]")
 except ImportError as e:
@@ -39,14 +39,14 @@ except ImportError as e:
     sys.exit(1)
 
 try:
-    from services.planner import run_planner_loop
+    from services.pipeline.planner import run_planner_loop
     console.print("[green]✓ Imported: planner.run_planner_loop[/green]")
 except ImportError as e:
     console.print(f"[bold red]CRITICAL IMPORT ERROR (planner): {e}[/bold red]")
     sys.exit(1)
 
 try:
-    from services.synthesizer import synthesize
+    from services.pipeline.synthesizer import synthesize
     console.print("[green]✓ Imported: synthesizer.synthesize[/green]")
 except ImportError as e:
     console.print(f"[bold red]CRITICAL IMPORT ERROR (synthesizer): {e}[/bold red]")

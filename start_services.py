@@ -132,7 +132,7 @@ def auto_repair(health_info):
 def run_dreaming():
     """Kör dreaming vid varje uppstart för att synka graf och taxonomi."""
     try:
-        from services.my_mem_dreamer import consolidate
+        from services.processors.dreamer import consolidate
         
         print(f"{_ts()} 💭 Dreaming...")
         result = consolidate()

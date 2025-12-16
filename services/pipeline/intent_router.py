@@ -30,6 +30,7 @@ except ImportError as _import_err:
 def _load_config():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
+        os.path.join(script_dir, '..', '..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
     ]
@@ -43,6 +44,7 @@ def _load_config():
 def _load_prompts():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
+        os.path.join(script_dir, '..', '..', 'config', 'chat_prompts.yaml'),
         os.path.join(script_dir, '..', 'config', 'chat_prompts.yaml'),
         os.path.join(script_dir, 'config', 'chat_prompts.yaml'),
     ]

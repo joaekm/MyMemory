@@ -6,7 +6,7 @@ import datetime
 import logging
 from chromadb.utils import embedding_functions
 
-from services.graph_service import GraphStore
+from services.utils.graph_service import GraphStore
 
 # Enkel loggning för CLI-verktyg
 logging.basicConfig(level=logging.WARNING, format='%(levelname)s - %(message)s')

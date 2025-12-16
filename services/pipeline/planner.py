@@ -28,7 +28,7 @@ _CONSOLE = Console()
 # Import utilities
 try:
     from services.utils.json_parser import parse_llm_json
-    from services.session_engine import PlannerState
+    from services.engine.session_engine import PlannerState
 except ImportError as _import_err:
     try:
         from utils.json_parser import parse_llm_json
@@ -40,6 +40,7 @@ except ImportError as _import_err:
 def _load_config():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
+        os.path.join(script_dir, '..', '..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
     ]
@@ -53,6 +54,7 @@ def _load_config():
 def _load_prompts():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
+        os.path.join(script_dir, '..', '..', 'config', 'chat_prompts.yaml'),
         os.path.join(script_dir, '..', 'config', 'chat_prompts.yaml'),
         os.path.join(script_dir, 'config', 'chat_prompts.yaml'),
     ]
@@ -392,7 +394,7 @@ def run_planner_loop(
     """
     # Import format_candidates_for_planner för nya sökningar
     try:
-        from services.context_builder import format_candidates_for_planner, TOP_N_FULLTEXT
+        from services.pipeline.context_builder import format_candidates_for_planner, TOP_N_FULLTEXT
     except ImportError as _import_err:
         LOGGER.debug(f"Fallback-import context_builder: {_import_err}")
         from context_builder import format_candidates_for_planner, TOP_N_FULLTEXT

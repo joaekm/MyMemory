@@ -25,6 +25,7 @@ LOGGER = logging.getLogger('SessionEngine')
 def _load_config():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
+        os.path.join(script_dir, '..', '..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
     ]
@@ -123,11 +124,11 @@ class SessionEngine:
         """
         # Lazy imports för att undvika cirkulära beroenden
         try:
-            from services.intent_router import route_intent
-            from services.context_builder import build_context, search
-            from services.planner import run_planner_loop
-            from services.synthesizer import synthesize
-            from services.session_logger import log_search
+            from services.pipeline.intent_router import route_intent
+            from services.pipeline.context_builder import build_context, search
+            from services.pipeline.planner import run_planner_loop
+            from services.pipeline.synthesizer import synthesize
+            from services.engine.session_logger import log_search
         except ImportError as _import_err:
             LOGGER.debug(f"Fallback import: {_import_err}")
             from intent_router import route_intent

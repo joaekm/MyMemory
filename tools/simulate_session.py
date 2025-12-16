@@ -42,7 +42,7 @@ LOGGER = logging.getLogger('SimulateSession')
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from google import genai
-from services.my_mem_chat import process_query, CONFIG, PROMPTS, MODEL_LITE
+from services.interface.chat import process_query, CONFIG, PROMPTS, MODEL_LITE
 
 # --- SETUP ---
 API_KEY = CONFIG['ai_engine']['api_key']
