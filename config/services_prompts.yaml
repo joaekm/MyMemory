@@ -129,11 +129,6 @@ doc_converter:
     - Dokumentet kan vara relevant för FLERA masternoder (viktat)
     - Använd EXAKT namn från KÄNDA PERSONER/PROJEKT om tillgängliga
 
-# --- Chatt-agenten (RAG-gränssnitt) ---
-chat:
-  system_prompt: |
-    Du är "MyMemory", en intelligent assistent. Svara baserat på bifogad kontext.
-
 # --- Dreamer (Taxonomi-konsolidering) ---
 dreamer:
   consolidation_prompt: |

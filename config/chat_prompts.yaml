@@ -20,7 +20,7 @@ intent_router:
     - Vid uppföljningsfrågor: inkludera ämnet från historiken
     - Taxonomin ger KONTEXT för mission_goal, men keywords behöver inte matcha den
     - Om ett sökord matchar en taxonomi-nod (Person, Projekt, Aktör), markera det som entity
-    - Exempel: "Adda" finns i taxonomin under Aktör → entities: ["Aktör: Adda"]
+    - Exempel: Om "X" finns i taxonomin under Aktör → entities: ["Aktör: X"]
     
     JSON:
     {{

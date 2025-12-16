@@ -1,0 +1,49 @@
+# Agent-promptar för domänspecialister (v8.3 Bygglaget)
+# Varje agent extraherar KnowledgeFragments från dokument
+
+chronologist:
+  instruction: |
+    Du är en tidsexpert. Din uppgift är att extrahera ENDAST tidsrelaterad information.
+    
+    IGNORERA: Allt som inte har med tid att göra (budget, tekniska detaljer, etc.)
+    EXTRAHERA: Händelser, datum, deadlines, tidslinjer, möten
+    
+    DOKUMENT:
+    {documents}
+    
+    ANKARDATUM (idag): {anchor_date}
+    TIDSFILTER: {time_filter}
+    
+    INSTRUKTIONER:
+    1. Identifiera alla tidsrelaterade händelser i dokumenten
+    2. Konvertera relativa uttryck ("igår", "förra veckan") till absoluta datum baserat på ANKARDATUM
+    3. Om tidsfilter finns, prioritera händelser inom det intervallet
+    4. Ange källdokument-ID för varje händelse
+    
+    RETURNERA JSON:
+    {{
+      "events": [
+        {{
+          "date": "YYYY-MM-DD",
+          "event": "Kort beskrivning av händelsen",
+          "source": "dokument_id",
+          "type": "meeting|deadline|decision|event",
+          "confidence": 0.0-1.0
+        }}
+      ]
+    }}
+    
+    Om inga tidsrelaterade händelser hittas, returnera: {{"events": []}}
+
+# Framtida agenter (PLACEHOLDER):
+# 
+# economist:
+#   instruction: |
+#     Du är en finansexpert. Extrahera ENDAST ekonomisk information.
+#     Budget, kostnader, intäkter, siffror, prognoser...
+#
+# project_manager:
+#   instruction: |
+#     Du är en projektledare. Extrahera ENDAST projektrelaterad information.
+#     Beslut, actions, ansvariga, status, risker...
+

@@ -1,16 +1,16 @@
 """
-Planner - Pipeline v8.2 "Pivot or Persevere"
+Planner - Pipeline v8.3 "Bygglaget"
 
 Ansvar:
 - ReAct-loop: Reason + Act tills mission_goal uppfyllt
 - Pivot or Persevere: Plannern avgör kontextrelevans
 - Rolling Hypothesis: Bygger current_synthesis (Tornet) iterativt
 - Identifiera gaps och learnings
+- Äger PlannerState (självständig från SessionEngine)
 
-v8.2 Changes:
-- Pivot or Persevere: Tar emot befintligt Torn + Facts från SessionEngine
-- MIN_ITERATIONS_BEFORE_COMPLETE: Tvingar tornbyggande först
-- Returnerar state för SessionEngine att spara
+v8.3 Changes:
+- PlannerState flyttad hit från session_engine.py
+- Planner är nu självständig modul
 
 Princip: HARDFAIL > Silent Fallback
 """
@@ -19,6 +19,9 @@ import os
 import json
 import yaml
 import logging
+from datetime import datetime
+from dataclasses import dataclass, field, asdict
+from typing import List, Dict
 from google import genai
 from rich.console import Console
 
@@ -28,11 +31,9 @@ _CONSOLE = Console()
 # Import utilities
 try:
     from services.utils.json_parser import parse_llm_json
-    from services.engine.session_engine import PlannerState
 except ImportError as _import_err:
     try:
         from utils.json_parser import parse_llm_json
-        from session_engine import PlannerState
     except ImportError as e:
         raise ImportError(f"HARDFAIL: Kan inte importera utilities: {e}") from e
 
@@ -71,6 +72,77 @@ LOGGER = logging.getLogger('Planner')
 API_KEY = CONFIG['ai_engine']['api_key']
 MODEL_LITE = CONFIG['ai_engine']['models']['model_lite']
 TAXONOMY_FILE = os.path.expanduser(CONFIG['paths'].get('taxonomy_file', '~/MyMemory/Index/my_mem_taxonomy.json'))
+
+
+# === KNOWLEDGE FRAGMENT (v8.3 Bygglaget) ===
+
+@dataclass
+class KnowledgeFragment:
+    """
+    En "bit" av kunskap extraherad av en agent.
+    
+    Ersätter råtext med strukturerad, spårbar information.
+    """
+    content: str                    # "Budgeten sattes till 500k"
+    source_doc_id: str              # UUID till källdokument
+    fragment_type: str              # "temporal", "financial", "action", "fact"
+    confidence: float               # 0.0 - 1.0
+    metadata: Dict = field(default_factory=dict)  # Extra info (datum, valuta, etc.)
+    
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+# === PLANNER STATE ===
+
+@dataclass
+class PlannerState:
+    """
+    State för Planner ReAct-loopen (v8.3 Bygglaget).
+    
+    Key fields:
+    - facts: Lista av extraherade fakta (Bevisen) - append-only
+    - current_synthesis: Aktuell arbetshypotes (Tornet) - uppdateras varje loop
+    - fragments: Lista av KnowledgeFragments från agenter
+    - agents_run: Vilka agenter som körts denna session
+    """
+    session_id: str
+    mission_goal: str
+    query: str
+    iteration: int = 0
+    candidates: List[Dict] = field(default_factory=list)
+    facts: List[str] = field(default_factory=list)
+    current_synthesis: str = ""
+    past_queries: List[str] = field(default_factory=list)
+    gaps: List[str] = field(default_factory=list)
+    search_history: List[Dict] = field(default_factory=list)
+    status: str = "IN_PROGRESS"
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    # Librarian Loop: Track documents that have been "Deep Read" this session
+    read_document_ids: set = field(default_factory=set)
+    # v8.3: Fragments och agenter
+    fragments: List[KnowledgeFragment] = field(default_factory=list)
+    agents_run: List[str] = field(default_factory=list)
+    
+    def to_dict(self) -> dict:
+        """Konvertera till dict för serialisering."""
+        result = asdict(self)
+        # Convert set to list for JSON serialization
+        result['read_document_ids'] = list(self.read_document_ids)
+        # Convert fragments to list of dicts
+        result['fragments'] = [f.to_dict() if hasattr(f, 'to_dict') else f for f in self.fragments]
+        return result
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> 'PlannerState':
+        """Skapa PlannerState från dict."""
+        valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+        # Convert list back to set for read_document_ids
+        if 'read_document_ids' in filtered_data and isinstance(filtered_data['read_document_ids'], list):
+            filtered_data['read_document_ids'] = set(filtered_data['read_document_ids'])
+        return cls(**filtered_data)
 
 
 def _load_taxonomy_context() -> str:
@@ -349,37 +421,30 @@ def _evaluate_state(state: PlannerState, candidates_formatted: str, graph_contex
 
 
 def run_planner_loop(
-    mission_goal: str,
+    intent_data: dict,
     query: str,
-    initial_candidates: list,
-    candidates_formatted: str,
     session_id: str,
     initial_synthesis: str = "",
     initial_facts: list = None,
-    search_fn=None,
     debug_trace: dict = None,
     on_iteration=None,  # Callback för live-output
     on_scan=None,  # Callback för Librarian Loop reasoning display
-    graph_context: str = ""  # Graf-relationer för smarta sökningar
 ) -> dict:
     """
-    ReAct-loop med Pivot or Persevere (v8.2).
+    ReAct-loop med Bygglaget (v8.3).
     
     Arkitektur:
-    1. Tar emot befintligt Torn + Facts från SessionEngine (Pivot or Persevere)
-    2. Plannern avgör själv om kontexten är relevant
-    3. Tvingar minst MIN_ITERATIONS_BEFORE_COMPLETE innan COMPLETE tillåts
-    4. Returnerar state för SessionEngine att spara
+    1. Tar emot intent_data och anropar ContextBuilder själv
+    2. Tar emot befintligt Torn + Facts (Pivot or Persevere)
+    3. Plannern avgör själv om kontexten är relevant
+    4. Returnerar resultat som dict
     
     Args:
-        mission_goal: Uppdrag från IntentRouter
+        intent_data: Output från IntentRouter (mission_goal, keywords, etc.)
         query: Original användarfråga
-        initial_candidates: Kandidater från ContextBuilder (full metadata)
-        candidates_formatted: Formaterad sträng med topp 3 fulltext
         session_id: Unikt session-ID
-        initial_synthesis: Befintligt Torn från SessionEngine (Pivot or Persevere)
-        initial_facts: Befintliga Facts från SessionEngine (Pivot or Persevere)
-        search_fn: Funktion för extra sökningar (optional)
+        initial_synthesis: Befintligt Torn (Pivot or Persevere)
+        initial_facts: Befintliga Facts (Pivot or Persevere)
         debug_trace: Dict för debug-info (optional)
     
     Returns:
@@ -388,18 +453,47 @@ def run_planner_loop(
             - report: Rapport baserad på Tornet
             - current_synthesis: Uppdaterat Torn
             - facts: Uppdaterade Facts
-            - state: PlannerState för SessionEngine att spara
+            - candidates: Lista med kandidater
             - sources_used: Lista med använda filnamn
             - gaps: Vad som saknas
     """
-    # Import format_candidates_for_planner för nya sökningar
+    # Import ContextBuilder (Planner äger nu kontextbygget)
     try:
-        from services.pipeline.context_builder import format_candidates_for_planner, TOP_N_FULLTEXT
+        from services.pipeline.context_builder import build_context, search, format_candidates_for_planner, TOP_N_FULLTEXT
     except ImportError as _import_err:
         LOGGER.debug(f"Fallback-import context_builder: {_import_err}")
-        from context_builder import format_candidates_for_planner, TOP_N_FULLTEXT
+        from context_builder import build_context, search, format_candidates_for_planner, TOP_N_FULLTEXT
     
-    # v8.2: Skapa state med befintligt Torn + Facts (Pivot or Persevere)
+    # --- FAS 1: BYGG KONTEXT ---
+    mission_goal = intent_data.get('mission_goal', query)
+    graph_context = ""
+    
+    LOGGER.debug("Planner: Anropar ContextBuilder...")
+    context_result = build_context(
+        intent_data=intent_data,
+        debug_trace=debug_trace
+    )
+    
+    initial_candidates = context_result.get('candidates_full', [])
+    candidates_formatted = context_result.get('candidates_formatted', '')
+    graph_context = context_result.get('graph_context', '')
+    
+    if context_result.get('status') == 'NO_RESULTS':
+        LOGGER.warning(f"Planner: Inga träffar från ContextBuilder")
+        return {
+            "status": "ABORT",
+            "reason": context_result.get('reason', 'Inga dokument hittades'),
+            "report": "",
+            "current_synthesis": initial_synthesis,
+            "facts": initial_facts or [],
+            "candidates": [],
+            "sources_used": [],
+            "gaps": ["Inga dokument hittades"]
+        }
+    
+    LOGGER.info(f"Planner: Fick {len(initial_candidates)} kandidater från ContextBuilder")
+    
+    # --- FAS 2: SKAPA STATE ---
     state = PlannerState(
         session_id=session_id,
         mission_goal=mission_goal,
@@ -417,6 +511,40 @@ def run_planner_loop(
     
     # Nuvarande kandidater formaterade för prompt
     current_candidates_formatted = candidates_formatted
+    
+    # search_fn för extra sökningar i loopen
+    search_fn = search
+    
+    # --- FAS 2.5: AGENT DELEGATION (v8.3 Bygglaget) ---
+    # Detektera om frågan kräver temporal analys
+    temporal_keywords = ['när', 'vecka', 'datum', 'igår', 'idag', 'förra', 'senaste', 
+                         'december', 'november', 'januari', 'februari', 'mars', 'april',
+                         'maj', 'juni', 'juli', 'augusti', 'september', 'oktober']
+    query_lower = query.lower()
+    is_temporal = any(kw in query_lower for kw in temporal_keywords)
+    
+    if is_temporal and "chronologist" not in state.agents_run:
+        LOGGER.info("Planner: Temporal fråga detekterad, delegerar till Kronologen")
+        try:
+            from services.agents.chronologist import extract_temporal
+            time_filter = intent_data.get('time_filter')
+            fragments = extract_temporal(
+                docs=initial_candidates,
+                anchor_date=datetime.now().strftime("%Y-%m-%d"),
+                time_filter=time_filter
+            )
+            if fragments:
+                state.fragments.extend(fragments)
+                state.agents_run.append("chronologist")
+                LOGGER.info(f"Kronologen extraherade {len(fragments)} temporal fragments")
+                # Lägg till fragments som fakta i Tornet
+                for f in fragments:
+                    if f.content not in state.facts:
+                        state.facts.append(f.content)
+        except ImportError as e:
+            LOGGER.warning(f"Kunde inte ladda Kronologen: {e}")
+        except Exception as e:
+            LOGGER.error(f"Kronologen misslyckades: {e}")
     
     # Debug mode: aktiveras om debug_trace finns
     debug_mode = debug_trace is not None
@@ -496,7 +624,7 @@ def run_planner_loop(
                     "report": report,
                     "current_synthesis": state.current_synthesis,
                     "facts": state.facts,
-                    "state": state,
+                    "candidates": state.candidates,
                     "sources_used": sources,
                     "gaps": state.gaps
                 }
@@ -551,7 +679,7 @@ def run_planner_loop(
                     "report": report,
                     "current_synthesis": state.current_synthesis,
                     "facts": state.facts,
-                    "state": state,
+                    "candidates": state.candidates,
                     "sources_used": sources,
                     "gaps": state.gaps
                 }
@@ -574,7 +702,7 @@ def run_planner_loop(
                     "report": report,
                     "current_synthesis": state.current_synthesis,
                     "facts": state.facts,
-                    "state": state,  # v8.2
+                    "candidates": state.candidates,
                     "sources_used": sources,
                     "gaps": state.gaps
                 }
@@ -585,7 +713,7 @@ def run_planner_loop(
                 "report": "",
                 "current_synthesis": "",
                 "facts": [],
-                "state": state,  # v8.2
+                "candidates": [],
                 "sources_used": [],
                 "gaps": state.gaps
             }
@@ -717,7 +845,7 @@ def run_planner_loop(
         "report": report,
         "current_synthesis": state.current_synthesis,
         "facts": state.facts,
-        "state": state,  # v8.2: För SessionEngine
+        "candidates": state.candidates,
         "sources_used": sources,
         "gaps": state.gaps
     }

@@ -1,10 +1,14 @@
 """
-Session Engine - Pipeline v8.2 "Pivot or Persevere"
+Session Engine - Pipeline v8.3 "Bygglaget"
 
 EN manager som hanterar:
-1. Session state (chat_history + planner_state)
-2. Pipeline orchestration (IntentRouter → ContextBuilder → Planner → Synthesizer)
+1. Session state (chat_history + synthesis/facts som dict)
+2. Pipeline orchestration (IntentRouter → Planner → Synthesizer)
 3. Pivot or Persevere: Plannern avgör kontextrelevans
+
+v8.3 Changes:
+- Planner anropar ContextBuilder internt (Engine är förenklad)
+- Sparar resultat som dict, inte PlannerState
 
 Princip: HARDFAIL > Silent Fallback
 """
@@ -14,8 +18,6 @@ import time
 import uuid
 import yaml
 import logging
-from datetime import datetime
-from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional
 
 LOGGER = logging.getLogger('SessionEngine')
@@ -39,67 +41,23 @@ def _load_config():
 CONFIG = _load_config()
 
 
-# === PLANNER STATE ===
-
-@dataclass
-class PlannerState:
-    """
-    State för Planner ReAct-loopen (v8.2 Pivot or Persevere).
-    
-    Key fields:
-    - facts: Lista av extraherade fakta (Bevisen) - append-only
-    - current_synthesis: Aktuell arbetshypotes (Tornet) - uppdateras varje loop
-    - past_queries: För att tvinga divergens i sökningar
-    """
-    session_id: str
-    mission_goal: str
-    query: str
-    iteration: int = 0
-    candidates: List[Dict] = field(default_factory=list)
-    facts: List[str] = field(default_factory=list)
-    current_synthesis: str = ""
-    past_queries: List[str] = field(default_factory=list)
-    gaps: List[str] = field(default_factory=list)
-    search_history: List[Dict] = field(default_factory=list)
-    status: str = "IN_PROGRESS"
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    # Librarian Loop: Track documents that have been "Deep Read" this session
-    read_document_ids: set = field(default_factory=set)
-    
-    def to_dict(self) -> dict:
-        """Konvertera till dict för serialisering."""
-        result = asdict(self)
-        # Convert set to list for JSON serialization
-        result['read_document_ids'] = list(self.read_document_ids)
-        return result
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> 'PlannerState':
-        """Skapa PlannerState från dict."""
-        valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
-        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
-        # Convert list back to set for read_document_ids
-        if 'read_document_ids' in filtered_data and isinstance(filtered_data['read_document_ids'], list):
-            filtered_data['read_document_ids'] = set(filtered_data['read_document_ids'])
-        return cls(**filtered_data)
-
-
 # === SESSION ENGINE ===
 
 class SessionEngine:
     """
-    Orchestrator för hela pipelinen.
+    Orchestrator för hela pipelinen (v8.3 Bygglaget).
     
     Hanterar:
     - chat_history: Kontext för IntentRouter
-    - planner_state: Tornet + Bevisen (Pivot or Persevere)
+    - Tornet + Bevisen (sparas som dict, inte PlannerState)
     - run_query(): Kör hela pipelinen
     """
     
     def __init__(self):
         self.chat_history: List[dict] = []
-        self.planner_state: Optional[PlannerState] = None
+        # v8.3: Sparar resultat som dict istället för PlannerState
+        self._last_synthesis: str = ""
+        self._last_facts: List[str] = []
         self.last_candidates: List[Dict] = []  # För /show och /export kommandon
         self._session_id = str(uuid.uuid4())[:8]
         LOGGER.info(f"SessionEngine initierad: {self._session_id}")
@@ -125,14 +83,12 @@ class SessionEngine:
         # Lazy imports för att undvika cirkulära beroenden
         try:
             from services.pipeline.intent_router import route_intent
-            from services.pipeline.context_builder import build_context, search
             from services.pipeline.planner import run_planner_loop
             from services.pipeline.synthesizer import synthesize
             from services.engine.session_logger import log_search
         except ImportError as _import_err:
             LOGGER.debug(f"Fallback import: {_import_err}")
             from intent_router import route_intent
-            from context_builder import build_context, search
             from planner import run_planner_loop
             from synthesizer import synthesize
             from session_logger import log_search
@@ -153,76 +109,44 @@ class SessionEngine:
         
         op_mode = intent_data.get('op_mode', 'query')
         delivery_format = intent_data.get('delivery_format', 'Narrativ Analys')
-        mission_goal = intent_data.get('mission_goal', query)
         
         LOGGER.info(f"Intent: op_mode={op_mode}, format={delivery_format}")
         
-        # --- FAS 2: CONTEXT BUILDER ---
-        LOGGER.debug("ContextBuilder...")
-        
-        context_result = build_context(
-            intent_data=intent_data,
-            debug_trace=debug_trace
-        )
-        
-        # Logga sökning
-        stats = context_result.get('stats', {})
-        total_hits = stats.get('lake_hits', 0) + stats.get('vector_hits', 0)
-        log_search(
-            query=query,
-            keywords=intent_data.get('keywords', []),
-            hits=total_hits,
-            intent="v8.2"
-        )
-        
-        if context_result.get('status') == 'NO_RESULTS':
-            LOGGER.warning(f"Inga träffar: {context_result.get('reason')}")
-            return {
-                "status": "NO_RESULTS",
-                "answer": f"Hittade ingen relevant information. {context_result.get('suggestion', '')}",
-                "sources": [],
-                "gaps": ["Inga dokument hittades"]
-            }
-        
-        LOGGER.info(f"Context: {stats.get('after_dedup', 0)} kandidater")
-        
-        # --- FAS 3: PLANNER (Pivot or Persevere) ---
+        # --- FAS 2: PLANNER (v8.3 Bygglaget - anropar ContextBuilder internt) ---
         LOGGER.debug("Planner Loop...")
         
-        # PIVOT OR PERSEVERE: Skicka ALLTID befintligt Torn + Facts
-        initial_synthesis = ""
-        initial_facts = []
+        # PIVOT OR PERSEVERE: Skicka befintligt Torn + Facts
+        initial_synthesis = self._last_synthesis
+        initial_facts = self._last_facts
         
-        if self.planner_state:
-            initial_synthesis = self.planner_state.current_synthesis
-            initial_facts = self.planner_state.facts
+        if initial_synthesis:
             LOGGER.info(f"Pivot or Persevere: Torn={len(initial_synthesis)} chars, Facts={len(initial_facts)}")
         
-        # Hämta graf-kontext för kreativa sökspår
-        graph_context = context_result.get('graph_context', '')
-        
         planner_result = run_planner_loop(
-            mission_goal=mission_goal,
+            intent_data=intent_data,
             query=query,
-            initial_candidates=context_result.get('candidates_full', []),
-            candidates_formatted=context_result.get('candidates_formatted', ''),
             session_id=self._session_id,
             initial_synthesis=initial_synthesis,
             initial_facts=initial_facts,
-            search_fn=search,
             debug_trace=debug_trace,
             on_iteration=on_iteration,
             on_scan=on_scan,
-            graph_context=graph_context
         )
         
-        # Spara nytt state (Plannern har redan gjort Pivot or Persevere)
-        if planner_result.get('state'):
-            self.planner_state = planner_result['state']
-            LOGGER.info(f"State uppdaterat: Torn={len(self.planner_state.current_synthesis)} chars")
+        # Logga sökning (keywords från intent)
+        log_search(
+            query=query,
+            keywords=intent_data.get('keywords', []),
+            hits=len(planner_result.get('candidates', [])),
+            intent="v8.3"
+        )
         
-        # Spara kandidater för /show och /export kommandon
-        self.last_candidates = self.planner_state.candidates if self.planner_state else []
+        # v8.3: Spara resultat som dict (inte PlannerState)
+        self._last_synthesis = planner_result.get('current_synthesis', '')
+        self._last_facts = planner_result.get('facts', [])
+        self.last_candidates = planner_result.get('candidates', [])
+        
+        LOGGER.info(f"Planner: {planner_result.get('status')}, Torn={len(self._last_synthesis)} chars")
         
         LOGGER.info(f"Planner: {planner_result.get('status')}")
         
@@ -273,24 +197,22 @@ class SessionEngine:
     
     def get_synthesis(self) -> str:
         """Hämta aktuellt Torn."""
-        if self.planner_state:
-            return self.planner_state.current_synthesis
-        return ""
+        return self._last_synthesis
     
     def get_facts(self) -> List[str]:
         """Hämta aktuella Bevis."""
-        if self.planner_state:
-            return self.planner_state.facts
-        return []
+        return self._last_facts
     
     def get_last_candidates(self) -> List[Dict]:
         """Hämta senaste sökningens kandidater (för /show och /export)."""
         return self.last_candidates
-    
+
     def clear(self):
         """Nollställ sessionen."""
         self.chat_history = []
-        self.planner_state = None
+        self._last_synthesis = ""
+        self._last_facts = []
+        self.last_candidates = []
         self._session_id = str(uuid.uuid4())[:8]
         LOGGER.info(f"Session nollställd: {self._session_id}")
     
@@ -299,9 +221,9 @@ class SessionEngine:
         return {
             "session_id": self._session_id,
             "history_count": len(self.chat_history),
-            "has_planner_state": self.planner_state is not None,
-            "facts_count": len(self.planner_state.facts) if self.planner_state else 0,
-            "synthesis_length": len(self.planner_state.current_synthesis) if self.planner_state else 0
+            "has_synthesis": bool(self._last_synthesis),
+            "facts_count": len(self._last_facts),
+            "synthesis_length": len(self._last_synthesis)
         }
 
 
@@ -333,14 +255,9 @@ if __name__ == "__main__":
     engine = SessionEngine()
     print(f"Summary: {engine.summary()}")
     
-    # Simulera att vi har ett tidigare Torn
-    engine.planner_state = PlannerState(
-        session_id="test",
-        mission_goal="Testmission",
-        query="Testfråga",
-        facts=["Fakta 1", "Fakta 2"],
-        current_synthesis="Detta är ett test-torn."
-    )
+    # Simulera att vi har ett tidigare Torn (v8.3: direkt på dict)
+    engine._last_synthesis = "Detta är ett test-torn."
+    engine._last_facts = ["Fakta 1", "Fakta 2"]
     
     print(f"Summary efter state: {engine.summary()}")
     print(f"Torn: {engine.get_synthesis()}")
