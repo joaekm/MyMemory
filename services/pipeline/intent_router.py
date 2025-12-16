@@ -188,8 +188,9 @@ def route_intent(query: str, chat_history: list = None, debug_trace: dict = None
         
         # Parsa JSON-svar med robust parser
         text = response.text
-        LOGGER.debug(f"IntentRouter LLM-svar: {text[:500]}...")
+        LOGGER.info(f"IntentRouter RAW: {text}")
         result = parse_llm_json(text, context="intent_router")
+        LOGGER.info(f"IntentRouter PARSED: {result}")
         
         # Validera entities mot taxonomi-noder
         entities = result.get('entities', [])

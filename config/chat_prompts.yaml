@@ -16,11 +16,10 @@ intent_router:
     3. time_filter - Endast om explicit tidsrymd nämns ("i november", "förra veckan")
     
     REGLER:
-    - Keywords ska vara TROGNA frågan - lägg inte till egna ord
-    - Vid uppföljningsfrågor: inkludera ämnet från historiken
-    - Taxonomin ger KONTEXT för mission_goal, men keywords behöver inte matcha den
-    - Om ett sökord matchar en taxonomi-nod (Person, Projekt, Aktör), markera det som entity
-    - Exempel: Om "X" finns i taxonomin under Aktör → entities: ["Aktör: X"]
+    - PRIORITERA keywords som finns i taxonomin - de ger bäst träffar
+    - Om frågan handlar om tid/aktiviteter → använd taxonomi-noder som "Möten", "Händelser"
+    - Om inget specifikt ämne nämns men en tidsperiod → keywords: ["möte", "aktivitet", "arbete"]
+    - Returnera ALDRIG tom keywords-lista
     
     JSON:
     {{

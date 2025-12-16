@@ -42,40 +42,47 @@ def parse_llm_json(text: str, context: str = "unknown") -> dict:
     text = re.sub(r',\s*}', '}', text)
     text = re.sub(r',\s*]', ']', text)
     
-    # Steg 3: Hitta sista giltiga JSON-objekt med raw_decode
-    # (Undviker greedy regex som fångar fel {..} vid blandad text)
-    # Prioriterar objekt ({}) över arrayer ([]) - tar sista av varje typ
+    # Steg 3: Hitta STÖRSTA giltiga JSON-objekt med raw_decode
+    # (Undviker att returnera inre objekt som time_filter istället för yttre)
+    # Prioriterar objekt ({}) över arrayer ([]) - tar STÖRSTA av varje typ
     decoder = json.JSONDecoder()
-    last_object = None
-    last_object_pos = -1
-    last_array = None
-    last_array_pos = -1
+    best_object = None
+    best_object_size = 0
+    best_array = None
+    best_array_size = 0
     
     for i, char in enumerate(text):
         if char == '{':
             try:
                 obj, end = decoder.raw_decode(text, i)
                 if isinstance(obj, dict):
-                    last_object = obj
-                    last_object_pos = i
+                    # Ta STÖRSTA objektet (fler nycklar = mer komplett)
+                    obj_size = len(obj)
+                    if obj_size > best_object_size:
+                        best_object = obj
+                        best_object_size = obj_size
+                        LOGGER.debug(f"[{context}] Kandidat-objekt vid pos {i}: {obj_size} nycklar")
             except json.JSONDecodeError:
                 continue
         elif char == '[':
             try:
                 obj, end = decoder.raw_decode(text, i)
                 if isinstance(obj, list):
-                    last_array = obj
-                    last_array_pos = i
+                    # Ta STÖRSTA arrayen
+                    arr_size = len(obj)
+                    if arr_size > best_array_size:
+                        best_array = obj
+                        best_array_size = arr_size
             except json.JSONDecodeError:
                 continue
     
     # Prioritera objekt över arrayer (LLM-svar är oftast objekt)
-    if last_object is not None:
-        LOGGER.debug(f"[{context}] Hittade JSON-objekt vid position {last_object_pos}")
-        return last_object
-    if last_array is not None:
-        LOGGER.debug(f"[{context}] Hittade JSON-array vid position {last_array_pos}")
-        return last_array
+    if best_object is not None:
+        LOGGER.debug(f"[{context}] Returnerar objekt med {best_object_size} nycklar")
+        return best_object
+    if best_array is not None:
+        LOGGER.debug(f"[{context}] Returnerar array med {best_array_size} element")
+        return best_array
     
     LOGGER.error(f"[{context}] Kunde inte hitta JSON-block i respons: {text[:200]}...")
     raise ValueError(f"HARDFAIL: [{context}] Inget JSON-block hittades i LLM-svar")

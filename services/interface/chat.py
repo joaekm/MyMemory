@@ -441,6 +441,16 @@ def chat_loop(debug_mode=False):
                 console.print(f"[red]Fel: {e}[/red]")
                 continue
             
+            # DEBUG: Visa IntentRouter RAW för diagnostik
+            if debug_mode and debug_trace:
+                if 'intent_router_raw' in debug_trace:
+                    console.print(f"\n[yellow]━━━ IntentRouter RAW ━━━[/yellow]")
+                    console.print(f"{debug_trace['intent_router_raw']}")
+                    console.print(f"[yellow]━━━━━━━━━━━━━━━━━━━━━━━━[/yellow]\n")
+                if 'intent_router' in debug_trace:
+                    ir = debug_trace['intent_router']
+                    console.print(f"[cyan]Parsed: keywords={ir.get('keywords')}, time_filter={ir.get('time_filter')}[/cyan]")
+            
             if result.get('status') == 'NO_RESULTS':
                 console.print(f"[yellow]{result.get('answer', 'Ingen information hittades.')}[/yellow]")
                 continue
@@ -464,5 +474,8 @@ def chat_loop(debug_mode=False):
 if __name__ == "__main__":
     args = parse_args()
     DEBUG_MODE = args.debug or CONFIG.get('debug', False)
+    
+    # DEBUG: Verifiera att debug_mode är korrekt
+    print(f"[STARTUP] args.debug={args.debug}, CONFIG.debug={CONFIG.get('debug', False)}, DEBUG_MODE={DEBUG_MODE}")
     
     chat_loop(debug_mode=DEBUG_MODE)
