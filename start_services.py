@@ -16,11 +16,11 @@ from tools.tool_validate_system import run_startup_checks
 
 # Tjänsterna som ska startas
 SERVICES = [
-    {"path": "services/my_mem_file_retriever.py", "name": "File Retriever"},
-    {"path": "services/my_mem_slack_collector.py", "name": "Slack Collector"},
-    {"path": "services/my_mem_doc_converter.py", "name": "Doc Converter"},
-    {"path": "services/my_mem_transcriber.py", "name": "Transcriber"},
-    {"path": "services/my_mem_vector_indexer.py", "name": "Vector Indexer"},
+    {"path": "services/collectors/file_retriever.py", "name": "File Retriever"},
+    {"path": "services/collectors/slack_collector.py", "name": "Slack Collector"},
+    {"path": "services/processors/doc_converter.py", "name": "Doc Converter"},
+    {"path": "services/processors/transcriber.py", "name": "Transcriber"},
+    {"path": "services/indexers/vector_indexer.py", "name": "Vector Indexer"},
 ]
 
 processes = []
