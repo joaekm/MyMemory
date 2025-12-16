@@ -101,6 +101,15 @@ def _search_lake(keywords: list) -> dict:
     if not keywords:
         return {}
     
+    # Splitta eventuella sammansatta keywords (LLM kan returnera "Adda PoC" som ett keyword)
+    expanded_keywords = []
+    for kw in keywords:
+        if ' ' in kw:
+            expanded_keywords.extend(kw.split())
+        else:
+            expanded_keywords.append(kw)
+    keywords = list(set(expanded_keywords))  # Dedup
+    
     hits = {}
     if not os.path.exists(LAKE_PATH):
         LOGGER.warning(f"Lake path finns inte: {LAKE_PATH}")

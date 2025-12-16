@@ -1,5 +1,4 @@
 import os
-import sys
 import yaml
 import chromadb
 import re
@@ -7,8 +6,6 @@ import datetime
 import logging
 from chromadb.utils import embedding_functions
 
-# Lägg till services i path för import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services.graph_service import GraphStore
 
 # Enkel loggning för CLI-verktyg
@@ -32,16 +29,8 @@ CONFIG = ladda_yaml('my_mem_config.yaml')
 
 LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])
-# Asset sub-folders
-RECORDINGS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_recordings'])
-TRANSCRIPTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_transcripts'])
-DOCUMENTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_documents'])
-SLACK_FOLDER = os.path.expanduser(CONFIG['paths']['asset_slack'])
-SESSIONS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_sessions'])
-ASSET_SUBFOLDERS = [RECORDINGS_FOLDER, TRANSCRIPTS_FOLDER, DOCUMENTS_FOLDER, SLACK_FOLDER, SESSIONS_FOLDER]
-
 CHROMA_PATH = os.path.expanduser(CONFIG['paths']['chroma_db'])
-GRAPH_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])  # Återanvänder config-nyckel för DuckDB
+GRAPH_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
 LOG_FILE = os.path.expanduser(CONFIG['logging']['log_file_path'])
 
 # Hämta extensions
@@ -70,17 +59,7 @@ def get_lake_ids():
 def validera_filer():
     print_header("1. FILSYSTEMS-AUDIT (Strict Mode)")
     
-    # Samla alla filer från undermapparna
-    all_assets = []
-    folder_counts = {}
-    
-    for folder in ASSET_SUBFOLDERS:
-        if os.path.exists(folder):
-            folder_name = os.path.basename(folder)
-            files = [f for f in os.listdir(folder) if not f.startswith('.') and os.path.isfile(os.path.join(folder, f))]
-            folder_counts[folder_name] = len(files)
-            all_assets.extend(files)
-    
+    all_assets = [f for f in os.listdir(ASSET_STORE) if not f.startswith('.')]
     doc_files = [f for f in all_assets if os.path.splitext(f)[1].lower() in DOC_EXTS]
     lake_files = [f for f in os.listdir(LAKE_STORE) if f.endswith('.md') and not f.startswith('.')]
     
@@ -91,15 +70,11 @@ def validera_filer():
             invalid_names.append(f)
 
     print(f"📦 Assets Totalt:     {len(all_assets)} st")
-    for folder_name, count in folder_counts.items():
-        print(f"   - {folder_name}: {count} st")
     
     if invalid_names:
-        print(f"❌ [VARNING] Hittade {len(invalid_names)} filer som bryter mot namnstandarden!")
-        for bad in invalid_names[:10]:  # Visa max 10
+        print(f"❌ [VARNING] Hittade {len(invalid_names)} filer i Assets som bryter mot namnstandarden!")
+        for bad in invalid_names:
             print(f"   - {bad}")
-        if len(invalid_names) > 10:
-            print(f"   ... och {len(invalid_names) - 10} till")
     else:
         print("✅ Alla filer i Assets följer standarden [Namn]_[UUID].")
 
@@ -108,26 +83,25 @@ def validera_filer():
     
     # 1.2 INTEGRITETS-CHECK (Lake vs Assets)
     # Filerna i Lake ska ha EXAKT samma basnamn som dokumenten i Assets.
+    # Ex: Assets: "Rapport_123.pdf" -> Lake: "Rapport_123.md"
     
     asset_bases = {os.path.splitext(f)[0] for f in doc_files}
     lake_bases = {os.path.splitext(f)[0] for f in lake_files}
     
     missing_in_lake = asset_bases - lake_bases
-    zombies_in_lake = lake_bases - asset_bases
+    zombies_in_lake = lake_bases - asset_bases # Filer i sjön som inte har en källa
 
     if len(lake_files) == len(doc_files) and not missing_in_lake:
         print(f"\n✅ BALANS: {len(lake_files)} filer i Sjön matchar antalet källdokument.")
     else:
         if missing_in_lake:
             print(f"\n❌ SAKNAS I LAKE: {len(missing_in_lake)} dokument har inte konverterats!")
-            for m in sorted(list(missing_in_lake)[:10]):
+            for m in sorted(missing_in_lake):
                 print(f"   - {m}")
-            if len(missing_in_lake) > 10:
-                print(f"   ... och {len(missing_in_lake) - 10} till")
         
         if zombies_in_lake:
             print(f"\n⚠️ ZOMBIES I LAKE: {len(zombies_in_lake)} filer i Sjön saknar källfil i Assets:")
-            for z in sorted(list(zombies_in_lake)[:10]):
+            for z in sorted(zombies_in_lake):
                 print(f"   - {z}")
 
     return len(lake_files)
@@ -167,34 +141,29 @@ def validera_chroma(expected_count, lake_ids):
         print(f"❌ KRITISKT FEL: Kunde inte läsa ChromaDB: {e}")
 
 def validera_graf(expected_count, lake_ids):
-    """Validera graf-databasen (DuckDB GraphStore)."""
     print_header("3. GRAF-AUDIT (DuckDB)")
-    
-    if not os.path.exists(GRAPH_PATH):
-        print(f"⚠️ Graf-databas finns inte: {GRAPH_PATH}")
-        print("   Tips: Kör 'python services/my_mem_graph_builder.py' för att skapa")
-        return
-    
+    graph = None
     try:
         graph = GraphStore(GRAPH_PATH, read_only=True)
         stats = graph.get_stats()
         
-        unit_count = stats['nodes'].get('Unit', 0)
-        entity_count = stats['nodes'].get('Entity', 0)
-        concept_count = stats['nodes'].get('Concept', 0)
+        unit_count = stats.get('nodes', {}).get('Unit', 0)
+        entity_count = stats.get('nodes', {}).get('Entity', 0)
+        concept_count = stats.get('nodes', {}).get('Concept', 0)
+        total_edges = stats.get('total_edges', 0)
         
         print(f"🕸️  Graf-noder:")
         print(f"   - Units:    {unit_count} st")
         print(f"   - Entities: {entity_count} st")
         print(f"   - Concepts: {concept_count} st")
-        print(f"   - Kanter:   {stats['total_edges']} st")
+        print(f"   - Kanter:   {total_edges} st")
         
         if unit_count == expected_count:
             print("✅ SYNKAD: Grafen matchar Sjön.")
         else:
             print(f"❌ OSYNKAD: Grafen diffar med {abs(expected_count - unit_count)} noder.")
             
-            # Hämta alla Unit-ID från grafen
+            # Hämta alla Unit-IDs från grafen
             units = graph.find_nodes_by_type("Unit")
             graph_ids = {u['id'] for u in units}
             
@@ -203,20 +172,22 @@ def validera_graf(expected_count, lake_ids):
             missing_in_graph = lake_id_set - graph_ids
             if missing_in_graph:
                 print(f"\n   Saknas i Graf ({len(missing_in_graph)} st):")
-                for uid in list(missing_in_graph)[:10]:
+                for uid in missing_in_graph:
                     filename = lake_ids.get(uid, uid)
                     # Visa namn utan UUID för läsbarhet
                     display_name = filename.rsplit('_', 1)[0] if '_' in filename else filename
                     print(f"   - {display_name}")
-                if len(missing_in_graph) > 10:
-                    print(f"   ... och {len(missing_in_graph) - 10} till")
                 print(f"\n   Tips: Kör 'python services/my_mem_graph_builder.py' för att synka")
         
-        graph.close()
+        return unit_count
 
     except Exception as e:
-        LOGGER.error(f"Kunde inte läsa graf-databasen: {e}")
-        print(f"❌ KRITISKT FEL: Kunde inte läsa graf-databasen: {e}")
+        LOGGER.error(f"Kunde inte läsa GraphStore: {e}")
+        print(f"❌ KRITISKT FEL: Kunde inte läsa GraphStore: {e}")
+        return 0
+    finally:
+        if graph:
+            graph.close()
 
 def rensa_gammal_logg():
     """Rensar loggfilen på rader äldre än 24 timmar."""
@@ -296,16 +267,7 @@ def run_startup_checks():
             print(f"❌ KRITISKT FEL: Kunde inte läsa ChromaDB: {e}")
         
         # Graf (DuckDB)
-        try:
-            if os.path.exists(GRAPH_PATH):
-                graph = GraphStore(GRAPH_PATH, read_only=True)
-                stats = graph.get_stats()
-                graph_count = stats['nodes'].get('Unit', 0)
-                graph.close()
-            validera_graf(lake_c, lake_ids)
-        except Exception as e:
-            LOGGER.error(f"Kunde inte läsa graf-databasen: {e}")
-            print(f"❌ KRITISKT FEL: Kunde inte läsa graf-databasen: {e}")
+        graph_count = validera_graf(lake_c, lake_ids)
     else:
         print("\nIngen data att validera i databaserna.")
     

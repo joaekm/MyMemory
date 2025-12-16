@@ -99,6 +99,7 @@ class SessionEngine:
     def __init__(self):
         self.chat_history: List[dict] = []
         self.planner_state: Optional[PlannerState] = None
+        self.last_candidates: List[Dict] = []  # För /show och /export kommandon
         self._session_id = str(uuid.uuid4())[:8]
         LOGGER.info(f"SessionEngine initierad: {self._session_id}")
     
@@ -219,6 +220,9 @@ class SessionEngine:
             self.planner_state = planner_result['state']
             LOGGER.info(f"State uppdaterat: Torn={len(self.planner_state.current_synthesis)} chars")
         
+        # Spara kandidater för /show och /export kommandon
+        self.last_candidates = self.planner_state.candidates if self.planner_state else []
+        
         LOGGER.info(f"Planner: {planner_result.get('status')}")
         
         # --- FAS 4: SYNTHESIZER ---
@@ -277,6 +281,10 @@ class SessionEngine:
         if self.planner_state:
             return self.planner_state.facts
         return []
+    
+    def get_last_candidates(self) -> List[Dict]:
+        """Hämta senaste sökningens kandidater (för /show och /export)."""
+        return self.last_candidates
     
     def clear(self):
         """Nollställ sessionen."""

@@ -40,7 +40,7 @@ CONFIG = ladda_yaml('my_mem_config.yaml')
 LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 TRANSCRIPTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_transcripts'])
 CHROMA_PATH = os.path.expanduser(CONFIG['paths']['chroma_db'])
-GRAPH_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])  # Återanvänder config-nyckel för DuckDB
+GRAPH_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
 TAXONOMY_FILE = os.path.expanduser(CONFIG['paths']['taxonomy_file'])
 
 # MyMemory root (parent of Lake, Index, Assets) - deriverat från lake_store

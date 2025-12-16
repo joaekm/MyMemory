@@ -8,9 +8,9 @@ Hanterar vanliga LLM-quirks:
 - Whitespace-problem
 """
 
-import re
 import json
 import logging
+import re
 
 LOGGER = logging.getLogger('JsonParser')
 
@@ -38,31 +38,47 @@ def parse_llm_json(text: str, context: str = "unknown") -> dict:
     # Steg 1: Ta bort markdown code fences
     text = text.replace("```json", "").replace("```", "").strip()
     
-    # Steg 2: Försök hitta JSON-block med regex
-    # Matchar { ... } eller [ ... ] på yttersta nivån
-    json_match = re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', text)
+    # Steg 2: Fixa vanliga JSON-fel (trailing commas)
+    text = re.sub(r',\s*}', '}', text)
+    text = re.sub(r',\s*]', ']', text)
     
-    if json_match:
-        json_str = json_match.group(1)
-    else:
-        LOGGER.error(f"[{context}] Kunde inte hitta JSON-block i respons: {text[:200]}...")
-        raise ValueError(f"HARDFAIL: [{context}] Inget JSON-block hittades i LLM-svar")
+    # Steg 3: Hitta sista giltiga JSON-objekt med raw_decode
+    # (Undviker greedy regex som fångar fel {..} vid blandad text)
+    # Prioriterar objekt ({}) över arrayer ([]) - tar sista av varje typ
+    decoder = json.JSONDecoder()
+    last_object = None
+    last_object_pos = -1
+    last_array = None
+    last_array_pos = -1
     
-    # Steg 3: Fixa vanliga JSON-fel
-    # Trailing commas
-    json_str = re.sub(r',\s*}', '}', json_str)
-    json_str = re.sub(r',\s*]', ']', json_str)
+    for i, char in enumerate(text):
+        if char == '{':
+            try:
+                obj, end = decoder.raw_decode(text, i)
+                if isinstance(obj, dict):
+                    last_object = obj
+                    last_object_pos = i
+            except json.JSONDecodeError:
+                continue
+        elif char == '[':
+            try:
+                obj, end = decoder.raw_decode(text, i)
+                if isinstance(obj, list):
+                    last_array = obj
+                    last_array_pos = i
+            except json.JSONDecodeError:
+                continue
     
-    # Steg 4: Parsa
-    try:
-        result = json.loads(json_str)
-        LOGGER.debug(f"[{context}] JSON parsad OK")
-        return result
-    except json.JSONDecodeError as e:
-        LOGGER.error(f"[{context}] JSON parse error: {e}")
-        LOGGER.error(f"[{context}] Extraherad JSON: {json_str[:500]}...")
-        LOGGER.error(f"[{context}] Original respons: {original[:500]}...")
-        raise ValueError(f"HARDFAIL: [{context}] Kunde inte parsa JSON: {e}") from e
+    # Prioritera objekt över arrayer (LLM-svar är oftast objekt)
+    if last_object is not None:
+        LOGGER.debug(f"[{context}] Hittade JSON-objekt vid position {last_object_pos}")
+        return last_object
+    if last_array is not None:
+        LOGGER.debug(f"[{context}] Hittade JSON-array vid position {last_array_pos}")
+        return last_array
+    
+    LOGGER.error(f"[{context}] Kunde inte hitta JSON-block i respons: {text[:200]}...")
+    raise ValueError(f"HARDFAIL: [{context}] Inget JSON-block hittades i LLM-svar")
 
 
 # --- TEST ---
@@ -91,7 +107,21 @@ if __name__ == "__main__":
     {"selected_ids": ["doc1", "doc2"], "reasoning": "Dessa dokument är relevanta"}'''
     print(f"Test 5: {parse_llm_json(test5, 'test5')}")
     
+    # Test 6: Flera JSON-liknande strukturer - ska ta SISTA giltiga
+    test6 = '''DOK 1 ([ID: abc-123]): {namn: "test"} - Kasta
+DOK 2 ([ID: def-456]): Innehåller data - Kasta
+
+Slutsats:
+
+{"keep_ids": ["xyz-789"], "discard_ids": ["abc-123", "def-456"]}'''
+    result6 = parse_llm_json(test6, 'test6')
+    assert "keep_ids" in result6, "Test 6 borde hitta sista JSON med keep_ids"
+    print(f"Test 6: {result6}")
+    
     print("Alla tester passerade!")
+
+
+
 
 
 

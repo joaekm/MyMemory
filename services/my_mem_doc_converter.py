@@ -8,6 +8,7 @@ import json
 import threading
 import re
 import zoneinfo
+import atexit
 
 # Lägg till projektroten i sys.path för att hitta services-paketet
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -42,7 +43,8 @@ try:
         get_canonical_from_graph as get_canonical,
         add_entity_alias,
         get_entity,
-        upgrade_canonical
+        upgrade_canonical,
+        close_db_connection
     )
 except ImportError:
     try:
@@ -51,12 +53,16 @@ except ImportError:
             get_canonical_from_graph as get_canonical,
             add_entity_alias,
             get_entity,
-            upgrade_canonical
+            upgrade_canonical,
+            close_db_connection
         )
     except ImportError as e:
         raise ImportError(
             "HARDFAIL: my_mem_graph_builder.py saknas eller har fel."
         ) from e
+
+# Registrera cleanup vid exit för att stänga databasanslutningar
+atexit.register(close_db_connection)
 
 # --- CONFIG LOADER ---
 def ladda_yaml(filnamn, strict=True):

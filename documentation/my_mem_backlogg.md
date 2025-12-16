@@ -106,6 +106,25 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
     * *Ursprung:* OBJEKT-53.
     * *Anledning:* Kan implementeras ovanpå SessionEngine. Slås ihop med OBJEKT-44/48.
 
+* **LÖST-60:** JSON-parser robusthet (2025-12-16).
+    * *Problem:* Greedy regex `(\{[\s\S]*\})` matchade från första `{` till sista `}`, vilket inkluderade text före JSON.
+    * *Lösning:* Ersatt med `json.JSONDecoder().raw_decode()` som hittar sista giltiga JSON-objekt.
+    * *Fil:* `services/utils/json_parser.py`
+
+* **LÖST-61:** Librarian ID-matchning (2025-12-16).
+    * *Problem:* `_format_candidate_for_scan()` trunkerade ID:n till 12 tecken, men matchning gjordes mot fulla ID:n → alltid 0 behållna.
+    * *Lösning:* Tog bort `[:12]` trunkering.
+    * *Fil:* `services/planner.py`
+
+* **LÖST-62:** Keyword-splittning (2025-12-16).
+    * *Problem:* IntentRouter returnerade ibland sammansatta keywords (`"Adda PoC"` som ett ord) som Lake-sökning inte hittade.
+    * *Lösning:* `_search_lake()` splittar nu keywords på mellanslag innan sökning.
+    * *Fil:* `services/context_builder.py`
+
+* **LÖST-63:** Chattkommandon /show och /export (2025-12-16).
+    * *Funktion:* `/show` visar filnamn (utan UUID) från senaste sökningen. `/export` skapar symlinks för top 10 (på score) till hotfolder.
+    * *Filer:* `services/my_mem_chat.py`, `services/utils/export_search.py`
+
 ## Öppna Objekt (Nästa Fas)
 
 * **OBJEKT-41 (Prio 1 - UTVÄRDERA):** Verifiera **"Aggregerad Insikt"** i Pipeline v8.2.
@@ -230,6 +249,43 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
         2. Rensa taxonomin
         3. Uppdatera Dreamer att konsolidera entiteter till Graf
     * *Framgångskriterium:* Taxonomin har 0 individnamn.
+
+* **OBJEKT-54 (Prio 1 - VISION):** Implementera **K som Portabel Kontext**.
+    * *Insikt (2025-12-16):* MyMem är ett "Context Assembly Tool" – det bygger K, inte bara svarar.
+    * *K innehåller:*
+        - Tornet (current_synthesis): Arbetshypotes
+        - Bevisen (facts): Extraherade fakta
+        - Kandidater: Pekare till dokument
+    * *Mål:*
+        1. `/export-context` – Exportera K som Markdown-artefakt
+        2. K kan tas till valfritt AI-verktyg (Gemini, Claude, ChatGPT...)
+    * *Format:*
+        ```markdown
+        # Kontext: [Intent]
+        ## Tornet (Arbetshypotes)
+        ## Bevisen (Fakta)
+        ## Källor
+        ```
+    * *Se:* Konflikt 48-49 i `my_mem_koncept_logg.md`
+
+* **OBJEKT-55 (Prio 2 - VISION):** Implementera **Multi-Agent Planner**.
+    * *Insikt (2025-12-16):* Domän-specialiserade agenter är överlägsen plats-specialisering.
+    * *Agenter:*
+        | Agent | Domän | Extraherar |
+        |-------|-------|------------|
+        | Kronologen | Tid & Händelser | Timeline |
+        | Projektledaren | Actions & Beslut | Tasks + owners |
+        | Ekonomen | Siffror & Budget | Numeriska fakta |
+        | Relationisten | Personer & Org | Entiteter |
+        | Strategen | Varför & Vart | Övergripande kontext |
+    * *Arkitektur:*
+        - Planner analyserar I → Aktiverar relevanta agenter
+        - Agenter gräver parallellt i MD
+        - Koordinerar bitar till K
+        - Bygger våning av Tornet
+        - Analyserar gaps → Ny iteration
+    * *Status:* Vision – nuvarande Planner är single-agent.
+    * *Se:* Konflikt 50 i `my_mem_koncept_logg.md`
 
 * **OBJEKT-32 (Prio 2):** Implementera **"Quick Save"** (Read/Write) i Chatten.
     * *Mål:* Möjlighet att spara text/tankar direkt till `Assets` inifrån chatten ("Kom ihåg att...").

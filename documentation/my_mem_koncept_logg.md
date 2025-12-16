@@ -780,3 +780,143 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
     4. **Testbarhet:** Engine kan enhetstestas utan UI
 
 * **Backlogg:** OBJEKT-49 (MyMemory Engine / API-separation)
+
+---
+
+## Konflikt 48: MyMem som Context Assembly Tool (2025-12-16)
+
+### Insikt: K (Kontext) är produkten, inte SY (Syntes)
+
+* **Observation:** Under arbete med Gemini insåg användaren att varje Intent (I) bygger en Kontext (K). Denna K kan sedan:
+    1. **Syntetiseras** av MyMem (SY)
+    2. **Exporteras** till valfritt AI-verktyg (Gemini, Claude, ChatGPT, Cursor...)
+
+* **Nyckelinsikt:** MyMem äger inte reasoning – det äger **kunskapsbasen och context building**.
+
+* **Modell:**
+    ```
+    ┌─────────────────────────────────────────────────┐
+    │  MyMem = Context Assembly Tool                   │
+    │                                                  │
+    │  Min Data (MD) + Intent (I) → Kontext (K)       │
+    └─────────────────────────────────────────────────┘
+                            │
+                            ▼
+                  ┌─────────────────┐
+                  │    Export K     │
+                  └────────┬────────┘
+                           │
+             ┌─────────────┼─────────────┐
+             ▼             ▼             ▼
+          Gemini        Claude        Cursor
+          ChatGPT       Copilot       ...
+    ```
+
+* **K som interchange format:**
+    ```markdown
+    # Kontext: [Intent]
+    Byggd: [datum]
+
+    ## Tornet (Arbetshypotes)
+    [current_synthesis]
+
+    ## Bevisen (Fakta)
+    - [fact₁]
+    - [fact₂]
+
+    ## Källor
+    - dokument₁.md
+    - dokument₂.md
+    ```
+
+* **Implementation (LÖST-63):**
+    - `/show` – Visa K:s kandidater
+    - `/export` – Exportera K:s dokument som symlinks
+    - **Framtid:** `/export-context` – Exportera K som artefakt (Tornet + Bevisen + Källor)
+
+* **Backlogg:** OBJEKT-54 (K som Portabel Kontext)
+
+---
+
+## Konflikt 49: K = Bitar, inte Dokument (2025-12-16)
+
+### Insikt: Kontext består av extraherade fragment
+
+* **Observation:** K är inte en lista med dokument. K består av **bitar** hämtade från Min Data (MD).
+
+* **Metafor:**
+    | Koncept | Metafor |
+    |---------|---------|
+    | **I (Intent)** | Ritningen |
+    | **MD (Min Data)** | Stenbrott (Lake + Index) |
+    | **Agenter** | Arbetare som gräver |
+    | **K (Kontext)** | Utvalda stenar/bitar |
+    | **Tornet** | Struktur byggd av bitarna |
+    | **SY** | Färdig produkt |
+
+* **Vad K faktiskt innehåller:**
+    - **Bevisen (facts)**: Extraherade bitar ("Adda PoC startade i november")
+    - **Tornet (current_synthesis)**: Syntes av bitar
+    - **Kandidater**: *Pekare* till dokument, inte bitarna själva
+
+* **Konsekvens för /export:**
+    - Nuvarande: Exporterar dokument (pekare)
+    - Bättre: Exportera K som artefakt (Tornet + Bevisen + Källor)
+    - K:s värde ligger i *strukturen*, inte rådata
+
+---
+
+## Konflikt 50: Multi-Agent Planner (Vision 2025-12-16)
+
+### Insikt: Domän-specialiserade agenter > Plats-specialiserade
+
+* **Frågeställning:** Ska agenter specialiseras på VAR de söker (Lake/Vektor/Graf) eller VAD de förstår (Kronologi/Ekonomi/Projektledning)?
+
+* **Beslut:** **Domän-specialisering är överlägsen.**
+
+* **Resonemang:**
+    - Ett mötesprotokoll innehåller BÅDE tidslinje, actions OCH budget
+    - En "Lake-agent" hittar dokumentet men förstår inte *vad* som är viktigt
+    - En **Ekonom-agent** vet att leta efter siffror, belopp, "budget" – oavsett var
+
+* **Vision: Domän-agenter:**
+    | Agent | Domän | Letar efter | Extraherar till K |
+    |-------|-------|-------------|-------------------|
+    | **Kronologen** | Tid & Händelser | Datum, sekvenser | Timeline |
+    | **Projektledaren** | Actions & Beslut | "beslutade", deadlines | Tasks + owners |
+    | **Ekonomen** | Siffror & Budget | Belopp, procent | Numeriska fakta |
+    | **Relationisten** | Personer & Org | Namn, roller | Entiteter |
+    | **Strategen** | Varför & Vart | Vision, mål | Övergripande kontext |
+
+* **Arkitektur:**
+    ```
+    Intent: "Hur går Adda-budgeten?"
+               │
+               ▼
+         Planner analyserar I
+               │
+               ├── Aktivera: Ekonomen (siffror)
+               ├── Aktivera: Kronologen (senaste status)
+               └── Aktivera: Projektledaren (vem ansvarar?)
+               │
+               ▼
+         Agenter gräver parallellt i MD
+               │
+               ▼
+         Koordinera bitar till K
+               │
+               ▼
+         Bygg våning av Tornet
+               │
+               ▼
+         Analysera: Vad saknas? → Ny iteration
+    ```
+
+* **Koppling till OTS-taxonomin:**
+    - Strategen ↔ Strategisk nivå (Vision, Kultur, Affär)
+    - Projektledaren ↔ Taktisk nivå (Projekt, Metodik)
+    - Kronologen ↔ Operativ nivå (Händelser, Admin)
+
+* **Status:** Vision – ej implementerad. Nuvarande Planner är single-agent.
+
+* **Backlogg:** OBJEKT-55 (Multi-Agent Planner)

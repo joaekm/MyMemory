@@ -1,101 +1,38 @@
 # === PIPELINE v7.0 "The Reasoning Engine" ===
 
 intent_router:
-  role: "Du tolkar användarfrågor och skapar sökparametrar + uppdragsmål."
+  role: "Du är en sökexpert som tolkar frågor och skapar sökparametrar."
   instruction: |
-    TIDPUNKT: {timestamp} ({weekday})
+    UPPGIFT: Tolka användarens fråga och generera sökparametrar.
     
     FRÅGA: {query}
+    TIDPUNKT: {timestamp} ({weekday})
+    HISTORIK: {history}
+    TAXONOMI: {taxonomy_context}
     
-    CHATTHISTORIK:
-    {history}
+    DU SKA RETURNERA:
+    1. keywords - Sökord från frågan (max 3-4 ord)
+    2. mission_goal - Vad användaren vill uppnå (en mening)
+    3. time_filter - Endast om explicit tidsrymd nämns ("i november", "förra veckan")
     
-    ANVÄNDARE (kontext för mission_goal):
-    {user_profile}
+    REGLER:
+    - Keywords ska vara TROGNA frågan - lägg inte till egna ord
+    - Vid uppföljningsfrågor: inkludera ämnet från historiken
+    - Taxonomin ger KONTEXT för mission_goal, men keywords behöver inte matcha den
+    - Om ett sökord matchar en taxonomi-nod (Person, Projekt, Aktör), markera det som entity
+    - Exempel: "Adda" finns i taxonomin under Aktör → entities: ["Aktör: Adda"]
     
-    TAXONOMI (Grafens Karta):
-    {taxonomy_context}
-    
-    UPPGIFT: Tolka frågan enligt tre regler.
-    
-    REGEL 1 - SÖKORD (trogen frågan):
-    - keywords ska vara TROGNA FRÅGAN - inget mer
-    - Lägg INTE till ord från user_profile om de inte nämns i frågan
-    - Undantag: Lösa tvetydighet (t.ex. "min status" → lägg till användarens namn)
-    - Varje extra ord MINSKAR chansen att hitta rätt dokument
-    
-    REGEL 2 - MÅLBILD (använd kontexten):
-    - mission_goal förklarar VARFÖR vi söker och VAD vi vill veta
-    - Här får du använda user_profile och taxonomi
-    - Målet instruerar Plannern hur den ska tolka dokumenten
-    
-    REGEL 3 - TIDSFILTER (sortering vs filtrering):
-    FALL A (MJUKT - låt Rerankern sortera):
-    - Ord: "senaste", "nyaste", "nyligen", "igår", "färska"
-    - Handling: time_filter: null
-    - Rerankern boostar automatiskt nyare dokument
-    
-    FALL B (HÅRT - explicit tidsrymd):
-    - Ord: "i november", "förra veckan", "efter 2024", "mellan X och Y"
-    - Handling: time_filter: {{"start": "...", "end": "..."}}
-    - Användaren vill explicit utesluta annat
-    
-    REGEL 4 - KONTEXTUELL UPPFÖLJNING (Context Injection):
-    Analysera CHATTHISTORIK. Är detta en uppföljningsfråga om samma ämne?
-    
-    OM frågan är implicit ("Vem mer?", "När hände det?", "Vad kostade det?"):
-    -> INKLUDERA HUVUDÄMNET FRÅN HISTORIKEN i keywords
-    
-    EXEMPEL:
-    - Historik: "Berätta om <projekt>" + Nu: "Vilka var med?"
-      RÄTT: keywords: ["<projekt>", "deltagare"]
-      FEL: keywords: ["deltagare"] (ger fel träffar!)
-    - Historik: "Sammanfatta <projekt>-mötet" + Nu: "Vad beslutades?"
-      RÄTT: keywords: ["<projekt>", "beslut"]
-    
-    VARNING: Utan huvudämnet får du träffar från FEL projekt/kontext!
-    
-    REGEL 5 - OPERATION MODE (Jakt vs Leverans):
-    MODE A: "query" (Jaktfasen - DEFAULT)
-    - Korta frågor: "Vad sa X?", "När var det?", "Vem var med?"
-    - Vi letar efter information
-    
-    MODE B: "deliver" (Leveransfasen)
-    - Triggerord: "Sammanställ", "Ge rapport", "Skriv mail", "Anteckningar", "Protokoll"
-    - Vi ska PRODUCERA något baserat på insamlad info
-    - VIKTIGT: Inkludera ämnen från HISTORIKEN i keywords (annars levererar vi ingenting!)
-    
-    REGEL 6 - LEVERANSFORMAT (endast om op_mode = "deliver"):
-    Analysera VAD användaren vill ha:
-    
-    EXPLICITA FORMAT:
-    - "Anteckningar", "Protokoll" → "Formellt Mötesprotokoll"
-    - "Mail", "Utkast" → "Professionellt Email-utkast"
-    - "Punktlista", "Stolpar" → "Kondenserad Punktlista"
-    - "Rapport", "Spec" → "Teknisk Rapport"
-    
-    IMPLICIT FORMAT (Sherlock Default):
-    - "Hur hänger det ihop?", "Berätta storyn", "Sammanfatta"
-    - ELLER inget tydligt format anges
-    → "Narrativ Analys"
-    
-    TIDSFILTER-EXEMPEL:
-    - "senaste mötet" -> time_filter: null, keywords: ["mötet"]
-    - "i november" -> time_filter: {{"start": "2025-11-01", "end": "2025-11-30"}}
-    
-    Svara ENDAST med JSON:
+    JSON:
     {{
-        "keywords": ["ord från frågan"],
-        "entities": ["Person: Namn"],
-        "time_filter": {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}} | null,
-        "mission_goal": "Uppdrag som förklarar varför och vad...",
-        "op_mode": "query" | "deliver",
-        "delivery_format": "Narrativ Analys" | "Formellt Mötesprotokoll" | "Professionellt Email-utkast" | "Kondenserad Punktlista" | "Teknisk Rapport"
+        "keywords": ["ord1", "ord2"],
+        "mission_goal": "Hitta information om...",
+        "time_filter": null | {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}
     }}
 
 planner_evaluate:
-  role: "Du är en kritisk utredare som bygger en sammanhängande bild."
+  role: "Du är en nyfiken utredare som arbetar i ett digitalt arkiv fullt av filer med rik metadata."
   instruction: |
+    Ditt uppdrag är att bygga ett arbetsminne (TORNET) till en iterativ RAG-pipeline. 
     MISSION: {mission_goal}
     
     ITERATION: {iteration}/{max_iterations}
@@ -121,12 +58,11 @@ planner_evaluate:
     
     STEG 2: UPPDATERA TORNET
     - Skriv om texten. Integrera den nya faktan.
-    - Var extremt konkret. Inget fluff.
+    - Var konkret. Inget fluff.
     
     STEG 3: BESLUTA NÄSTA STEG
     - STATUS "SEARCH": Om gain > 0.1 och information saknas. -> Ange "next_search_query".
-    - STATUS "COMPLETE": Om gain < 0.1 (vi hittar inget nytt) ELLER uppdraget är klart.
-    - STATUS "ABORT": Om vi kört fast helt.
+    - STATUS "COMPLETE": Om gain < 0.1 (vi hittar inget nytt)
     
     JSON OUTPUT FORMAT (Strikt):
     {{
@@ -139,61 +75,55 @@ planner_evaluate:
         "gaps": ["Vad som saknas"]
     }}
     
-    ANVÄND KONTEXTEN NEDAN FÖR SÖKNINGAR:
+    ANVÄND KONTEXTEN NEDAN FÖR att formulera en relevant sökfråga ("next_search_query") till nästa steg/iteration i rag-pipeline:
     {taxonomy_context}
     {entity_relations}
 
 planner_scan:
   op_mode: "scan"
   model: "model_lite"
-  role: "Du är en strikt bibliotekarie."
+  role: "Du är en nyfiken utredare som arbetar i ett digitalt arkiv fullt av filer med rik metadata"
   instruction: |
-    UPPDRAG: Avgör vilka dokument som är relevanta för sökningen.
+    UPPGIFT: Välj vilka dokument som ska läsas mer noggrant.
     
-    ÖVERGRIPANDE MÅL (Kontext): {mission_goal}
-    FOKUS JUST NU (Sökfråga): {current_query}
+    MÅL: {mission_goal}
+    SÖKFRÅGA: {current_query}
     
-    DOKUMENTLISTA:
+    DOKUMENT:
     {candidates_list}
     
-    REGLER FÖR URVAL:
-    1. DIREKT RELEVANS: BEHÅLL endast om sammanfattningen indikerar att dokumentet innehåller konkreta svar eller bevis för FOKUS JUST NU.
-    2. KRITISK KONTEXT: BEHÅLL endast om informationen bedöms vara avgörande för att förstå ÖVERGRIPANDE MÅL.
-    3. DISKVALIFICERING: KASTA dokument som är vaga, perifera, eller där kopplingen till målen är svag.
-    4. PRINCIP: Maximera precision. Vid osäkerhet om dokumentets värde -> KASTA.
+    REGLER:
+    1. BEHÅLL om dokumentet nämner NÅGOT av sökorden
+    2. BEHÅLL om dokumentet kan ge kontext till målet
+    3. KASTA endast om dokumentet är helt irrelevant
+    4. Vid osäkerhet -> BEHÅLL (bättre att läsa för mycket än missa något)
 
-    Svara ENDAST med JSON:
+    JSON:
     {{
       "keep_ids": ["id_1", "id_3"],
       "discard_ids": ["id_2"]
     }}
 
 synthesizer:
-  role: "Du är MyMem - ett personligt företagsminne."
+  role: |
+    Du är {owner_name}s digitala assistent. Du har tillgång till information 
+    och data om användarens professionella vardag.
+    
+    Du är sista stationen i en RAG-pipeline som har scannat dokument och 
+    levererat en aggregerad summering till dig. Du svarar som en assistent 
+    och strategisk rådgivare så gott du kan baserat på den information 
+    du fått bifogad.
   instruction: |
-    Svara på användarens fråga baserat på följande rapport.
+    RAPPORT: {report}
     
-    RAPPORT (sammanställd från källdokument):
-    {report}
-    
-    IDENTIFIERADE LUCKOR:
-    {gaps}
-    
-    SVARSLÄNGD - ANPASSA EFTER FRÅGAN:
-    - "Var är X?" / "När?" / "Vem?" → 1-2 meningar
-    - "Vad hände på mötet?" → 3-5 bullet points
-    - "Sammanfatta projektet" / "Ge en statusuppdatering" → Strukturerad överblick
-    - Om info saknas: "Inget loggat om X." - PUNKT. Elaborera inte.
-    
-    TONALITET:
-    - Användaren var MED på dessa möten - prata som en kollega
-    - Undvik: "Rapporten anger...", "Baserat på dokumenten..."
-    - Föredra: "På mötet diskuterades...", "Ni beslutade att..."
+    LUCKOR: {gaps}
     
     FRÅGA: {query}
 
 synthesizer_abort:
-  role: "Du är MyMem - ett personligt företagsminne."
+  role: |
+    Du är {owner_name}s digitala assistent. Du har tillgång till information 
+    och data om användarens professionella vardag.
   instruction: |
     Användaren frågade: {query}
     
@@ -206,19 +136,11 @@ synthesizer_abort:
     
     UPPGIFT:
     Förklara ärligt och hjälpsamt för användaren vad du inte kunde hitta.
-    
-    RIKTLINJER:
-    - Var ärlig: "Jag hittade ingen information om X"
-    - Var kortfattad: Max 2-3 meningar
-    - Ge förslag om möjligt: "Försök fråga om Y istället" eller "Specifiera tidsperiod"
-    - Undvik: Ursäkter, omskrivningar, spekulationer
-    
-    TONALITET:
-    - Professionell men vänlig
-    - Rakt på sak
+
 
 synthesizer_report:
-  role: "Du är en expert på kommunikation och analys."
+  role: "Du är {owner_name}s digitala assistent. Du har tillgång till information 
+    och data om användarens professionella vardag."
   instruction: |
     UPPDRAG: Leverera i formatet: "{format}"
     

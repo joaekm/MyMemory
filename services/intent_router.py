@@ -4,8 +4,9 @@ IntentRouter - Pipeline v7.0 "The System-Aware Router"
 Ansvar:
 - Skapa ett Kontextuellt Mission Goal
 - Använda Taxonomin som "Grafens Karta"
-- Använda User Profile för användarkontext
 - Extrahera keywords, entities och time_filter
+
+OBS: Profil har tagits bort från IntentRouter. Endast Synthesizer vet vem användaren är.
 """
 
 import os
@@ -58,7 +59,6 @@ LOGGER = logging.getLogger('IntentRouter')
 API_KEY = CONFIG['ai_engine']['api_key']
 MODEL_LITE = CONFIG['ai_engine']['models']['model_lite']
 TAXONOMY_FILE = os.path.expanduser(CONFIG['paths'].get('taxonomy_file', '~/MyMemory/Index/my_mem_taxonomy.json'))
-USER_PROFILE_FILE = os.path.expanduser(CONFIG['paths'].get('user_profile', '~/MyMemory/Index/user_profile.yaml'))
 
 
 def _load_taxonomy_nodes() -> list:
@@ -103,50 +103,9 @@ def _load_taxonomy_str() -> str:
         return ""
 
 
-def _load_user_profile() -> str:
-    """Ladda och formatera användarprofil för prompt."""
-    if not os.path.exists(USER_PROFILE_FILE):
-        LOGGER.warning(f"User profile saknas: {USER_PROFILE_FILE}")
-        return "(Ingen användarprofil laddad)"
-    
-    try:
-        with open(USER_PROFILE_FILE, 'r', encoding='utf-8') as f:
-            profile = yaml.safe_load(f)
-        
-        # Formatera till läsbar text
-        identity = profile.get('identity', {})
-        context = profile.get('professional_context', {})
-        relations = profile.get('relations', {})
-        prefs = profile.get('preferences', {})
-        
-        lines = [
-            f"Namn: {identity.get('name', 'Okänd')}",
-            f"Roll: {identity.get('role', 'Okänd')}",
-            f"Företag: {identity.get('company', 'Okänt')}",
-        ]
-        
-        if context.get('current_focus'):
-            lines.append(f"Fokus: {', '.join(context['current_focus'])}")
-        
-        if relations.get('direct_reports'):
-            lines.append(f"Team: {', '.join(relations['direct_reports'])}")
-        
-        if relations.get('key_clients'):
-            lines.append(f"Nyckelkunder: {', '.join(relations['key_clients'])}")
-        
-        if prefs.get('communication_style'):
-            lines.append(f"Kommunikationsstil: {prefs['communication_style']}")
-        
-        return "\n".join(lines)
-    except Exception as e:
-        LOGGER.warning(f"Kunde inte ladda user profile: {e}")
-        return "(Kunde inte ladda användarprofil)"
-
-
 # Ladda vid uppstart
 TAXONOMY_NODES = _load_taxonomy_nodes()
 TAXONOMY_CONTEXT = _load_taxonomy_str()
-USER_PROFILE = _load_user_profile()
 
 # AI Client (lazy init)
 _AI_CLIENT = None
@@ -215,7 +174,6 @@ def route_intent(query: str, chat_history: list = None, debug_trace: dict = None
         weekday=weekday,
         query=query,
         history=history_text,
-        user_profile=USER_PROFILE,
         taxonomy_context=TAXONOMY_CONTEXT
     )
     

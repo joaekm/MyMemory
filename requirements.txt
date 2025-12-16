@@ -6,9 +6,6 @@ watchdog
 # Config & Metadata
 pyyaml
 
-# Datumhantering (Time-Aware Reranking)
-python-dateutil
-
 # Text-extrahering (Dokument)
 pypdf
 python-docx
@@ -21,8 +18,8 @@ tabulate            # Krävs för df.to_markdown()
 # AI & API
 google-genai
 
-# --- NYTT FÖR INDEXERAREN (OBJEKT-4) ---
-duckdb              # Relationell databas (Graf via SQL)
+# --- DATABASER ---
+duckdb              # SQL-databas för graf (ersätter kuzu)
 chromadb            # Vektordatabas (Inbäddad)
 sentence-transformers # För att skapa embeddings lokalt (sparar pengar/tid)
 

@@ -1,6 +1,9 @@
 import os
 import sys
 
+# Lägg till projektroten i sys.path för att hitta services-paketet
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Tysta tqdm/SentenceTransformer progress bars
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -360,6 +363,42 @@ def chat_loop(debug_mode=False):
                     console.print("[yellow]Format: /learn NAMN = ALIAS (Person|Aktör|Projekt)[/yellow]")
                     console.print("[dim]Exempel: /learn Cenk Bisgen = Sänk[/dim]")
                     continue
+            
+            # === /show KOMMANDO - Visa senaste sökresultat ===
+            if query.strip() == '/show':
+                candidates = engine.get_last_candidates()
+                if not candidates:
+                    console.print("[yellow]Ingen tidigare sökning att visa.[/yellow]")
+                    continue
+                console.print(f"\n[bold cyan]Filer ({len(candidates)} st):[/bold cyan]")
+                for c in candidates:
+                    # Ta bort UUID från filnamn för läsbarhet
+                    fname = c.get('filename', c.get('id', 'Okänd'))
+                    clean_name = re.sub(r'_[a-f0-9-]{36}\.md$', '.md', fname)
+                    console.print(f"  • {clean_name}")
+                continue
+            
+            # === /export KOMMANDO - Exportera till hotfiles ===
+            if query.strip() == '/export':
+                candidates = engine.get_last_candidates()
+                if not candidates:
+                    console.print("[yellow]Ingen tidigare sökning att exportera.[/yellow]")
+                    continue
+                
+                from services.utils.export_search import export_candidates
+                hot_folder = CONFIG['paths'].get('hot_folder', '~/Downloads/MyMem Hotfiles')
+                lake_path = CONFIG['paths'].get('lake_store', '~/MyMemory/Lake')
+                
+                result = export_candidates(candidates, hot_folder, lake_path)
+                
+                if result['status'] == 'OK':
+                    if result.get('total', 0) > result['count']:
+                        console.print(f"[green]✓ Exporterade top {result['count']} av {result['total']} filer till {result['folder']}[/green]")
+                    else:
+                        console.print(f"[green]✓ Exporterade {result['count']} filer till {result['folder']}[/green]")
+                else:
+                    console.print("[yellow]Inga filer att exportera.[/yellow]")
+                continue
             
             # === KOLLA OM DET ÄR NATURLIGT SPRÅK FEEDBACK ===
             feedback_phrases = ["är samma", "heter egentligen", "kallas också", "är alias för"]

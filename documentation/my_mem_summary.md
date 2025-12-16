@@ -77,6 +77,11 @@ SessionEngine → IntentRouter → ContextBuilder → Planner (ReAct) → Synthe
 - **Pivot or Persevere:** Befintligt Torn+Facts skickas till nya frågor
 - **Librarian Loop:** Two-stage retrieval (scan + deep read)
 
+**Chattkommandon:**
+- `/show` - Visa filnamn från senaste sökningen
+- `/export` - Exportera top 10 filer till hotfolder (symlinks)
+- `/learn` - Lär systemet nya alias
+
 ## 5. Stresstestning: Första Simuleringen
 
 **Datum:** 2025-12-03
@@ -158,6 +163,6 @@ Definierade i `.cursorrules`:
 | UI | Rich (CLI) |
 
 ---
-*Senast uppdaterad: 2025-12-15*
+*Senast uppdaterad: 2025-12-16*
 *Se `my_mem_arkitektur.md` för teknisk implementation.*
 *Se `my_mem_backlogg.md` för aktiva objekt.*

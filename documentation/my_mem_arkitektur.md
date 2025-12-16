@@ -138,6 +138,13 @@ Input → IntentRouter → ContextBuilder → Planner (ReAct) → Synthesizer �
 4. If COMPLETE: Returnera Tornet som rapport
 ```
 
+**Chattkommandon:**
+| Kommando | Funktion |
+|----------|----------|
+| `/show` | Visa filnamn (utan UUID) från senaste sökningen |
+| `/export` | Skapa symlinks i hotfolder (top 10 på score) |
+| `/learn` | Lär systemet nya alias (Entity Resolution) |
+
 **Konfiguration:**
 - `chat_prompts.yaml`: Alla system-instruktioner
 - `my_mem_config.yaml`: Reranking-parametrar (boost_strength, top_n_fulltext)
@@ -185,6 +192,8 @@ paths:
   chroma_db: "~/MyMemory/Index/ChromaDB"
   graph_db: "~/MyMemory/Index/GraphDB"  # DuckDB grafdatabas (LÖST-54)
   taxonomy_file: "~/MyMemory/Index/my_mem_taxonomy.json"
+  # Export
+  hot_folder: "~/Downloads/MyMem Hotfiles"  # Symlinks för /export
 ```
 
 ## 6. Tech Stack & Beroenden
@@ -207,7 +216,18 @@ paths:
 | **Syntes** | Gemini Pro | **~70% av svarstiden** |
 | Embeddings | all-MiniLM-L6-v2 | Lokal CPU |
 
-## 7. Kända Begränsningar (2025-12-15)
+## 7. Utility-moduler
+
+Hjälpfunktioner i `services/utils/`:
+
+| Modul | Funktion |
+|-------|----------|
+| `json_parser.py` | Robust JSON-parsning från LLM-svar (raw_decode) |
+| `date_service.py` | Central datumhantering med fallback-kedja |
+| `document_dna.py` | Metadata-extraktion från dokument |
+| `export_search.py` | Exportera kandidater som symlinks till hotfolder |
+
+## 8. Kända Begränsningar (2025-12-16)
 
 Aktuell status efter Pipeline v8.2:
 

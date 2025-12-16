@@ -48,6 +48,9 @@ API_KEY = CONFIG['ai_engine']['api_key']
 MODEL_LITE = CONFIG['ai_engine']['models']['model_lite']
 MODEL_PRO = CONFIG['ai_engine']['models'].get('model_pro', MODEL_LITE)
 
+# Ägarens namn för Synthesizer-prompten
+OWNER_NAME = CONFIG.get('owner', {}).get('profile', {}).get('full_name', 'användaren')
+
 # v8.1: Format-baserat modellval
 # Struktur-format (bara formatering - FAST model)
 FAST_FORMATS = [
@@ -74,15 +77,21 @@ def _synthesize_abort(query: str, gaps: list, reason: str, chat_history: list = 
     """
     Hantera ABORT-status: Förklara ärligt vad som saknas.
     """
-    prompt_template = PROMPTS.get('synthesizer_abort', {}).get('instruction', '')
+    synth_config = PROMPTS.get('synthesizer_abort', {})
+    role_template = synth_config.get('role', '')
+    prompt_template = synth_config.get('instruction', '')
     
     if not prompt_template:
         LOGGER.error("HARDFAIL: synthesizer_abort prompt saknas i chat_prompts.yaml")
         raise ValueError("HARDFAIL: synthesizer_abort prompt saknas i chat_prompts.yaml")
     
+    # Formatera role med owner_name
+    role_text = role_template.format(owner_name=OWNER_NAME) if role_template else ""
+    full_template = f"{role_text}\n\n{prompt_template}" if role_text else prompt_template
+    
     gaps_text = "\n".join(f"- {g}" for g in gaps) if gaps else "Ingen specifik information"
     
-    synth_prompt = prompt_template.format(
+    synth_prompt = full_template.format(
         query=query,
         reason=reason,
         gaps=gaps_text
@@ -215,13 +224,19 @@ def synthesize(
             )
     else:
         # QUERY: Standard synthesizer prompt
-        prompt_template = PROMPTS.get('synthesizer', {}).get('instruction', '')
+        synth_config = PROMPTS.get('synthesizer', {})
+        role_template = synth_config.get('role', '')
+        prompt_template = synth_config.get('instruction', '')
         if not prompt_template:
             LOGGER.error("HARDFAIL: synthesizer prompt saknas i chat_prompts.yaml")
             raise ValueError("HARDFAIL: synthesizer prompt saknas i chat_prompts.yaml")
         
+        # Formatera role med owner_name och prependa till instruction
+        role_text = role_template.format(owner_name=OWNER_NAME) if role_template else ""
+        full_template = f"{role_text}\n\n{prompt_template}" if role_text else prompt_template
+        
         # Använd current_synthesis om tillgängligt, annars report
-        synth_prompt = prompt_template.format(
+        synth_prompt = full_template.format(
             report=current_synthesis or report,
             gaps=gaps if gaps else "Inga kända luckor",
             query=query

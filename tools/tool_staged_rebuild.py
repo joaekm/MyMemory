@@ -101,46 +101,6 @@ def get_all_source_files() -> list:
                 })
     return files
 
-
-def filter_unprocessed_files(files: list) -> tuple:
-    """
-    Filtrera bort filer som redan finns i Lake.
-    
-    Kollar per fil om motsvarande .md finns i Lake, istället för
-    att skippa hela datum. Detta hanterar avbrutna körningar korrekt.
-    
-    Args:
-        files: Lista med fil-dicts från get_all_source_files()
-    
-    Returns:
-        (unprocessed_files, skipped_count) - Filer att processa och antal skippade
-    """
-    if not os.path.exists(LAKE_STORE):
-        return files, 0
-    
-    existing_lake = set(os.listdir(LAKE_STORE))
-    existing_failed = set(os.listdir(ASSET_FAILED)) if os.path.exists(ASSET_FAILED) else set()
-    
-    unprocessed = []
-    skipped = 0
-    
-    for f in files:
-        base = os.path.splitext(f['filename'])[0]
-        lake_name = f"{base}.md"
-        
-        # Generera förväntat Failed-filnamn (UUID strippad)
-        failed_name = get_expected_failed_filename(f['filename'])
-        
-        # Skippa om filen redan finns i Lake ELLER i Failed
-        if lake_name in existing_lake:
-            skipped += 1
-        elif failed_name in existing_failed:
-            skipped += 1
-        else:
-            unprocessed.append(f)
-    
-    return unprocessed, skipped
-
 def group_files_by_date(files: list) -> dict:
     """Gruppera filer per datum."""
     by_date = defaultdict(list)
@@ -555,21 +515,23 @@ def run_staged_rebuild(days_limit: int = None):
     
     _log(f"   Hittade {len(all_files)} filer totalt")
     
-    # 2. Filtrera bort filer som redan finns i Lake/Failed (per-fil check)
-    unprocessed_files, skipped_count = filter_unprocessed_files(all_files)
-    
-    if skipped_count > 0:
-        _log(f"   ⏭️ Skippar {skipped_count} redan processade filer")
-    
-    if not unprocessed_files:
-        _log("✅ Alla filer redan processade!")
-        return
-    
-    _log(f"   📋 {len(unprocessed_files)} filer att processa")
-    
-    # 3. Gruppera oprocessade filer per datum
-    files_by_date = group_files_by_date(unprocessed_files)
+    # 2. Gruppera per datum
+    files_by_date = group_files_by_date(all_files)
     sorted_dates = sorted(files_by_date.keys())
+    
+    # 3. Kolla vad som redan finns i Lake och skippa de datumen
+    latest_in_lake = get_latest_lake_date()
+    if latest_in_lake:
+        original_count = len(sorted_dates)
+        sorted_dates = [d for d in sorted_dates if d > latest_in_lake]
+        skipped = original_count - len(sorted_dates)
+        if skipped > 0:
+            _log(f"   📅 Lake innehåller data t.o.m. {latest_in_lake}")
+            _log(f"   ⏭️ Skippar {skipped} redan indexerade dagar")
+        
+        if not sorted_dates:
+            _log("✅ Alla datum redan processade i Lake!")
+            return
     
     # 4. Begränsa till days_limit om angivet
     if days_limit and days_limit < len(sorted_dates):
@@ -718,22 +680,23 @@ def main():
         _log("")
         
         all_files = get_all_source_files()
-        _log(f"Hittade {len(all_files)} filer totalt")
-        
-        # Filtrera bort redan processade filer (per-fil check)
-        unprocessed_files, skipped_count = filter_unprocessed_files(all_files)
-        
-        if skipped_count > 0:
-            _log(f"⏭️ Skippar {skipped_count} redan processade filer")
-            _log("")
-        
-        if not unprocessed_files:
-            _log("✅ Alla filer redan processade!")
-            return
-        
-        # Gruppera oprocessade filer per datum
-        files_by_date = group_files_by_date(unprocessed_files)
+        files_by_date = group_files_by_date(all_files)
         sorted_dates = sorted(files_by_date.keys())
+        
+        # Kolla vad som redan finns i Lake
+        latest_in_lake = get_latest_lake_date()
+        if latest_in_lake:
+            original_count = len(sorted_dates)
+            sorted_dates = [d for d in sorted_dates if d > latest_in_lake]
+            skipped = original_count - len(sorted_dates)
+            if skipped > 0:
+                _log(f"📅 Lake innehåller data t.o.m. {latest_in_lake}")
+                _log(f"⏭️ Skippar {skipped} redan indexerade dagar")
+                _log("")
+        
+        if not sorted_dates:
+            _log("✅ Alla datum redan processade i Lake!")
+            return
         
         # Begränsa till --days om angivet
         if args.days and args.days < len(sorted_dates):

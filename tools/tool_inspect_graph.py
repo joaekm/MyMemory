@@ -25,7 +25,7 @@ def ladda_yaml(filnamn):
     sys.exit(1)
 
 CONFIG = ladda_yaml('my_mem_config.yaml')
-GRAPH_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])
+GRAPH_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
 
 
 def inspektera_graf():

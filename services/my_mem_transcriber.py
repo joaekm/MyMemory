@@ -418,8 +418,6 @@ def processa_mediafil(filväg, filnamn):
     except Exception as e:
         LOGGER.error(f"FEL vid transkribering av {filnamn}: {e}")
         print(f"{_ts()} ❌ TRANS: {kort_namn} → FAILED (se logg)")
-        # Flytta till Failed så rebuild inte väntar för evigt
-        _move_to_failed(filväg, filnamn, str(e)[:100])
         with PROCESS_LOCK:
             PROCESSED_FILES.discard(filnamn)
 

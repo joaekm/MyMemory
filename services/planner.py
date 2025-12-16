@@ -183,7 +183,7 @@ def _format_candidate_for_scan(doc: dict) -> str:
     Extract only: id, date, title/filename, summary.
     Strip all other metadata to reduce noise.
     """
-    doc_id = doc.get('id', 'unknown')[:12]
+    doc_id = doc.get('id', 'unknown')
     date = doc.get('timestamp_created', doc.get('date', 'N/A'))
     title = doc.get('title', doc.get('filename', 'Untitled'))
     summary = doc.get('summary', '')[:300]

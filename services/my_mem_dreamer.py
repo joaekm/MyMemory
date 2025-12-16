@@ -14,13 +14,14 @@ import yaml
 import logging
 import datetime
 import zoneinfo
-import time
 from typing import Optional
 from google import genai
 from google.genai import types
 
-# Lägg till projekt-root i path för import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+# Lägg till projektroten i sys.path för att hitta services-paketet
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from services.graph_service import GraphStore
 
 # --- CONFIG LOADER ---
 def _load_config():
@@ -53,7 +54,7 @@ CONFIG = _load_config()
 PROMPTS = _load_prompts()
 
 # --- PATHS ---
-GRAPH_PATH = CONFIG['paths']['kuzu_db']  # Återanvänder config-nyckel för DuckDB
+GRAPH_PATH = CONFIG['paths']['graph_db']
 TAXONOMY_FILE = CONFIG['paths'].get('taxonomy_file')
 LOG_FILE = CONFIG['logging']['log_file_path']
 # Timestamp-fil ligger i samma mapp som taxonomin
@@ -147,66 +148,65 @@ def collect_from_graph() -> dict:
         - entities: Dict med type -> [names]
         - aliases: Lista med (alias, canonical) tuples
     """
-    from services.graph_service import GraphStore
-    
     result = {
         "concepts": [],
         "entities": {},
         "aliases": []
     }
     
-    if not os.path.exists(GRAPH_PATH):
-        LOGGER.warning(f"Graf-databas finns inte: {GRAPH_PATH}")
-        return result
-    
+    graph = None
     try:
         graph = GraphStore(GRAPH_PATH, read_only=True)
         
         # 1. Hämta alla Concept-noder
         try:
             concepts = graph.find_nodes_by_type("Concept")
-            for node in concepts:
-                if node.get('id'):
-                    result["concepts"].append(node['id'])
+            for concept in concepts:
+                if concept.get('id'):
+                    result["concepts"].append(concept['id'])
         except Exception as e:
             LOGGER.warning(f"Kunde inte hämta Concept-noder: {e}")
         
         # 2. Hämta alla Entity-noder med typ
         try:
             entities = graph.find_nodes_by_type("Entity")
-            for node in entities:
-                if node.get('id'):
-                    entity_id = node['id']
-                    entity_type = node.get('properties', {}).get('entity_type', 'Unknown')
-                    entity_aliases = node.get('aliases', [])
-                    
-                    if entity_type not in result["entities"]:
-                        result["entities"][entity_type] = []
-                    result["entities"][entity_type].append(entity_id)
-                    
-                    # Samla alias-relationer
-                    for alias in entity_aliases:
-                        result["aliases"].append((alias, entity_id))
+            for entity in entities:
+                entity_id = entity.get('id')
+                if not entity_id:
+                    continue
+                
+                entity_type = entity.get('properties', {}).get('entity_type', 'Unknown')
+                entity_aliases = entity.get('aliases', [])
+                
+                if entity_type not in result["entities"]:
+                    result["entities"][entity_type] = []
+                result["entities"][entity_type].append(entity_id)
+                
+                # Samla alias-relationer
+                for alias in entity_aliases:
+                    result["aliases"].append((alias, entity_id))
         except Exception as e:
             LOGGER.warning(f"Kunde inte hämta Entity-noder: {e}")
         
         # 3. Hämta Person-noder (legacy)
         try:
             persons = graph.find_nodes_by_type("Person")
-            for node in persons:
-                if node.get('id'):
+            for person in persons:
+                person_id = person.get('id')
+                if person_id:
                     if "Person" not in result["entities"]:
                         result["entities"]["Person"] = []
-                    if node['id'] not in result["entities"]["Person"]:
-                        result["entities"]["Person"].append(node['id'])
+                    if person_id not in result["entities"]["Person"]:
+                        result["entities"]["Person"].append(person_id)
         except Exception as e:
             LOGGER.warning(f"Kunde inte hämta Person-noder: {e}")
-        
-        graph.close()
         
     except Exception as e:
         LOGGER.error(f"Fel vid graf-anslutning: {e}")
         raise RuntimeError(f"HARDFAIL: Kunde inte ansluta till grafen: {e}") from e
+    finally:
+        if graph:
+            graph.close()
     
     LOGGER.info(f"Samlade från graf: {len(result['concepts'])} concepts, "
                 f"{sum(len(v) for v in result['entities'].values())} entities, "

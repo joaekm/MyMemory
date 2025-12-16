@@ -174,20 +174,22 @@ Innehåller {len(messages)} huvuddiskussioner.
 
 if __name__ == "__main__":
     os.makedirs(SLACK_FOLDER, exist_ok=True)
+    POLL_INTERVAL = 3600
     
-    print(f"{_ts()} ✓ Slack Collector startar ({len(CHANNELS)} kanaler, {HISTORY_DAYS} dagar)")
+    print(f"{_ts()} ✓ Slack Collector online ({len(CHANNELS)} kanaler)")
     
-    today = datetime.date.today()
-    collected = 0
-    
-    for i in range(1, HISTORY_DAYS + 1):
-        target_date = today - datetime.timedelta(days=i)
-        for channel in CHANNELS:
-            try: 
-                if archive_day(channel, target_date):
-                    collected += 1
-            except Exception as e:
-                LOGGER.error(f"HARDFAIL: Arkivering misslyckades för {channel} {target_date}: {e}")
-                print(f"{_ts()} ❌ SLACK: {channel} {target_date} - {e}")
-    
-    print(f"{_ts()} ✓ Slack Collector klar ({collected} nya filer)")
+    try:
+        while True:
+            today = datetime.date.today()
+            for i in range(1, HISTORY_DAYS + 1):
+                target_date = today - datetime.timedelta(days=i)
+                for channel in CHANNELS:
+                    try: 
+                        archive_day(channel, target_date)
+                    except Exception as e:
+                        LOGGER.error(f"HARDFAIL: Arkivering misslyckades för {channel} {target_date}: {e}")
+                        raise
+            time.sleep(POLL_INTERVAL)
+    except KeyboardInterrupt:
+        print(f"\n{_ts()} Slack Collector avslutad.")
+        LOGGER.info("Slack Collector avslutad av användare")
