@@ -1,32 +1,23 @@
 """
-ContextBuilder - Pipeline v7.5 "Time-Aware Reranking"
+ContextBuilder - Pipeline v6.0 Fas 2
 
 Ansvar:
 - Deterministisk informationshämtning (INGEN AI)
-- Kör Lake + Vektor parallellt
-- Returnera topp 50 kandidater med metadata+summary
-- Ingen intent-logik (Planner hanterar urval)
-- TIME-AWARE RERANKING: Boostar nyare dokument automatiskt
+- Kör ALLTID båda: search_lake + vector_db (kvalitet > hastighet)
+- Graf-expansion baserat på graph_paths från IntentRouter
+- Viktning baserat på intent (STRICT prioriterar LAKE)
+- Deduplicera och returnera max ~50 kandidater med metadata+summary
 
 ID-format: Alla IDs normaliseras till UUID för korrekt deduplicering
 """
 
 import os
-import sys
 import re
 import json
 import yaml
 import logging
-from datetime import datetime
-
 import chromadb
 from chromadb.utils import embedding_functions
-import dateutil.parser
-
-# Lägg till projekt-root i path för import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
-from services.graph_service import GraphStore
 
 # UUID-mönster för att extrahera från filnamn
 UUID_PATTERN = re.compile(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', re.IGNORECASE)
@@ -43,26 +34,22 @@ def _load_config():
             with open(p, 'r') as f:
                 config = yaml.safe_load(f)
             return config
-    raise FileNotFoundError("HARDFAIL: Config not found")
+    raise FileNotFoundError("Config not found")
 
 CONFIG = _load_config()
 LOGGER = logging.getLogger('ContextBuilder')
 
 LAKE_PATH = os.path.expanduser(CONFIG['paths'].get('lake_store', '~/MyMemory/Lake'))
 CHROMA_PATH = os.path.expanduser(CONFIG['paths']['chroma_db'])
-GRAPH_PATH = os.path.expanduser(CONFIG['paths']['kuzu_db'])  # Återanvänder config-nyckel för DuckDB
 TAXONOMY_FILE = os.path.expanduser(CONFIG['paths'].get('taxonomy_file', '~/MyMemory/Index/my_mem_taxonomy.json'))
+API_KEY = CONFIG['ai_engine']['api_key']
 
 # Max kandidater att returnera
 MAX_CANDIDATES = 50
 
-# --- RERANKING CONFIG (Pipeline v7.5) ---
-RERANKING_CONFIG = CONFIG.get('reranking', {})
-BOOST_STRENGTH = RERANKING_CONFIG.get('boost_strength', 0.3)
-LEGACY_FACTOR = RERANKING_CONFIG.get('legacy_factor_days', 7.0)
-RELEVANCE_THRESHOLD = RERANKING_CONFIG.get('relevance_threshold', 0.0)
-TOP_N_FULLTEXT = RERANKING_CONFIG.get('top_n_fulltext', 3)
-RECALL_LIMIT = RERANKING_CONFIG.get('recall_limit', 50)
+# Viktningsfaktorer
+LAKE_BOOST_STRICT = 1.3   # STRICT: LAKE-träffar får 30% boost
+LAKE_BOOST_RELAXED = 1.0  # RELAXED: Ingen boost
 
 
 def _load_taxonomy() -> dict:
@@ -79,168 +66,28 @@ def _load_taxonomy() -> dict:
 TAXONOMY = _load_taxonomy()
 
 
-# --- GRAF-LÄSNING (DuckDB GraphStore) ---
-
-# Singleton för read-only connection
-_GRAPH_STORE = None
-
-def _get_graph_store() -> GraphStore:
+def _expand_keywords_via_graph(keywords: list, graph_paths: list) -> list:
     """
-    Lazy singleton - VIKTIGT: read_only=True för concurrency!
-    Säkerställer att ContextBuilder (realtid/läs) inte blockerar GraphBuilder (batch/skriv).
-    """
-    global _GRAPH_STORE
-    
-    if _GRAPH_STORE is not None:
-        return _GRAPH_STORE
-    
-    if not os.path.exists(GRAPH_PATH):
-        LOGGER.warning(f"Graf-databas finns inte: {GRAPH_PATH}")
-        return None
-    
-    try:
-        _GRAPH_STORE = GraphStore(GRAPH_PATH, read_only=True)
-        return _GRAPH_STORE
-    except Exception as e:
-        LOGGER.error(f"Kunde inte ansluta till graf-databasen: {e}")
-        return None
-
-
-def get_graph_context_for_search(keywords: list, entities: list) -> str:
-    """
-    Hämta graf-kontext för söktermerna.
-    Hjälper Planner att hitta kreativa spår att utforska.
+    Expandera keywords med subnoder från angivna graf-paths.
     
     Args:
-        keywords: Sökord från IntentRouter
-        entities: Entiteter från IntentRouter
+        keywords: Ursprungliga sökord
+        graph_paths: Lista med huvudnoder att expandera (från IntentRouter)
     
     Returns:
-        Formaterad sträng med grafkopplingar
+        Expanderad lista med sökord
     """
-    graph = _get_graph_store()
-    if graph is None:
-        return "(Graf ej tillgänglig)"
+    expanded = set(keywords)  # Börja med ursprungliga
     
-    try:
-        lines = []
-        search_terms = keywords + [e.split(':')[-1] if ':' in e else e for e in entities]
-        
-        for term in search_terms[:5]:  # Max 5 termer
-            # Fuzzy match mot Entity-namn och aliases
-            matches = graph.find_nodes_fuzzy(term)
-            
-            entity_matches = []
-            for node in matches:
-                if node.get('type') != 'Entity':
-                    continue
-                    
-                entity_id = node['id']
-                entity_type = node.get('properties', {}).get('entity_type', 'Unknown')
-                aliases = node.get('aliases', [])
-                
-                # Hitta relaterade dokument (Units) via edges
-                edges = graph.get_edges_to(entity_id, edge_type="UNIT_MENTIONS")
-                related_docs = []
-                for edge in edges[:3]:
-                    unit = graph.get_node(edge['source'])
-                    if unit:
-                        title = unit.get('properties', {}).get('title', unit['id'][:30])
-                        related_docs.append(title)
-                
-                match_info = f"  - {entity_id} ({entity_type})"
-                if aliases:
-                    match_info += f" [alias: {', '.join(aliases[:3])}]"
-                if related_docs:
-                    match_info += f"\n    → Nämns i: {', '.join(related_docs)}"
-                entity_matches.append(match_info)
-            
-            if entity_matches:
-                lines.append(f'"{term}":')
-                lines.extend(entity_matches)
-        
-        if not lines:
-            return "(Inga grafkopplingar hittades för söktermerna)"
-        
-        return "\n".join(lines)
+    for path in graph_paths:
+        if path in TAXONOMY:
+            subnodes = TAXONOMY[path]
+            # Lägg till subnoder som extra söktermer
+            for subnode in subnodes[:10]:  # Max 10 subnoder per huvudnod
+                expanded.add(subnode)
+            LOGGER.debug(f"Expanderade '{path}' med {len(subnodes[:10])} subnoder")
     
-    except Exception as e:
-        LOGGER.error(f"get_graph_context_for_search error: {e}")
-        return f"(Kunde inte hämta grafkontext: {e})"
-
-
-# --- RERANKING FUNCTIONS (Pipeline v7.5) ---
-
-def _parse_date(meta: dict) -> datetime | None:
-    """
-    Robust datumextraktion från metadata.
-    Returnerar None vid fel (ingen boost, inget straff).
-    
-    Söker i: timestamp_created (Lake), timestamp (Vector), date
-    """
-    # Prova olika nycklar
-    date_str = meta.get('timestamp_created') or meta.get('timestamp') or meta.get('date')
-    if not date_str:
-        return None
-    
-    try:
-        # dateutil hanterar ISO8601 med timezone
-        return dateutil.parser.parse(str(date_str)).replace(tzinfo=None)
-    except Exception as e:
-        LOGGER.warning(f"Kunde inte parsa datum '{date_str}': {e}")
-        return None
-
-
-def _calculate_hybrid_score(doc: dict, original_score: float) -> float:
-    """
-    Beräknar hybrid-score med Relevance Gate + Inverse Age Boost.
-    
-    Relevance Gate: Endast dokument med score >= RELEVANCE_THRESHOLD får boost.
-    Detta förhindrar att irrelevant spam från igår vinner över relevant content.
-    
-    Formula: final_score = original_score * (1 + time_boost)
-    where time_boost = BOOST_STRENGTH / ((days_old / LEGACY_FACTOR) + 1)
-    """
-    # RELEVANCE GATE: Skräp förblir skräp
-    if original_score < RELEVANCE_THRESHOLD:
-        doc['debug_gate'] = 'BLOCKED'
-        doc['debug_score_final'] = original_score
-        return original_score
-    
-    doc_date = _parse_date(doc)
-    
-    # Inget datum = ingen boost (men inget straff heller)
-    if not doc_date:
-        doc['debug_gate'] = 'NO_DATE'
-        doc['debug_score_final'] = original_score
-        return original_score
-    
-    # Beräkna ålder i dagar
-    now = datetime.now()
-    days_old = (now - doc_date).days
-    
-    # Skydd mot framtida datum (bugg i data)
-    if days_old < 0:
-        LOGGER.warning(f"Framtida datum i dokument: {doc.get('filename')}")
-        days_old = 0
-    
-    # Inverse Age Boost
-    time_boost = BOOST_STRENGTH / ((days_old / LEGACY_FACTOR) + 1)
-    final_score = original_score * (1 + time_boost)
-    
-    # Debug-info
-    doc['debug_gate'] = 'BOOSTED'
-    doc['debug_score_orig'] = round(original_score, 4)
-    doc['debug_score_final'] = round(final_score, 4)
-    doc['debug_age_days'] = days_old
-    doc['debug_boost'] = round(time_boost, 4)
-    
-    # KALIBRERINGSLOGG: Skriv ut scores för att hitta rätt threshold
-    LOGGER.info(f"RERANK: {doc.get('filename', 'unknown')[:30]} | "
-                f"orig={original_score:.3f} | final={final_score:.3f} | "
-                f"age={days_old}d | gate={doc['debug_gate']}")
-    
-    return final_score
+    return list(expanded)
 
 
 def _search_lake(keywords: list) -> dict:
@@ -306,8 +153,8 @@ def _search_lake(keywords: list) -> dict:
                     "summary": summary,
                     "source": "LAKE",
                     "matched_keywords": matched_keywords,
-                    "score": len(matched_keywords) / len(keywords),
-                    "content": content
+                    "score": len(matched_keywords) / len(keywords),  # Hur många keywords matchade
+                    "content": content  # Behålls för Planner
                 }
                 
         except Exception as e:
@@ -317,22 +164,15 @@ def _search_lake(keywords: list) -> dict:
     return hits
 
 
-def _search_vector(query: str, n_results: int = None) -> dict:
+def _search_vector(query: str, n_results: int = 30) -> dict:
     """
     Sök i vektordatabasen (ChromaDB).
     Returnerar dict med {doc_id: doc_data}
-    
-    RECALL HORIZON FIX: Hämtar RECALL_LIMIT (50) för att ge Rerankern tillräckligt material.
     """
-    if n_results is None:
-        n_results = RECALL_LIMIT  # Default 50 från config
     hits = {}
     
-    if not query:
-        return hits
-    
     try:
-        # Initiera ChromaDB
+        # Initiera ChromaDB (matchar my_mem_vector_indexer.py)
         emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
         client = chromadb.PersistentClient(path=CHROMA_PATH)
         collection = client.get_collection(name="dfm_knowledge_base", embedding_function=emb_fn)
@@ -341,6 +181,7 @@ def _search_vector(query: str, n_results: int = None) -> dict:
         
         if results and results['ids'] and results['ids'][0]:
             for i, raw_id in enumerate(results['ids'][0]):
+                # Normalisera ID till lowercase för konsekvent matchning med Lake
                 doc_id = raw_id.lower()
                 distance = results['distances'][0][i] if results['distances'] else 1.0
                 metadata = results['metadatas'][0][i] if results['metadatas'] else {}
@@ -365,171 +206,122 @@ def _search_vector(query: str, n_results: int = None) -> dict:
     return hits
 
 
-def _dedupe_and_rank(lake_hits: dict, vector_hits: dict) -> list:
+def _dedupe_and_rank(lake_hits: dict, vector_hits: dict, intent: str) -> list:
     """
-    Deduplicera och ranka kandidater med TIME-AWARE RERANKING.
+    Deduplicera och ranka kandidater.
     
-    Pipeline v7.5: Applicerar hybrid scoring baserat på relevans + färskhet.
+    Args:
+        lake_hits: Träffar från Lake-sökning
+        vector_hits: Träffar från vektorsökning  
+        intent: "STRICT" eller "RELAXED"
     
     Returns:
         Sorterad lista med kandidater (max MAX_CANDIDATES)
     """
+    # Slå ihop och deduplicera
     all_candidates = {}
     
-    # Lake-träffar
+    # LAKE-träffar (med boost för STRICT)
+    boost = LAKE_BOOST_STRICT if intent == "STRICT" else LAKE_BOOST_RELAXED
     for doc_id, doc in lake_hits.items():
+        doc['score'] = doc.get('score', 0.5) * boost
         all_candidates[doc_id] = doc
     
     # Vektor-träffar (lägg till om inte redan finns, annars kombinera score)
     for doc_id, doc in vector_hits.items():
         if doc_id in all_candidates:
+            # Kombinera scores om dokumentet finns i båda
             existing = all_candidates[doc_id]
             existing['score'] = (existing['score'] + doc['score']) / 2
             existing['source'] = "LAKE+VECTOR"
-            # Behåll timestamp från vektor-metadata om den finns
-            if 'timestamp' in doc and 'timestamp' not in existing:
-                existing['timestamp'] = doc['timestamp']
         else:
             all_candidates[doc_id] = doc
     
-    # NYTT: Applicera hybrid scoring (Time-Aware Reranking)
-    for doc_id, doc in all_candidates.items():
-        original_score = doc.get('score', 0.5)
-        doc['hybrid_score'] = _calculate_hybrid_score(doc, original_score)
+    # Sortera på score (högst först)
+    ranked = sorted(all_candidates.values(), key=lambda x: x.get('score', 0), reverse=True)
     
-    # Sortera på hybrid_score (inte score)
-    ranked = sorted(all_candidates.values(), key=lambda x: x.get('hybrid_score', 0), reverse=True)
-    
+    # Begränsa till MAX_CANDIDATES
     return ranked[:MAX_CANDIDATES]
 
 
-def format_candidates_for_planner(candidates: list, top_n_fulltext: int = None) -> str:
+def build_context(intent_data: dict, debug_trace: dict = None) -> dict:
     """
-    Formatera kandidater för Planner-prompten.
-    Topp N dokument får FULLTEXT, övriga får SUMMARY.
-    
-    Pipeline v7.5: Default är nu TOP_N_FULLTEXT (3) från config.
-    "Lost in the Middle"-fix: Färre fulltext = bättre LLM-attention.
+    Bygg kontext baserat på IntentRouter-output.
     
     Args:
-        candidates: Lista med kandidat-dokument
-        top_n_fulltext: Antal dokument som får fulltext (default från config)
-    
-    Returns:
-        Formaterad sträng för Planner-prompten
-    """
-    if top_n_fulltext is None:
-        top_n_fulltext = TOP_N_FULLTEXT  # Default 3 från config
-    formatted_output = []
-    
-    for i, doc in enumerate(candidates):
-        is_top_tier = i < top_n_fulltext
-        
-        # Välj innehåll baserat på position
-        if is_top_tier:
-            content = doc.get('content', doc.get('summary', ''))[:8000]  # Max 8000 tecken per doc
-            type_label = "FULL_TEXT"
-        else:
-            content = doc.get('summary', '')[:300]
-            type_label = "SUMMARY"
-        
-        entry = (
-            f"=== DOKUMENT {i+1} [{type_label}] ===\n"
-            f"ID: {doc.get('id', 'unknown')[:12]}...\n"
-            f"Fil: {doc.get('filename', 'Unknown')}\n"
-            f"Källa: {doc.get('source', 'Unknown')}\n"
-            f"Score: {doc.get('score', 0):.2f}\n"
-            f"INNEHÅLL:\n{content}\n"
-            f"{'=' * 40}\n"
-        )
-        formatted_output.append(entry)
-    
-    return "\n".join(formatted_output)
-
-
-def build_context(keywords: list, entities: list = None, time_filter: dict = None, 
-                  vector_query: str = None, debug_trace: dict = None) -> dict:
-    """
-    Bygg kontext genom att söka i Lake och Vektor parallellt.
-    
-    Pipeline v7.0: Förenklad signatur utan intent-logik.
-    
-    Args:
-        keywords: Lista med sökord
-        entities: Lista med entiteter (t.ex. ["Person: Cenk"]) - används för utökad sökning
-        time_filter: {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"} (ej implementerat än)
-        vector_query: Söksträng för vektorsökning (om None, bygg från keywords)
+        intent_data: Output från IntentRouter med:
+            - intent: "STRICT" eller "RELAXED"
+            - keywords: Lista med sökord
+            - vector_query: Söksträng för vektorsökning
+            - graph_paths: Lista med huvudnoder att expandera
+            - time_filter: Tidsfilter (ej implementerat än)
         debug_trace: Dict för att samla debug-info (optional)
     
     Returns:
         dict med:
             - status: "OK" eller "NO_RESULTS"
-            - candidates: Lista med kandidat-dokument (slim)
-            - candidates_full: Lista med fullständiga dokument
+            - candidates: Lista med kandidat-dokument
             - stats: Statistik över sökningen
     """
-    # Expandera keywords med entity-namn
-    search_keywords = list(keywords) if keywords else []
-    if entities:
-        for entity in entities:
-            # Extrahera namn från "Person: Cenk" -> "Cenk"
-            if ':' in entity:
-                name = entity.split(':', 1)[1].strip()
-                if name and name not in search_keywords:
-                    search_keywords.append(name)
-            elif entity not in search_keywords:
-                search_keywords.append(entity)
+    intent = intent_data.get('intent', 'RELAXED')
+    keywords = intent_data.get('keywords', [])
+    vector_query = intent_data.get('vector_query', '')
+    graph_paths = intent_data.get('graph_paths', [])
     
-    # Bygg vector_query om inte angiven
-    if not vector_query and search_keywords:
-        vector_query = " ".join(search_keywords)
+    # Steg 1: Expandera keywords via graf (om RELAXED och graph_paths angivna)
+    if intent == "RELAXED" and graph_paths:
+        expanded_keywords = _expand_keywords_via_graph(keywords, graph_paths)
+        LOGGER.info(f"Graf-expansion: {len(keywords)} → {len(expanded_keywords)} keywords")
+    else:
+        expanded_keywords = keywords
     
-    # Sök i Lake
-    lake_hits = _search_lake(search_keywords)
+    # Steg 2: Sök i Lake (alltid)
+    lake_hits = _search_lake(expanded_keywords)
     LOGGER.info(f"Lake-sökning: {len(lake_hits)} träffar")
     
-    # Sök i vektor
+    # Steg 3: Sök i vektor (alltid - kvalitet > hastighet)
     vector_hits = _search_vector(vector_query) if vector_query else {}
     LOGGER.info(f"Vektor-sökning: {len(vector_hits)} träffar")
     
-    # Deduplicera och ranka
-    candidates = _dedupe_and_rank(lake_hits, vector_hits)
+    # Steg 4: Deduplicera och ranka
+    candidates = _dedupe_and_rank(lake_hits, vector_hits, intent)
     
     # Bygg statistik
     stats = {
-        "keywords": search_keywords,
+        "original_keywords": len(keywords),
+        "expanded_keywords": len(expanded_keywords),
         "lake_hits": len(lake_hits),
         "vector_hits": len(vector_hits),
-        "after_dedup": len(candidates)
+        "after_dedup": len(candidates),
+        "graph_paths_used": graph_paths
     }
     
     # Spara till debug_trace
     if debug_trace is not None:
         debug_trace['context_builder'] = {
-            "keywords": search_keywords,
-            "entities": entities,
-            "vector_query": vector_query,
+            "intent": intent,
+            "keywords_original": keywords,
+            "keywords_expanded": expanded_keywords if expanded_keywords != keywords else None,
             "stats": stats
         }
         debug_trace['context_builder_candidates'] = [
             {"id": c['id'], "source": c['source'], "score": round(c.get('score', 0), 3)}
-            for c in candidates[:10]
+            for c in candidates[:10]  # Logga top 10
         ]
     
     # HARDFAIL om inga träffar
     if not candidates:
-        LOGGER.warning(f"Inga träffar för keywords={search_keywords}")
+        LOGGER.warning(f"HARDFAIL: Inga träffar för keywords={keywords}, vector_query={vector_query}")
         return {
             "status": "NO_RESULTS",
-            "reason": f"Sökning returnerade 0 träffar för keywords={search_keywords}",
-            "suggestion": "Försök med bredare söktermer",
+            "reason": f"Sökning returnerade 0 träffar för keywords={keywords}",
+            "suggestion": "Försök med bredare söktermer eller annan formulering",
             "candidates": [],
-            "candidates_full": [],
-            "candidates_formatted": "",
             "stats": stats
         }
     
-    # Skapa slim version för debug/logging
+    # Ta bort fulltext-content från kandidater (Planner får hämta det själv)
+    # Behåll bara metadata + summary
     slim_candidates = []
     for c in candidates:
         slim_candidates.append({
@@ -537,56 +329,64 @@ def build_context(keywords: list, entities: list = None, time_filter: dict = Non
             "filename": c['filename'],
             "summary": c['summary'],
             "source": c['source'],
-            "score": round(c.get('score', 0), 3),
-            "hybrid_score": round(c.get('hybrid_score', 0), 3),
-            "debug_gate": c.get('debug_gate', 'N/A'),
-            "debug_age_days": c.get('debug_age_days', 'N/A')
+            "score": round(c.get('score', 0), 3)
         })
-    
-    # Formatera för Planner: Topp 5 får FULLTEXT, övriga får SUMMARY
-    formatted_output = format_candidates_for_planner(candidates)
-    
-    # Hämta graf-kontext för att hjälpa Planner hitta kreativa spår
-    graph_context = get_graph_context_for_search(search_keywords, entities or [])
     
     return {
         "status": "OK",
         "candidates": slim_candidates,
-        "candidates_full": candidates,
-        "candidates_formatted": formatted_output,
-        "graph_context": graph_context,
+        "candidates_full": candidates,  # Fullständig data för Planner
         "stats": stats
     }
 
 
-def search(query: str, n_results: int = 30) -> dict:
+def search(query: str) -> dict:
     """
-    Enkel sökfunktion för Planner-loopens extra sökningar.
+    Enkel sökfunktion för Planner.
+    
+    Detta är en wrapper runt build_context() för enklare användning
+    vid follow-up sökningar där Planner behöver göra extra sökningar.
     
     Args:
-        query: Söksträng (används för både Lake och Vektor)
-        n_results: Max antal resultat
+        query: Söksträng
     
     Returns:
-        dict med candidates
+        dict med candidates_full och status
     """
-    keywords = query.split()
-    return build_context(
-        keywords=keywords,
-        vector_query=query
-    )
+    # Enkel tokenisering för keywords
+    keywords = [w for w in query.split() if len(w) >= 2]
+    
+    # Bygg intent_data för build_context
+    intent_data = {
+        "intent": "RELAXED",
+        "keywords": keywords,
+        "vector_query": query,
+        "graph_paths": []  # Ingen graf-expansion för enkla sökningar
+    }
+    
+    result = build_context(intent_data)
+    
+    return {
+        "status": result.get("status", "NO_RESULTS"),
+        "candidates_full": result.get("candidates_full", []),
+        "stats": result.get("stats", {})
+    }
 
 
 # --- TEST ---
 if __name__ == "__main__":
     # Enkel test
-    result = build_context(
-        keywords=["Strategi", "AI"],
-        entities=["Person: Cenk Bisgen"],
-        vector_query="AI-strategi och framtidsplaner"
-    )
+    test_intent = {
+        "intent": "RELAXED",
+        "keywords": ["Strategi", "AI"],
+        "vector_query": "AI-strategi och framtidsplaner",
+        "graph_paths": ["Strategi", "Teknologier"]
+    }
+    
+    result = build_context(test_intent)
     print(f"Status: {result['status']}")
     print(f"Stats: {result['stats']}")
     print(f"Kandidater: {len(result['candidates'])}")
     for c in result['candidates'][:5]:
         print(f"  - {c['filename']} ({c['source']}, score={c['score']})")
+
