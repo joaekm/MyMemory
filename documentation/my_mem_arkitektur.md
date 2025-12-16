@@ -33,6 +33,8 @@ Assets/
 ├── Transcripts/    # Transkriberade .txt-filer från Transcriber
 ├── Documents/      # Dokument från MemoryDrop (pdf, docx, txt)
 ├── Slack/          # Daily digests från Slack Collector
+├── Calendar/       # Daily digests från Calendar Collector (Google)
+├── Mail/           # E-post från Gmail Collector
 ├── Sessions/       # Chat-sessioner med learnings
 └── Failed/         # Misslyckade transkriptioner
 ```
@@ -62,13 +64,28 @@ Hela systemet orkestreras av `start_services.py` (för realtidstjänster) och ma
 |-------|-------|----------|--------|
 | **File Retriever** | DropZone | Flyttar filer till Assets, tilldelar UUID | `Recordings/` eller `Documents/` |
 | **Slack Collector** | Slack API | "Daily Digest" - en .txt per kanal/dag | `Slack/` |
+| **Calendar Collector** | Google Calendar API | Daily Digest per dag med möten | `Calendar/` |
+| **Gmail Collector** | Gmail API (label) | E-post med specifik label som .txt | `Mail/` |
 
 ### 3.2 Bearbetning (The Core)
 
 | Agent | Bevakar | Modell | Output |
 |-------|---------|--------|--------|
 | **Transcriber** | `Recordings/` | Flash (transkribering) + Pro (analys & QC) | `.txt` i `Transcripts/` |
-| **Doc Converter** | `Transcripts/`, `Documents/`, `Slack/`, `Sessions/` | Gemini Flash | `.md` i Lake |
+| **Doc Converter** | `Transcripts/`, `Documents/`, `Slack/`, `Sessions/`, `Calendar/`, `Mail/` | Gemini Flash | `.md` i Lake |
+
+### 3.2.1 Document DNA (Metadata is Queen)
+
+DocConverter extraherar omfattande metadata från dokument via `document_dna.py`:
+
+| Kategori | Fält | Användning |
+|----------|------|------------|
+| **File DNA** | SHA256 hash, storlek, MIME-typ | Deduplicering, integritet |
+| **Intrinsic** | author_embedded, title_embedded, creation_tool, sheet_names | Sökfilter, kvalitetsbedömning |
+| **Content** | word_count, language_detected | Språkfiltrering |
+| **Provenance** | timestamps, original_filename | Spårbarhet |
+
+**Quality-Aware Reranking:** Dokument skapade med authoring-verktyg (Word, Excel) får boost, skannade dokument får penalty.
 
 **Transcriber-flöde (v6.0):**
 1. Flash transkriberar ljudfil ordagrant
@@ -142,7 +159,7 @@ All styrning sker via konfigurationsfiler:
 
 | Fil | Syfte |
 |-----|-------|
-| `my_mem_config.yaml` | Sökvägar, API-nycklar, Slack-kanaler, AI-modeller |
+| `my_mem_config.yaml` | Sökvägar, API-nycklar, Slack-kanaler, Google OAuth, AI-modeller |
 | `my_mem_taxonomy.json` | Masternoder (OTS) - 26 huvudnoder |
 | `chat_prompts.yaml` | System-prompter för chatten |
 | `services_prompts.yaml` | Prompter för insamlingsagenter |
@@ -162,9 +179,11 @@ paths:
   asset_slack: "~/MyMemory/Assets/Slack"
   asset_sessions: "~/MyMemory/Assets/Sessions"
   asset_failed: "~/MyMemory/Assets/Failed"
+  asset_calendar: "~/MyMemory/Assets/Calendar"
+  asset_mail: "~/MyMemory/Assets/Mail"
   # Index
   chroma_db: "~/MyMemory/Index/ChromaDB"
-  kuzu_db: "~/MyMemory/Index/KuzuDB"  # Pekar på DuckDB-fil (LÖST-54)
+  graph_db: "~/MyMemory/Index/GraphDB"  # DuckDB grafdatabas (LÖST-54)
   taxonomy_file: "~/MyMemory/Index/my_mem_taxonomy.json"
 ```
 
