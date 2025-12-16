@@ -80,9 +80,18 @@ planner_evaluate:
     - economist: Finansexpert - hittar siffror, budget [KOMMANDE]
     
     STEG 4: BESLUTA NÄSTA STEG
-    - STATUS "SEARCH": Om du vill söka mer. -> Ange "next_search_query".
+    - STATUS "SEARCH": Om du vill söka mer. -> Ange "next_search" med sökparametrar.
     - STATUS "COMPLETE": Om du har tillräckligt för att svara.
     - AGENT_TASKS: Om du vill skicka ut en byggare.
+    
+    TIDSFILTER (om relevant):
+    {time_filter}
+    
+    TAXONOMI (använd för att formulera keywords):
+    {taxonomy_context}
+    
+    GRAF-RELATIONER:
+    {entity_relations}
     
     JSON OUTPUT FORMAT (Strikt):
     {{
@@ -91,13 +100,12 @@ planner_evaluate:
         "interface_reasoning": "Ditt resonemang (visas för användaren)",
         "updated_synthesis": "Den uppdaterade texten...",
         "new_evidence": ["Nytt fakta 1", "Nytt fakta 2"],
-        "next_search_query": "Specifik söksträng" | null,
+        "next_search": {{
+            "keywords": ["taxonomi-matchat-ord", "annat-ord"],
+            "vector_query": "Naturlig fråga att söka efter"
+        }} | null,
         "agent_tasks": [{{"agent": "chronologist", "task": "Hitta datum för mötet"}}] | []
     }}
-    
-    ANVÄND KONTEXTEN NEDAN FÖR att formulera en relevant sökfråga ("next_search_query") till nästa steg/iteration i rag-pipeline:
-    {taxonomy_context}
-    {entity_relations}
 
 planner_scan:
   op_mode: "scan"

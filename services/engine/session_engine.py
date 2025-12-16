@@ -107,10 +107,11 @@ class SessionEngine:
             LOGGER.error(f"HARDFAIL: IntentRouter: {intent_data.get('reason')}")
             raise RuntimeError(f"HARDFAIL: IntentRouter: {intent_data.get('reason')}")
         
-        op_mode = intent_data.get('op_mode', 'query')
-        delivery_format = intent_data.get('delivery_format', 'Narrativ Analys')
+        # v8.5: Hårdkodade defaults (legacy-parametrar)
+        op_mode = 'query'
+        delivery_format = 'Narrativ Analys'
         
-        LOGGER.info(f"Intent: op_mode={op_mode}, format={delivery_format}")
+        LOGGER.info(f"Intent: keywords={intent_data.get('keywords')}, time_filter={intent_data.get('time_filter')}")
         
         # --- FAS 2: PLANNER (v8.3 Bygglaget - anropar ContextBuilder internt) ---
         LOGGER.debug("Planner Loop...")
@@ -186,8 +187,6 @@ class SessionEngine:
             "answer": answer,
             "sources": planner_result.get('sources_used', []),
             "gaps": planner_result.get('gaps', []),
-            "op_mode": op_mode,
-            "delivery_format": delivery_format,
             "debug_trace": debug_trace
         }
     

@@ -1,10 +1,10 @@
 """
-IntentRouter - Pipeline v7.0 "The System-Aware Router"
+IntentRouter - Pipeline v8.5 "Slimmad Router"
 
 Ansvar:
 - Skapa ett Kontextuellt Mission Goal
 - Använda Taxonomin som "Grafens Karta"
-- Extrahera keywords, entities och time_filter
+- Extrahera keywords och time_filter
 
 OBS: Profil har tagits bort från IntentRouter. Endast Synthesizer vet vem användaren är.
 """
@@ -154,7 +154,6 @@ def route_intent(query: str, chat_history: list = None, debug_trace: dict = None
         dict med:
             - status: "OK" eller "ERROR"
             - keywords: Lista med sökord
-            - entities: Lista med entiteter (t.ex. "Person: Cenk")
             - time_filter: {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"} eller None
             - mission_goal: Detaljerat uppdrag för Planner
     """
@@ -192,13 +191,9 @@ def route_intent(query: str, chat_history: list = None, debug_trace: dict = None
         result = parse_llm_json(text, context="intent_router")
         LOGGER.info(f"IntentRouter PARSED: {result}")
         
-        # Validera entities mot taxonomi-noder
-        entities = result.get('entities', [])
-        
         output = {
             "status": "OK",
             "keywords": result.get('keywords', []),
-            "entities": entities,
             "time_filter": result.get('time_filter'),
             "mission_goal": result.get('mission_goal', query)
         }
@@ -208,7 +203,7 @@ def route_intent(query: str, chat_history: list = None, debug_trace: dict = None
             debug_trace['intent_router'] = output
             debug_trace['intent_router_raw'] = text
         
-        LOGGER.info(f"IntentRouter: keywords={output['keywords']}, entities={output['entities']}")
+        LOGGER.info(f"IntentRouter: keywords={output['keywords']}, time_filter={output['time_filter']}")
         return output
         
     except ValueError as e:

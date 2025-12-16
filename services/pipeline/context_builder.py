@@ -1,11 +1,10 @@
 """
-ContextBuilder - Pipeline v6.0 Fas 2
+ContextBuilder - Pipeline v8.5
 
 Ansvar:
 - Deterministisk informationshämtning (INGEN AI)
 - Kör ALLTID båda: search_lake + vector_db (kvalitet > hastighet)
-- Graf-expansion baserat på graph_paths från IntentRouter
-- Viktning baserat på intent (STRICT prioriterar LAKE)
+- Filtrera på time_filter om angivet
 - Deduplicera och returnera max ~50 kandidater med metadata+summary
 
 ID-format: Alla IDs normaliseras till UUID för korrekt deduplicering
@@ -51,9 +50,8 @@ MAX_CANDIDATES = 50
 # Token Economy: Hur många dokument som får fulltext i Planner-prompten
 TOP_N_FULLTEXT = 3
 
-# Viktningsfaktorer
-LAKE_BOOST_STRICT = 1.3   # STRICT: LAKE-träffar får 30% boost
-LAKE_BOOST_RELAXED = 1.0  # RELAXED: Ingen boost
+# Viktningsfaktorer (v8.5: Alltid RELAXED)
+LAKE_BOOST = 1.0
 
 
 def _load_taxonomy() -> dict:
@@ -130,14 +128,16 @@ def _search_lake(keywords: list) -> dict:
             
             content_lower = content.lower()
             
-            # Extrahera summary från YAML-header
+            # Extrahera summary och timestamp från YAML-header
             summary = ""
+            timestamp = ""
             if content.startswith("---"):
                 try:
                     yaml_end = content.index("---", 3)
                     yaml_content = content[3:yaml_end]
                     metadata = yaml.safe_load(yaml_content)
                     summary = metadata.get('summary', '')[:200]
+                    timestamp = metadata.get('timestamp', '')
                 except Exception as e:
                     LOGGER.debug(f"Kunde inte parsa YAML-header i {filename}: {e}")
             
@@ -164,6 +164,7 @@ def _search_lake(keywords: list) -> dict:
                     "id": doc_id,
                     "filename": filename,
                     "summary": summary,
+                    "timestamp": timestamp,  # v8.5: För time_filter
                     "source": "LAKE",
                     "matched_keywords": matched_keywords,
                     "score": len(matched_keywords) / len(keywords),  # Hur många keywords matchade
@@ -207,6 +208,7 @@ def _search_vector(query: str, n_results: int = 30) -> dict:
                     "id": doc_id,
                     "filename": metadata.get('filename', f"{doc_id}.md"),
                     "summary": metadata.get('summary', content[:200] if content else ''),
+                    "timestamp": metadata.get('timestamp', ''),  # v8.5: För time_filter
                     "source": "VECTOR",
                     "score": score,
                     "distance": distance,
@@ -257,14 +259,66 @@ def format_candidates_for_planner(candidates: list, top_n_fulltext: int = 3) -> 
     return "\n".join(lines)
 
 
-def _dedupe_and_rank(lake_hits: dict, vector_hits: dict, intent: str) -> list:
+def _filter_by_time(candidates: dict, time_filter: dict) -> dict:
     """
-    Deduplicera och ranka kandidater.
+    Filtrera kandidater på tidsperiod.
+    
+    Args:
+        candidates: Dict med {doc_id: doc_data}
+        time_filter: {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}
+    
+    Returns:
+        Filtrerad dict
+    """
+    if not time_filter:
+        return candidates
+    
+    start = time_filter.get('start', '')
+    end = time_filter.get('end', '')
+    
+    if not start and not end:
+        return candidates
+    
+    filtered = {}
+    excluded_count = 0
+    
+    for doc_id, doc in candidates.items():
+        timestamp = doc.get('timestamp', '')
+        
+        # Om dokumentet saknar timestamp, behåll det (bättre recall)
+        if not timestamp:
+            filtered[doc_id] = doc
+            continue
+        
+        # Extrahera datum-delen (YYYY-MM-DD)
+        doc_date = timestamp[:10] if len(timestamp) >= 10 else timestamp
+        
+        # Kolla om dokumentet är inom intervallet
+        in_range = True
+        if start and doc_date < start:
+            in_range = False
+        if end and doc_date > end:
+            in_range = False
+        
+        if in_range:
+            filtered[doc_id] = doc
+        else:
+            excluded_count += 1
+    
+    if excluded_count > 0:
+        LOGGER.info(f"time_filter: Exkluderade {excluded_count} dokument utanför {start} - {end}")
+    
+    return filtered
+
+
+def _dedupe_and_rank(lake_hits: dict, vector_hits: dict, time_filter: dict = None) -> list:
+    """
+    Deduplicera, filtrera på tid, och ranka kandidater.
     
     Args:
         lake_hits: Träffar från Lake-sökning
         vector_hits: Träffar från vektorsökning  
-        intent: "STRICT" eller "RELAXED"
+        time_filter: Optional {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}
     
     Returns:
         Sorterad lista med kandidater (max MAX_CANDIDATES)
@@ -272,10 +326,9 @@ def _dedupe_and_rank(lake_hits: dict, vector_hits: dict, intent: str) -> list:
     # Slå ihop och deduplicera
     all_candidates = {}
     
-    # LAKE-träffar (med boost för STRICT)
-    boost = LAKE_BOOST_STRICT if intent == "STRICT" else LAKE_BOOST_RELAXED
+    # LAKE-träffar
     for doc_id, doc in lake_hits.items():
-        doc['score'] = doc.get('score', 0.5) * boost
+        doc['score'] = doc.get('score', 0.5) * LAKE_BOOST
         all_candidates[doc_id] = doc
     
     # Vektor-träffar (lägg till om inte redan finns, annars kombinera score)
@@ -287,6 +340,10 @@ def _dedupe_and_rank(lake_hits: dict, vector_hits: dict, intent: str) -> list:
             existing['source'] = "LAKE+VECTOR"
         else:
             all_candidates[doc_id] = doc
+    
+    # v8.5: Filtrera på tidsperiod
+    if time_filter:
+        all_candidates = _filter_by_time(all_candidates, time_filter)
     
     # Sortera på score (högst först)
     ranked = sorted(all_candidates.values(), key=lambda x: x.get('score', 0), reverse=True)
@@ -301,11 +358,9 @@ def build_context(intent_data: dict, debug_trace: dict = None) -> dict:
     
     Args:
         intent_data: Output från IntentRouter med:
-            - intent: "STRICT" eller "RELAXED"
             - keywords: Lista med sökord
-            - vector_query: Söksträng för vektorsökning
-            - graph_paths: Lista med huvudnoder att expandera
-            - time_filter: Tidsfilter (ej implementerat än)
+            - mission_goal: Beskrivning av uppdraget (används som vector_query)
+            - time_filter: {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"} eller None
         debug_trace: Dict för att samla debug-info (optional)
     
     Returns:
@@ -314,45 +369,37 @@ def build_context(intent_data: dict, debug_trace: dict = None) -> dict:
             - candidates: Lista med kandidat-dokument
             - stats: Statistik över sökningen
     """
-    intent = intent_data.get('intent', 'RELAXED')
     keywords = intent_data.get('keywords', [])
-    vector_query = intent_data.get('vector_query', '')
-    graph_paths = intent_data.get('graph_paths', [])
+    # v8.5: Härled vector_query från mission_goal
+    vector_query = intent_data.get('mission_goal', '')
+    time_filter = intent_data.get('time_filter')
     
-    # Steg 1: Expandera keywords via graf (om RELAXED och graph_paths angivna)
-    if intent == "RELAXED" and graph_paths:
-        expanded_keywords = _expand_keywords_via_graph(keywords, graph_paths)
-        LOGGER.info(f"Graf-expansion: {len(keywords)} → {len(expanded_keywords)} keywords")
-    else:
-        expanded_keywords = keywords
-    
-    # Steg 2: Sök i Lake (alltid)
-    lake_hits = _search_lake(expanded_keywords)
+    # Steg 1: Sök i Lake (alltid)
+    lake_hits = _search_lake(keywords)
     LOGGER.info(f"Lake-sökning: {len(lake_hits)} träffar")
     
-    # Steg 3: Sök i vektor (alltid - kvalitet > hastighet)
+    # Steg 2: Sök i vektor (alltid - kvalitet > hastighet)
     vector_hits = _search_vector(vector_query) if vector_query else {}
     LOGGER.info(f"Vektor-sökning: {len(vector_hits)} träffar")
     
-    # Steg 4: Deduplicera och ranka
-    candidates = _dedupe_and_rank(lake_hits, vector_hits, intent)
+    # Steg 3: Deduplicera, filtrera på tid, och ranka
+    candidates = _dedupe_and_rank(lake_hits, vector_hits, time_filter)
     
     # Bygg statistik
     stats = {
-        "original_keywords": len(keywords),
-        "expanded_keywords": len(expanded_keywords),
+        "keywords": len(keywords),
         "lake_hits": len(lake_hits),
         "vector_hits": len(vector_hits),
-        "after_dedup": len(candidates),
-        "graph_paths_used": graph_paths
+        "after_dedup_and_filter": len(candidates),
+        "time_filter": time_filter
     }
     
     # Spara till debug_trace
     if debug_trace is not None:
         debug_trace['context_builder'] = {
-            "intent": intent,
-            "keywords_original": keywords,
-            "keywords_expanded": expanded_keywords if expanded_keywords != keywords else None,
+            "keywords": keywords,
+            "vector_query": vector_query[:100] if vector_query else None,
+            "time_filter": time_filter,
             "stats": stats
         }
         debug_trace['context_builder_candidates'] = [
@@ -379,6 +426,7 @@ def build_context(intent_data: dict, debug_trace: dict = None) -> dict:
             "id": c['id'],
             "filename": c['filename'],
             "summary": c['summary'],
+            "timestamp": c.get('timestamp', ''),
             "source": c['source'],
             "score": round(c.get('score', 0), 3)
         })
@@ -395,7 +443,7 @@ def build_context(intent_data: dict, debug_trace: dict = None) -> dict:
     }
 
 
-def search(query: str) -> dict:
+def search(query: str, time_filter: dict = None) -> dict:
     """
     Enkel sökfunktion för Planner.
     
@@ -404,6 +452,7 @@ def search(query: str) -> dict:
     
     Args:
         query: Söksträng
+        time_filter: Optional {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}
     
     Returns:
         dict med candidates_full och status
@@ -413,10 +462,9 @@ def search(query: str) -> dict:
     
     # Bygg intent_data för build_context
     intent_data = {
-        "intent": "RELAXED",
         "keywords": keywords,
-        "vector_query": query,
-        "graph_paths": []  # Ingen graf-expansion för enkla sökningar
+        "mission_goal": query,
+        "time_filter": time_filter
     }
     
     result = build_context(intent_data)
@@ -432,10 +480,9 @@ def search(query: str) -> dict:
 if __name__ == "__main__":
     # Enkel test
     test_intent = {
-        "intent": "RELAXED",
         "keywords": ["Strategi", "AI"],
-        "vector_query": "AI-strategi och framtidsplaner",
-        "graph_paths": ["Strategi", "Teknologier"]
+        "mission_goal": "AI-strategi och framtidsplaner",
+        "time_filter": {"start": "2025-12-01", "end": "2025-12-15"}
     }
     
     result = build_context(test_intent)
@@ -443,5 +490,5 @@ if __name__ == "__main__":
     print(f"Stats: {result['stats']}")
     print(f"Kandidater: {len(result['candidates'])}")
     for c in result['candidates'][:5]:
-        print(f"  - {c['filename']} ({c['source']}, score={c['score']})")
+        print(f"  - {c['filename']} ({c['source']}, score={c['score']}, ts={c.get('timestamp', 'N/A')})")
 

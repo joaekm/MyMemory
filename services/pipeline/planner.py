@@ -331,23 +331,24 @@ def _scan_candidates(candidates: list, mission_goal: str, current_query: str, de
         return [c['id'] for c in candidates]
 
 
-def _evaluate_state(state: PlannerState, candidates_formatted: str, graph_context: str = "", debug_mode: bool = False) -> dict:
+def _evaluate_state(state: PlannerState, candidates_formatted: str, graph_context: str = "", 
+                    time_filter: dict = None, debug_mode: bool = False) -> dict:
     """
     Evaluera aktuellt state mot mission_goal.
-    v8.1 Rolling Hypothesis: Jämför ny info med befintlig syntes (Tornet).
+    v8.5: Genererar strukturerat next_search-objekt istället för sträng.
     
     Args:
         state: PlannerState med current_synthesis, facts och past_queries
         candidates_formatted: Formaterade kandidater (topp 3 med fulltext)
         graph_context: Graf-relationer för kreativa sökspår
+        time_filter: Original tidsfilter från intent (för att behålla i nya sökningar)
     
     Returns:
         dict med:
             - status: "SEARCH" | "COMPLETE" | "ABORT"
             - updated_synthesis: Uppdaterad arbetshypotes (Tornet)
             - new_evidence: Nya bevis (läggs till i facts-listan)
-            - next_search_query: Ny sökning om SEARCH
-            - gaps: Vad som fortfarande saknas
+            - next_search: {"keywords": [...], "vector_query": "..."} eller None
     """
     prompt_template = PROMPTS.get('planner_evaluate', {}).get('instruction', '')
     
@@ -361,6 +362,9 @@ def _evaluate_state(state: PlannerState, candidates_formatted: str, graph_contex
     # v8.1: Rolling Hypothesis - inkludera current_synthesis
     current_synthesis = state.current_synthesis or "(Ingen analys ännu - börja från noll)"
     
+    # v8.5: Formatera time_filter för prompt
+    time_filter_str = f"Sökperiod: {time_filter['start']} till {time_filter['end']}" if time_filter else "(Ingen tidsbegränsning)"
+    
     try:
         full_prompt = prompt_template.format(
             mission_goal=state.mission_goal,
@@ -370,6 +374,7 @@ def _evaluate_state(state: PlannerState, candidates_formatted: str, graph_contex
             past_queries=past_queries,
             iteration=state.iteration + 1,
             max_iterations=MAX_ITERATIONS,
+            time_filter=time_filter_str,
             taxonomy_context=TAXONOMY_CONTEXT,
             entity_relations=graph_context if graph_context else "(Inga grafkopplingar)"
         )
@@ -400,6 +405,16 @@ def _evaluate_state(state: PlannerState, candidates_formatted: str, graph_contex
         LOGGER.debug(f"Planner evaluate LLM-svar: {text[:500]}...")
         result = parse_llm_json(text, context="planner_evaluate")
         
+        # v8.5: Parsa next_search (objekt) eller next_search_query (legacy sträng)
+        next_search = result.get('next_search')
+        if not next_search and result.get('next_search_query'):
+            # Legacy fallback: Konvertera sträng till objekt
+            legacy_query = result.get('next_search_query')
+            next_search = {
+                "keywords": [w for w in legacy_query.split() if len(w) >= 2],
+                "vector_query": legacy_query
+            }
+        
         return {
             "status": result.get('status', 'ABORT'),
             "context_gain": result.get('context_gain'),  # Skicka vidare LLM:ens bedömning
@@ -409,7 +424,8 @@ def _evaluate_state(state: PlannerState, candidates_formatted: str, graph_contex
             # Legacy fallbacks
             "new_facts": result.get('new_facts', []),
             "refined_findings": result.get('refined_findings', ''),
-            "next_search_query": result.get('next_search_query'),
+            # v8.5: Strukturerat sökobjekt
+            "next_search": next_search,
             "gaps": result.get('gaps', []),
             "llm_raw": text,
             # v8.4: LLM-driven delegation
@@ -532,7 +548,10 @@ def run_planner_loop(
         LOGGER.info(f"Planner iteration {state.iteration + 1}/{MAX_ITERATIONS}")
         
         # Evaluate: LLM läser dokument och uppdaterar hypotes
-        eval_result = _evaluate_state(state, current_candidates_formatted, graph_context, debug_mode=debug_mode)
+        # v8.5: Skicka med time_filter för att behålla i nya sökningar
+        time_filter = intent_data.get('time_filter')
+        eval_result = _evaluate_state(state, current_candidates_formatted, graph_context, 
+                                       time_filter=time_filter, debug_mode=debug_mode)
         
         # v8.1: Uppdatera TORNET (current_synthesis)
         # SPARA GAMLA LÄNGDEN FÖRST (för context_gain fallback)
@@ -643,6 +662,7 @@ def run_planner_loop(
             patience = 0  # Reset om vi hittade nytt
         
         # Spara till debug_trace
+        next_search = eval_result.get('next_search')
         iter_data = {
             "iteration": state.iteration + 1,
             "status": eval_result['status'],
@@ -653,7 +673,7 @@ def run_planner_loop(
             "facts_preview": state.facts[:3] if state.facts else [],
             "new_evidence_added": len(new_evidence) if new_evidence else 0,
             "gaps": state.gaps,
-            "next_search": eval_result.get('next_search_query'),
+            "next_search": next_search,
             # v8.4: Thinking Out Loud - visas i chatten, används INTE för logik
             "interface_reasoning": eval_result.get('interface_reasoning', ''),
             "agents_dispatched": [t.get('agent') for t in agent_tasks] if agent_tasks else []
@@ -669,7 +689,7 @@ def run_planner_loop(
         # Check för COMPLETE
         if eval_result['status'] == 'COMPLETE':
             # Om vi fortfarande hittar mycket nytt OCH har en sökning, fortsätt!
-            if context_gain >= HIGH_GAIN_THRESHOLD and eval_result.get('next_search_query'):
+            if context_gain >= HIGH_GAIN_THRESHOLD and next_search:
                 LOGGER.info(f"Hög gain ({context_gain:.2f} >= {HIGH_GAIN_THRESHOLD}), fortsätter med ny sökning")
                 eval_result['status'] = 'SEARCH'
             else:
@@ -734,10 +754,20 @@ def run_planner_loop(
         
         # SEARCH: Kör ny sökning
         if eval_result['status'] == 'SEARCH':
-            next_query = eval_result.get('next_search_query')
+            if not next_search:
+                LOGGER.warning("SEARCH utan next_search, avbryter")
+                state.iteration += 1
+                continue
+            
+            # v8.5: Extrahera sökparametrar från strukturerat objekt
+            next_keywords = next_search.get('keywords', [])
+            next_vector_query = next_search.get('vector_query', '')
+            
+            # Skapa sökfråga för divergens-kontroll (kombinera keywords)
+            next_query = ' '.join(next_keywords) if next_keywords else next_vector_query
             
             if not next_query:
-                LOGGER.warning("SEARCH utan next_search_query, avbryter")
+                LOGGER.warning("SEARCH med tomt next_search, avbryter")
                 state.iteration += 1
                 continue
             
@@ -752,11 +782,11 @@ def run_planner_loop(
                 state.iteration += 1
                 continue
             
-            LOGGER.info(f"Planner söker: '{next_query}'")
+            LOGGER.info(f"Planner söker: keywords={next_keywords}, vector='{next_vector_query[:50]}...'")
             state.past_queries.append(next_query)
             
-            # Kör sökning
-            search_result = search_fn(next_query)
+            # v8.5: Kör sökning med strukturerade parametrar (behåll original time_filter)
+            search_result = search_fn(next_vector_query, time_filter=time_filter)
             new_candidates = search_result.get('candidates_full', [])
             
             # === LIBRARIAN LOOP: Two-Stage Retrieval ===
