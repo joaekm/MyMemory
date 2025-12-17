@@ -382,8 +382,24 @@ def chat_loop(debug_mode=False):
             # === PIPELINE v8.2 via SessionEngine ===
             debug_trace = {} if debug_mode else None
             
-            # Live callback för Tornbygget
+            # Live callback för Tornbygget - "Thinking Out Loud"
+            # Standard mode: Bara resonemang (💭) och agenter
+            # Debug mode: Full diagnostik
             def print_iteration_live(data):
+                reasoning = data.get('interface_reasoning', '')
+                
+                # --- STANDARD MODE: Sparsmakad "Thinking Out Loud" ---
+                if not debug_mode:
+                    # Visa bara resonemang om det finns
+                    if reasoning:
+                        console.print(f"[dim italic]💭 {reasoning[:300]}[/dim italic]")
+                    # Visa agenter som jobbar
+                    if data.get('agents_dispatched'):
+                        agents = ", ".join(data['agents_dispatched'])
+                        console.print(f"[magenta]🐿️ {agents} letar...[/magenta]")
+                    return
+                
+                # --- DEBUG MODE: Full diagnostik ---
                 gain = data.get('context_gain', 0)
                 status = data.get('status', '?')
                 patience = data.get('patience', 0)
@@ -399,9 +415,9 @@ def chat_loop(debug_mode=False):
                 
                 console.print(f"[dim]─── Iteration {data['iteration']} ───[/dim]")
                 
-                # v8.4: Thinking Out Loud - visa interface_reasoning (ENDAST UX, inte logik)
-                if data.get('interface_reasoning'):
-                    console.print(f"  [dim italic]💭 {data['interface_reasoning'][:200]}...[/dim italic]")
+                # Thinking Out Loud
+                if reasoning:
+                    console.print(f"  [dim italic]💭 {reasoning[:200]}...[/dim italic]")
                 
                 console.print(f"  [{gain_color}]Gain: {gain:.2f}[/{gain_color}] | Status: {status} | Patience: {patience}")
                 console.print(f"  [italic]Torn: \"{preview}...\"[/italic]")
@@ -433,8 +449,8 @@ def chat_loop(debug_mode=False):
                     query, 
                     debug_mode=debug_mode, 
                     debug_trace=debug_trace,
-                    on_iteration=print_iteration_live if debug_mode else None,
-                    on_scan=print_scan_live if debug_mode else None
+                    on_iteration=print_iteration_live,  # Alltid - "Thinking Out Loud"
+                    on_scan=print_scan_live if debug_mode else None  # Bara debug - Librarian
                 )
             except Exception as e:
                 LOGGER.error(f"Pipeline error: {e}")

@@ -821,10 +821,7 @@ def run_planner_loop(
             # 6. Select for Deep Read
             final_candidates = [c for c in candidates_to_scan if c['id'] in kept_ids]
             
-            # 7. "Thinking Out Loud" - visa vad vi gör i terminalen
-            _print_scan_summary(current_query, len(candidates_to_scan), final_candidates)
-            
-            # 8. Commit to session memory
+            # 7. Commit to session memory
             for c in final_candidates:
                 state.read_document_ids.add(c['id'])
             
