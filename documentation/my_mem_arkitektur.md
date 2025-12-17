@@ -153,7 +153,8 @@ Input → IntentRouter → ContextBuilder → Planner (ReAct) → Synthesizer �
 ### Launcher (macOS)
 - **Fil:** `MyMemory.app/Contents/Resources/Scripts/main.scpt`
 - **Funktion:** Orkestrerar start av backend och frontend.
-- **Debug Mode:** Argument `--debug` visar tankeprocess.
+- **Standard Mode:** Visar 💭 "Thinking Out Loud" - agenternas resonemang och aktiva agenter.
+- **Debug Mode:** Argument `--debug` visar full diagnostik (gain, status, patience, Librarian Scan).
 
 ### Simuleringsverktyg (Nytt)
 - **Fil:** `tools/simulate_session.py`

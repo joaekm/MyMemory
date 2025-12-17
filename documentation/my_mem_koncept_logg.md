@@ -947,3 +947,26 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
 * **Status:** Vision – ej implementerad. Nuvarande Planner är single-agent.
 
 * **Backlogg:** OBJEKT-55 (Multi-Agent Planner)
+
+---
+
+### Konflikt 52: UX-uppdelning Standard vs Debug Mode
+
+* **Scenario:** "Thinking Out Loud" (`interface_reasoning`) är värdefullt för användaren att se – men full diagnostik (Librarian Scan, gain/patience) är tekniskt brus som distraherar.
+
+* **Beslut (2025-12-17):**
+    - **Standard mode:** Visar endast 💭 resonemang och 🐿️ aktiva agenter
+    - **Debug mode:** Visar allt ovan PLUS:
+        - Iteration-nummer
+        - Context gain (färgkodad)
+        - Status och Patience
+        - Tornpreview
+        - Librarian Scan ("Undersöker:", "Scannade:")
+        - IntentRouter RAW output
+
+* **Implementation:**
+    - `on_iteration` callback skickas **alltid** (inte bara i debug mode)
+    - `on_scan` callback skickas **endast** i debug mode
+    - `print_iteration_live()` i `chat.py` anpassar output efter `debug_mode`
+
+* **Varför:** Användaren vill se att systemet "tänker" utan att distraheras av tekniska detaljer. Resonemang ger förtroende, siffror ger inte det.
