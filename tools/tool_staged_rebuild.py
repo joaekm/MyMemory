@@ -37,6 +37,7 @@ import logging
 # Lägg till project root i path för imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from services.utils.date_service import get_date, get_timestamp
+from services.utils.graph_service import GraphStore
 
 # === LOGGING ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - REBUILD - %(levelname)s - %(message)s')
@@ -72,6 +73,7 @@ POLL_INTERVAL_SECONDS = 10        # Hur ofta vi kollar Lake
 
 # UUID-pattern för att matcha filnamn
 UUID_PATTERN = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
+UUID_SUFFIX_PATTERN = re.compile(r'_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.(md|txt)$')
 
 # === HELPERS ===
 
@@ -329,7 +331,12 @@ def run_graph_builder():
     """Kör Graf-byggning."""
     _log("  🧠 Kör Graf-byggning...")
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    script_path = os.path.join(project_root, "services/my_mem_graph_builder.py")
+    script_path = os.path.join(project_root, "services", "indexers", "graph_builder.py")
+    
+    if not os.path.exists(script_path):
+        error_msg = f"HARDFAIL: Graph builder script saknas: {script_path}"
+        LOGGER.error(error_msg)
+        raise RuntimeError(error_msg)
     
     try:
         result = subprocess.run(
@@ -341,14 +348,37 @@ def run_graph_builder():
         )
         if result.returncode == 0:
             _log("  ✅ Graf-byggning klar")
+            # Visa output även vid lyckad körning (för debugging)
+            if result.stdout:
+                LOGGER.debug(f"Graph builder stdout: {result.stdout}")
         else:
-            _log(f"  ⚠️ Graf-byggning avslutade med kod {result.returncode}")
-    except subprocess.TimeoutExpired:
+            # Visa både stdout och stderr vid fel
+            error_details = []
+            if result.stdout:
+                error_details.append(f"STDOUT:\n{result.stdout}")
+            if result.stderr:
+                error_details.append(f"STDERR:\n{result.stderr}")
+            
+            error_msg = f"Graf-byggning avslutade med kod {result.returncode}"
+            if error_details:
+                error_msg += f"\n{'='*60}\n" + "\n".join(error_details) + f"\n{'='*60}"
+            
+            _log(f"  ⚠️ {error_msg}")
+            LOGGER.error(error_msg)
+            
+            # Re-raise med detaljerad information
+            raise RuntimeError(f"HARDFAIL: Graf-byggning misslyckades (exit code {result.returncode})\n{error_msg}")
+    except subprocess.TimeoutExpired as e:
         _log("  ⚠️ Graf-byggning timeout (5 min)")
-        raise RuntimeError("HARDFAIL: Graf-byggning timeout efter 5 minuter")
+        raise RuntimeError("HARDFAIL: Graf-byggning timeout efter 5 minuter") from e
+    except RuntimeError:
+        # Re-raise RuntimeError (våra egna fel) utan att ändra dem
+        raise
     except Exception as e:
-        _log(f"  ❌ Graf-byggning fel: {e}")
-        raise RuntimeError(f"HARDFAIL: Graf-byggning misslyckades: {e}") from e
+        error_msg = f"HARDFAIL: Graf-byggning misslyckades: {e}"
+        _log(f"  ❌ {error_msg}")
+        LOGGER.error(error_msg, exc_info=True)
+        raise RuntimeError(error_msg) from e
 
 
 def run_dreamer():
@@ -490,6 +520,318 @@ def wait_for_day_completion(day_files: list, date: str):
         if int(inactive_seconds) % 60 == 0 and inactive_seconds > 0:
             remaining = INACTIVITY_TIMEOUT_SECONDS - inactive_seconds
             _log(f"     Väntar på {len(missing)} filer... ({int(remaining)}s kvar till timeout)")
+
+# === TAXONOMY-ONLY REBUILD ===
+
+def get_all_lake_files() -> list:
+    """Samla alla .md filer från Lake."""
+    files = []
+    if not os.path.exists(LAKE_STORE):
+        return files
+    
+    for f in os.listdir(LAKE_STORE):
+        if not f.endswith('.md'):
+            continue
+        if f.startswith('.'):
+            continue
+        filepath = os.path.join(LAKE_STORE, f)
+        if os.path.isfile(filepath):
+            files.append({
+                'path': filepath,
+                'filename': f
+            })
+    return files
+
+
+def build_transcript_exclude_list() -> set:
+    """Bygg exkluderingslista med UUIDs från transcript-filer."""
+    transcript_uuids = set()
+    
+    if not os.path.exists(ASSET_TRANSCRIPTS):
+        LOGGER.warning(f"Transcript-mapp saknas: {ASSET_TRANSCRIPTS}")
+        return transcript_uuids
+    
+    for f in os.listdir(ASSET_TRANSCRIPTS):
+        if not f.endswith('.txt'):
+            continue
+        if f.startswith('.'):
+            continue
+        
+        # Extrahera UUID från filnamn
+        match = UUID_SUFFIX_PATTERN.search(f)
+        if match:
+            uuid = match.group(1)
+            transcript_uuids.add(uuid)
+    
+    LOGGER.info(f"Byggde exkluderingslista: {len(transcript_uuids)} transcript-UUIDs")
+    return transcript_uuids
+
+
+def load_master_taxonomy() -> dict:
+    """Ladda master taxonomy och rensa sub_nodes."""
+    taxonomy_file = CONFIG['paths']['taxonomy_file']
+    
+    if not os.path.exists(taxonomy_file):
+        LOGGER.warning(f"Taxonomi-fil saknas: {taxonomy_file}, skapar tom struktur")
+        return {}
+    
+    try:
+        with open(taxonomy_file, 'r', encoding='utf-8') as f:
+            taxonomy = json.load(f)
+        
+        # Behåll master nodes och descriptions, rensa sub_nodes
+        cleaned = {}
+        for key, value in taxonomy.items():
+            cleaned[key] = {
+                'description': value.get('description', ''),
+                'sub_nodes': []
+            }
+        
+        LOGGER.info(f"Laddade taxonomi: {len(cleaned)} masternoder, sub_nodes rensade")
+        return cleaned
+    except Exception as e:
+        LOGGER.error(f"HARDFAIL: Kunde inte ladda taxonomi: {e}")
+        raise RuntimeError(f"HARDFAIL: Kunde inte ladda taxonomi: {e}") from e
+
+
+def save_taxonomy(taxonomy: dict):
+    """Spara taxonomy till disk."""
+    taxonomy_file = CONFIG['paths']['taxonomy_file']
+    
+    # Deduplicera och sortera sub_nodes
+    for key, value in taxonomy.items():
+        if 'sub_nodes' in value:
+            value['sub_nodes'] = sorted(list(set(value['sub_nodes'])))
+    
+    os.makedirs(os.path.dirname(taxonomy_file), exist_ok=True)
+    with open(taxonomy_file, 'w', encoding='utf-8') as f:
+        json.dump(taxonomy, f, ensure_ascii=False, indent=2)
+    
+    total_sub_nodes = sum(len(v.get('sub_nodes', [])) for v in taxonomy.values())
+    LOGGER.info(f"Taxonomi sparad: {len(taxonomy)} masternoder, {total_sub_nodes} sub_nodes totalt")
+
+
+def update_file_graph_nodes(filepath: str, new_graph_nodes: dict) -> bool:
+    """Uppdatera graph_nodes i filens frontmatter."""
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        if '---' not in content:
+            LOGGER.warning(f"Fil saknar frontmatter: {filepath}")
+            return False
+        
+        parts = content.split('---', 2)
+        if len(parts) < 3:
+            LOGGER.warning(f"Fil har ogiltigt frontmatter-format: {filepath}")
+            return False
+        
+        # Parse YAML
+        try:
+            metadata = yaml.safe_load(parts[1])
+        except yaml.YAMLError as e:
+            LOGGER.warning(f"Kunde inte parsa YAML för {filepath}: {e}")
+            return False
+        
+        # Uppdatera graph_nodes
+        metadata['graph_nodes'] = new_graph_nodes
+        
+        # Rekonstruera fil
+        new_yaml = yaml.dump(metadata, allow_unicode=True, sort_keys=False, default_flow_style=False)
+        new_content = f"---\n{new_yaml}---\n{parts[2]}"
+        
+        # Skriv tillbaka
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+        
+        return True
+    except Exception as e:
+        LOGGER.error(f"HARDFAIL: Kunde inte uppdatera fil {filepath}: {e}")
+        return False
+
+
+def aggregate_to_taxonomy(taxonomy: dict, graph_nodes: dict):
+    """Aggregera graph_nodes till taxonomy struktur."""
+    for key, value in graph_nodes.items():
+        if key not in taxonomy:
+            # Skippa om masternode inte finns i taxonomi
+            continue
+        
+        if isinstance(value, (int, float)):
+            # Abstrakt koncept (masternode) - lägg till key som sub_node
+            if key not in taxonomy[key]['sub_nodes']:
+                taxonomy[key]['sub_nodes'].append(key)
+        elif isinstance(value, dict):
+            # Typad entitet (Person, Aktör, Projekt) - lägg till alla entity names
+            for entity_name in value.keys():
+                if entity_name not in taxonomy[key]['sub_nodes']:
+                    taxonomy[key]['sub_nodes'].append(entity_name)
+
+
+def run_taxonomy_only_rebuild(days_limit: int = None):
+    """Huvudloop för taxonomy-only rebuild.
+    
+    Args:
+        days_limit: Antal dagar att processa (äldst först). None = alla.
+    """
+    _log("═══════════════════════════════════════════════")
+    _log("  TAXONOMY-ONLY REBUILD - Trusted Sources Only")
+    _log("═══════════════════════════════════════════════")
+    
+    # 1. Bygg transcript exkluderingslista
+    _log("\n📋 Bygger transcript exkluderingslista...")
+    transcript_uuids = build_transcript_exclude_list()
+    _log(f"   {len(transcript_uuids)} transcript-UUIDs att exkludera")
+    
+    # 2. Ladda master taxonomy
+    _log("\n📚 Laddar master taxonomy...")
+    taxonomy = load_master_taxonomy()
+    if not taxonomy:
+        _log("❌ HARDFAIL: Kunde inte ladda taxonomi")
+        return
+    
+    # 3. Samla Lake-filer
+    _log("\n📁 Samlar Lake-filer...")
+    all_lake_files = get_all_lake_files()
+    if not all_lake_files:
+        _log("❌ Inga filer i Lake!")
+        return
+    
+    _log(f"   Hittade {len(all_lake_files)} filer i Lake")
+    
+    # 4. Gruppera per datum
+    files_by_date = group_files_by_date(all_lake_files)
+    sorted_dates = sorted(files_by_date.keys())
+    
+    # 5. I taxonomy-only-läge: Processa ALLA datum (ignorera historik)
+    # Anledning: Vi nollställer taxonomin i minnet, så vi måste läsa alla
+    # historiska filer för att bygga upp taxonomin från grunden.
+    # (I vanligt läge skulle vi hoppa över gamla datum för effektivitet)
+    
+    # 6. Begränsa till days_limit om angivet
+    if days_limit and days_limit < len(sorted_dates):
+        sorted_dates = sorted_dates[:days_limit]
+        _log(f"   Begränsat till {days_limit} dagar")
+    
+    if not sorted_dates:
+        _log("❌ Inga datum att processa!")
+        return
+    
+    _log(f"   Processar {len(sorted_dates)} dagar: {sorted_dates[0]} → {sorted_dates[-1]}")
+    
+    # 7. Importera generera_metadata
+    try:
+        from services.processors.doc_converter import generera_metadata
+    except ImportError as e:
+        LOGGER.error(f"HARDFAIL: Kunde inte importera generera_metadata: {e}")
+        raise RuntimeError(f"HARDFAIL: Kunde inte importera generera_metadata: {e}") from e
+    
+    # 8. Processa dag-för-dag
+    total_scanned = 0
+    total_trusted = 0
+    total_updated = 0
+    
+    try:
+        for i, date in enumerate(sorted_dates, 1):
+            day_files = files_by_date[date]
+            
+            _log(f"\n{'─' * 50}")
+            _log(f"📅 DAG {i}/{len(sorted_dates)}: {date}")
+            _log(f"   {len(day_files)} filer att processa")
+            
+            # 8.1 Filtrera trusted sources för denna dag
+            trusted_files = []
+            for f in day_files:
+                # Extrahera UUID från filnamn
+                match = UUID_SUFFIX_PATTERN.search(f['filename'])
+                if match:
+                    uuid = match.group(1)
+                    if uuid not in transcript_uuids:
+                        trusted_files.append(f)
+            
+            _log(f"   {len(trusted_files)} trusted filer (exkluderade {len(day_files) - len(trusted_files)} transcripts)")
+            total_scanned += len(day_files)
+            total_trusted += len(trusted_files)
+            
+            # 8.2 Extrahera och uppdatera graph_nodes för varje trusted fil
+            day_updated = 0
+            for f in trusted_files:
+                filepath = f['path']
+                filename = f['filename']
+                
+                try:
+                    # Läs innehåll
+                    with open(filepath, 'r', encoding='utf-8') as file:
+                        content = file.read()
+                    
+                    if '---' not in content:
+                        LOGGER.warning(f"Skippar fil utan frontmatter: {filename}")
+                        continue
+                    
+                    parts = content.split('---', 2)
+                    if len(parts) < 3:
+                        LOGGER.warning(f"Skippar fil med ogiltigt frontmatter: {filename}")
+                        continue
+                    
+                    # Extrahera markdown body
+                    body = parts[2] if len(parts) > 2 else ""
+                    
+                    # LLM extraction
+                    meta_data = generera_metadata(body, filename)
+                    if meta_data and meta_data.get('graph_nodes'):
+                        new_graph_nodes = meta_data['graph_nodes']
+                        
+                        # Uppdatera frontmatter
+                        if update_file_graph_nodes(filepath, new_graph_nodes):
+                            day_updated += 1
+                            total_updated += 1
+                            
+                            # Aggregera till taxonomy
+                            aggregate_to_taxonomy(taxonomy, new_graph_nodes)
+                    else:
+                        LOGGER.warning(f"LLM returnerade inga graph_nodes för {filename}")
+                
+                except Exception as e:
+                    LOGGER.error(f"Fel vid processning av {filename}: {e}")
+                    continue
+            
+            _log(f"   ✅ {day_updated} filer uppdaterade med LLM")
+            
+            # Säkerställ att GraphStore singleton-instansen är stängd
+            # Detta förhindrar DuckDB fil-låsningar när vi kör graph_builder/dreamer
+            try:
+                from services.indexers.graph_builder import close_db_connection
+                close_db_connection()
+            except Exception as e:
+                LOGGER.warning(f"Kunde inte stänga GraphStore-anslutning: {e}")
+            
+            # 8.3 Konsolidering (efter varje dag)
+            run_graph_builder()
+            run_dreamer()
+            
+            # Spara taxonomy inkrementellt
+            save_taxonomy(taxonomy)
+            _log(f"   💾 Taxonomy sparad (inkrementellt)")
+        
+        # 9. Final taxonomy save
+        _log(f"\n{'═' * 50}")
+        _log("🎉 TAXONOMY-ONLY REBUILD KLAR!")
+        _log(f"   Files Scanned: {total_scanned}")
+        _log(f"   Trusted Files Processed: {total_trusted}")
+        _log(f"   Files Updated with LLM: {total_updated}")
+        
+        total_nodes = sum(len(v.get('sub_nodes', [])) for v in taxonomy.values())
+        _log(f"   Taxonomy Nodes Mapped: {total_nodes}")
+        _log(f"{'═' * 50}")
+        
+        # Final save
+        save_taxonomy(taxonomy)
+        
+    except Exception as e:
+        LOGGER.error(f"HARDFAIL: Taxonomy-only rebuild misslyckades: {e}")
+        _log(f"\n❌ HARDFAIL: {e}")
+        raise
+
 
 # === MAIN REBUILD LOOP ===
 
@@ -672,6 +1014,11 @@ def main():
         default=None,
         help='Antal dagar att processa (äldst först). Standard: alla dagar'
     )
+    parser.add_argument(
+        '--taxonomy-only',
+        action='store_true',
+        help='Kör taxonomy-only rebuild (trusted sources only, exkluderar transcripts)'
+    )
     
     args = parser.parse_args()
     
@@ -716,6 +1063,16 @@ def main():
             if len(day_files) > 3:
                 _log(f"    ... och {len(day_files) - 3} till")
         
+        return
+    
+    # Route to taxonomy-only mode if flag is set
+    if args.taxonomy_only:
+        # Registrera signal handler
+        signal.signal(signal.SIGINT, handle_interrupt)
+        signal.signal(signal.SIGTERM, handle_interrupt)
+        
+        # Kör taxonomy-only rebuild
+        run_taxonomy_only_rebuild(days_limit=args.days)
         return
     
     if not args.confirm:

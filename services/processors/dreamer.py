@@ -220,6 +220,86 @@ def collect_from_graph() -> dict:
     return result
 
 
+def _synchronize_taxonomy_with_graph(taxonomy: dict, graph: GraphStore) -> dict:
+    """
+    Synkronisera taxonomin med grafens canonical truth.
+    
+    Validerar varje sub_node i taxonomin mot grafen:
+    - Om noden finns som canonical: behåll den
+    - Om noden är ett alias: ersätt med canonical
+    - Om noden inte finns: ta bort den (prune)
+    
+    Args:
+        taxonomy: Taxonomi-dict att validera
+        graph: GraphStore-instans (read-only)
+    
+    Returns:
+        dict med statistik: {"stale_removed": X, "aliases_replaced": Y, "pruned": Z}
+    """
+    stats = {
+        "stale_removed": 0,
+        "aliases_replaced": 0,
+        "pruned": 0
+    }
+    
+    try:
+        for master_node, data in taxonomy.items():
+            sub_nodes = data.get("sub_nodes", [])
+            if not sub_nodes:
+                continue
+            
+            cleaned_sub_nodes = []
+            replacements = {}  # Map: stale_name -> canonical_name
+            node_pruned_count = 0  # Per-master-node counter for logging
+            
+            for sub_node in sub_nodes:
+                # 1. Check if it exists as canonical node
+                canonical_node = graph.get_node(sub_node)
+                if canonical_node:
+                    # Exists as canonical - keep it
+                    cleaned_sub_nodes.append(sub_node)
+                    continue
+                
+                # 2. Check if it's an alias
+                alias_matches = graph.find_nodes_by_alias(sub_node)
+                if alias_matches:
+                    # It's an alias - get the canonical
+                    canonical_id = alias_matches[0]['id']
+                    if canonical_id not in cleaned_sub_nodes:
+                        cleaned_sub_nodes.append(canonical_id)
+                        replacements[sub_node] = canonical_id
+                        stats["aliases_replaced"] += 1
+                        LOGGER.info(f"Synkroniserade alias: '{sub_node}' -> '{canonical_id}' i {master_node}")
+                    else:
+                        # Canonical already in list, just remove the alias
+                        stats["stale_removed"] += 1
+                        LOGGER.info(f"Tog bort stale alias '{sub_node}' (canonical '{canonical_id}' finns redan) i {master_node}")
+                    continue
+                
+                # 3. Node doesn't exist in graph - prune it
+                stats["pruned"] += 1
+                node_pruned_count += 1
+                LOGGER.warning(f"Prunade nod '{sub_node}' från {master_node} (finns inte i graf)")
+            
+            # Deduplicate and sort
+            data["sub_nodes"] = sorted(list(set(cleaned_sub_nodes)))
+            
+            # Log summary for this master node
+            if replacements or node_pruned_count > 0:
+                changes = []
+                if replacements:
+                    changes.append(f"{len(replacements)} alias ersatta")
+                if node_pruned_count > 0:
+                    changes.append(f"{node_pruned_count} prunade")
+                LOGGER.info(f"Synkroniserade {master_node}: {', '.join(changes)}")
+        
+        return stats
+    
+    except Exception as e:
+        LOGGER.error(f"HARDFAIL: Fel vid taxonomi-synkronisering: {e}")
+        raise RuntimeError(f"HARDFAIL: Fel vid taxonomi-synkronisering: {e}") from e
+
+
 def _find_unrecognized_nodes(graph_data: dict, taxonomy: dict) -> dict:
     """
     Hitta noder i grafen som inte finns i taxonomin.
@@ -265,9 +345,11 @@ def consolidate() -> dict:
     
     Steg:
     1. Samla noder från grafen
-    2. Jämför med taxonomin
-    3. Skicka nya noder till LLM för kategorisering
-    4. Uppdatera taxonomin
+    2. Ladda taxonomin
+    2.5. Synkronisera taxonomin med grafens canonical truth (validera aliases, pruna stale noder)
+    3. Jämför med taxonomin (hitta nya noder)
+    4. Skicka nya noder till LLM för kategorisering
+    5. Uppdatera taxonomin
     
     Returns:
         dict med statistik över konsolideringen
@@ -289,6 +371,25 @@ def consolidate() -> dict:
         # 2. Ladda taxonomin
         taxonomy = _load_taxonomy()
         
+        # 2.5. Synkronisera taxonomin med grafens canonical truth (NYTT)
+        # Öppna graf-anslutning för synkronisering
+        graph = None
+        try:
+            graph = GraphStore(GRAPH_PATH, read_only=True)
+            sync_stats = _synchronize_taxonomy_with_graph(taxonomy, graph)
+            
+            if sync_stats["aliases_replaced"] > 0 or sync_stats["pruned"] > 0 or sync_stats["stale_removed"] > 0:
+                total_changes = sync_stats["aliases_replaced"] + sync_stats["pruned"] + sync_stats["stale_removed"]
+                print(f"{_ts()} 🔄 Synkroniserade taxonomi: {sync_stats['aliases_replaced']} alias ersatta, "
+                      f"{sync_stats['pruned']} prunade, {sync_stats['stale_removed']} stale borttagna")
+                LOGGER.info(f"Taxonomi-synkronisering: {total_changes} ändringar")
+        except Exception as e:
+            LOGGER.error(f"HARDFAIL: Kunde inte synkronisera taxonomi: {e}")
+            raise RuntimeError(f"HARDFAIL: Kunde inte synkronisera taxonomi: {e}") from e
+        finally:
+            if graph:
+                graph.close()
+        
         # 3. Hitta nya noder
         unrecognized = _find_unrecognized_nodes(graph_data, taxonomy)
         
@@ -298,6 +399,8 @@ def consolidate() -> dict:
         if not new_concepts and not new_entities:
             print(f"{_ts()} ✅ Dreaming klar: Inga nya noder att konsolidera")
             LOGGER.info("Inga nya noder att konsolidera")
+            # Spara även om inga nya noder (synkroniseringen kan ha ändrat taxonomin)
+            _save_taxonomy(taxonomy)
             _save_timestamp()
             return stats
         
@@ -318,11 +421,18 @@ def consolidate() -> dict:
                                 taxonomy[master_node]["sub_nodes"].append(item)
                                 stats["concepts_added"] += 1
                 
+                # Deduplicera och sortera efter att ha lagt till nya noder
+                for master_node, data in taxonomy.items():
+                    if "sub_nodes" in data:
+                        data["sub_nodes"] = sorted(list(set(data["sub_nodes"])))
+                
                 _save_taxonomy(taxonomy)
                 print(f"{_ts()} ✅ Dreaming klar: {stats['concepts_added']} noder tillagda i taxonomin")
         else:
             LOGGER.warning("AI-klient saknas, kan inte kategorisera nya noder")
             stats["status"] = "NO_AI"
+            # Spara även om AI saknas (synkroniseringen kan ha ändrat taxonomin)
+            _save_taxonomy(taxonomy)
         
         _save_timestamp()
         

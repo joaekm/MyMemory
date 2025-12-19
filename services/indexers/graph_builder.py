@@ -12,7 +12,10 @@ import logging
 import re
 
 # Lägg till projektroten i sys.path för att hitta services-paketet
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# graph_builder.py ligger i services/indexers/, så vi behöver gå upp 3 nivåer för att nå projektroten
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(script_dir)))
+sys.path.insert(0, project_root)
 
 from services.utils.graph_service import GraphStore
 
@@ -443,4 +446,17 @@ def upgrade_canonical(old_canonical: str, new_canonical: str) -> bool:
 
 if __name__ == "__main__":
     print("--- MyMem Graph Builder (v5.0 - DuckDB) ---")
-    process_lake_batch()
+    try:
+        process_lake_batch()
+        sys.exit(0)
+    except KeyboardInterrupt:
+        print("\n⚠️ Avbruten av användaren")
+        LOGGER.warning("Graph builder avbruten av användaren")
+        sys.exit(130)  # Standard exit code för Ctrl+C
+    except Exception as e:
+        error_msg = f"KRITISKT FEL i Graph Builder: {e}"
+        print(f"❌ {error_msg}")
+        LOGGER.error(error_msg, exc_info=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
