@@ -339,9 +339,14 @@ def run_graph_builder():
         raise RuntimeError(error_msg)
     
     try:
+        # Sätt PYTHONPATH explicit så att subprocess kan hitta services-modulen
+        env = os.environ.copy()
+        env['PYTHONPATH'] = project_root
+        
         result = subprocess.run(
             [sys.executable, script_path],
             cwd=project_root,
+            env=env,
             capture_output=True,
             text=True,
             timeout=300
