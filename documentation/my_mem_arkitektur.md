@@ -1,5 +1,5 @@
 
-# Systemarkitektur (v8.2 - Pivot or Persevere)
+# Systemarkitektur (v8.3 - The Graph Awakens)
 
 Detta dokument beskriver den tekniska sanningen om systemets implementation, uppdaterad December 2025.
 
@@ -18,6 +18,8 @@ Detta dokument beskriver den tekniska sanningen om systemets implementation, upp
 6. **Idempotens & Självläkning:** Alla agenter hoppar över filer som redan är klara, men fyller automatiskt i "hål" om filer saknas i nästa led.
 
 7. **Validering & Underhåll:** Vid varje uppstart körs systemvalidering och loggrensning (>24h) automatiskt.
+
+8. **Graph Truth:** Grafen är sanningen för entiteter och relationer. Vektorn är sökvägen till innehållet. Taxonomin är kartan.
 
 ## 2. Datamodell: Trippel Lagring
 
@@ -50,9 +52,11 @@ Assets/
 
 ### "Index" (Lagring 3 - Hjärnan)
 - **ChromaDB:** Vektorer för semantisk sökning (Textlikhet).
-- **KùzuDB:** Graf för entitets-relationer och tidslinjer (Exakthet).
+- **GraphDB (DuckDB):** 
+    - `nodes`: Entiteter och Koncept (Canonical + Aliases).
+    - `edges`: Relationer (DEALS_WITH, UNIT_MENTIONS).
+    - `evidence`: LLM-genererade observationer från Multipass-analys.
 - **taxonomy.json:** Sanningens källa för Masternoder (OTS).
-- **Framtid:** Grafen ska lära sig aliases över tid (OBJEKT-44).
 
 ## 3. Agent-sviten (Tjänsterna)
 
@@ -72,26 +76,19 @@ Hela systemet orkestreras av `start_services.py` (för realtidstjänster) och ma
 | Agent | Bevakar | Modell | Output |
 |-------|---------|--------|--------|
 | **Transcriber** | `Recordings/` | Flash (transkribering) + Pro (analys & QC) | `.txt` i `Transcripts/` |
-| **Doc Converter** | `Transcripts/`, `Documents/`, `Slack/`, `Sessions/`, `Calendar/`, `Mail/` | Gemini Flash | `.md` i Lake |
+| **Doc Converter** | `Transcripts/`, `Documents/`, `Slack/`, `Sessions/`, `Calendar/`, `Mail/` | Gemini Flash/Lite | `.md` i Lake |
 
-### 3.2.1 Document DNA (Metadata is Queen)
+### 3.2.1 Graph-Boosted Transcriber (v8.3)
+Transcriber använder nu grafens kunskap för att förbättra kvaliteten:
+1. **Context Injection:** Hämtar kända Personer och Alias från GraphDB + dagens Kalender-events.
+2. **Canonical Normalization:** Mappar automatiskt namnvarianter ("Jocke") till grafens canonical ("Joakim Ekman").
+3. **Alias Learning:** Nya namnvarianter registreras direkt som alias i grafen.
 
-DocConverter extraherar omfattande metadata från dokument via `document_dna.py`:
-
-| Kategori | Fält | Användning |
-|----------|------|------------|
-| **File DNA** | SHA256 hash, storlek, MIME-typ | Deduplicering, integritet |
-| **Intrinsic** | author_embedded, title_embedded, creation_tool, sheet_names | Sökfilter, kvalitetsbedömning |
-| **Content** | word_count, language_detected | Språkfiltrering |
-| **Provenance** | timestamps, original_filename | Spårbarhet |
-
-**Quality-Aware Reranking:** Dokument skapade med authoring-verktyg (Word, Excel) får boost, skannade dokument får penalty.
-
-**Transcriber-flöde (v6.0):**
-1. Flash transkriberar ljudfil ordagrant
-2. Pro gör sanity check (kvalitetskontroll)
-3. Pro identifierar talare och formaterar
-4. Misslyckade filer flyttas till `Failed/`
+### 3.2.2 Multipass Extraction (v8.3)
+DocConverter använder nu en parallelliserad "Multipass"-strategi för djupare analys:
+1. **Per-Masternode:** Kör en separat, strikt LLM-pass (Model Lite) för varje relevant masternod.
+2. **Evidence Generation:** Varje träff sparas som ett "Evidence Item" i GraphDB (`evidence`-tabellen) med confidence score.
+3. **Parallellism:** Använder ThreadPoolExecutor för att köra alla masternoder samtidigt.
 
 ### 3.3 Indexering (Delad Arkitektur)
 
@@ -99,6 +96,16 @@ DocConverter extraherar omfattande metadata från dokument via `document_dna.py`
 |-------|--------|----------|-------|
 | **Vector Indexer** | Realtid (Watchdog) | Uppdaterar ChromaDB | Snabb sökbarhet |
 | **Graph Builder** | Batch (Manuell) | Konsoliderar mot OTS | Struktur & relationer |
+| **Dreamer** | Batch (Schemalagd) | Evidence-baserad konsolidering | Taxonomi-vård |
+
+### 3.3.1 Dreamer & Evidence Consolidation
+Dreamer har uppgraderats för att använda Evidence Layer:
+1. **Sync:** Synkroniserar taxonomin mot grafens "Canonical Truth" (rensar alias/stale noder).
+2. **Consolidate:** Analyserar `evidence`-tabellen.
+   - Om grafen redan vet entitetstyp: Använd den (Truth).
+   - Om ny entitet: Använd statistisk slutledning från evidence (High Confidence/Frequency).
+   - Flyttar automatiskt entiteter mellan masternoder om bevisen pekar rätt.
+3. **Backpropagation:** Skriver "Graph Context Summary" tillbaka till Lake-filen för att göra vektorn smartare.
 
 ## 4. Konsumtion & Gränssnitt
 
@@ -138,29 +145,6 @@ Input → IntentRouter → ContextBuilder → Planner (ReAct) → Synthesizer �
 4. If COMPLETE: Returnera Tornet som rapport
 ```
 
-**Chattkommandon:**
-| Kommando | Funktion |
-|----------|----------|
-| `/show` | Visa filnamn (utan UUID) från senaste sökningen |
-| `/export` | Skapa symlinks i hotfolder (top 10 på score) |
-| `/context` | Exportera K (syntes + bevis + källor) som markdown |
-
-**Konfiguration:**
-- `chat_prompts.yaml`: Alla system-instruktioner
-- `my_mem_config.yaml`: Reranking-parametrar (boost_strength, top_n_fulltext)
-- **Refresh:** Nya DB-anslutningar vid varje sökning för realtidsdata
-
-### Launcher (macOS)
-- **Fil:** `MyMemory.app/Contents/Resources/Scripts/main.scpt`
-- **Funktion:** Orkestrerar start av backend och frontend.
-- **Standard Mode:** Visar 💭 "Thinking Out Loud" - agenternas resonemang och aktiva agenter.
-- **Debug Mode:** Argument `--debug` visar full diagnostik (gain, status, patience, Librarian Scan).
-
-### Simuleringsverktyg (Nytt)
-- **Fil:** `tools/simulate_session.py`
-- **Funktion:** Stresstestning med AI-persona (Interrogator + Evaluator).
-- **Output:** Utvärderingsrapport + teknisk logg i `logs/`.
-
 ## 5. Konfiguration
 
 All styrning sker via konfigurationsfiler:
@@ -168,34 +152,10 @@ All styrning sker via konfigurationsfiler:
 | Fil | Syfte |
 |-----|-------|
 | `my_mem_config.yaml` | Sökvägar, API-nycklar, Slack-kanaler, Google OAuth, AI-modeller |
-| `my_mem_taxonomy.json` | Masternoder (OTS) - 26 huvudnoder |
+| `my_mem_taxonomy.json` | Masternoder (OTS) + **Multipass Definitions** |
 | `chat_prompts.yaml` | System-prompter för chatten |
 | `services_prompts.yaml` | Prompter för insamlingsagenter |
 | `.cursorrules` | **Utvecklingsregler** (HARDFAIL, Ingen AI-cringe) |
-
-### Sökvägar i my_mem_config.yaml
-
-```yaml
-paths:
-  drop_folder: "~/Desktop/MemoryDrop"
-  lake_store: "~/MyMemory/Lake"
-  asset_store: "~/MyMemory/Assets"
-  # Asset sub-folders
-  asset_recordings: "~/MyMemory/Assets/Recordings"
-  asset_transcripts: "~/MyMemory/Assets/Transcripts"
-  asset_documents: "~/MyMemory/Assets/Documents"
-  asset_slack: "~/MyMemory/Assets/Slack"
-  asset_sessions: "~/MyMemory/Assets/Sessions"
-  asset_failed: "~/MyMemory/Assets/Failed"
-  asset_calendar: "~/MyMemory/Assets/Calendar"
-  asset_mail: "~/MyMemory/Assets/Mail"
-  # Index
-  chroma_db: "~/MyMemory/Index/ChromaDB"
-  graph_db: "~/MyMemory/Index/GraphDB"  # DuckDB grafdatabas (LÖST-54)
-  taxonomy_file: "~/MyMemory/Index/my_mem_taxonomy.json"
-  # Export
-  hot_folder: "~/Downloads/MyMem Hotfiles"  # Symlinks för /export
-```
 
 ## 6. Tech Stack & Beroenden
 
@@ -203,7 +163,7 @@ paths:
 |----------|-----------|
 | **Språk** | Python 3.12 |
 | **Vektordatabas** | ChromaDB |
-| **Grafdatabas** | DuckDB (relationell graf via nodes/edges) |
+| **Grafdatabas** | DuckDB (relationell graf via nodes/edges/evidence) |
 | **Parsing** | pandas, pypdf, python-docx |
 | **UI** | Rich (CLI) |
 | **AI-klient** | google-genai (v1.0+ syntax) |
@@ -213,31 +173,33 @@ paths:
 |---------|--------|----------|
 | Planering | Gemini Flash Lite | Låg latens |
 | Re-ranking | Gemini Flash Lite | Låg latens |
+| Multipass | Gemini Flash Lite | Massiv parallellism |
 | Transkribering | Gemini Pro | Hög kvalitet |
 | **Syntes** | Gemini Pro | **~70% av svarstiden** |
 | Embeddings | all-MiniLM-L6-v2 | Lokal CPU |
 
-## 7. Utility-moduler
+## 7. Rebuild & Underhåll
 
-Hjälpfunktioner i `services/utils/`:
+### tool_staged_rebuild.py (v2.1 - Phase-Aware)
+Huvudverktyg för systemåterställning och migrering. Stöder **fas-baserad rebuild** för optimal datakvalitet:
 
-| Modul | Funktion |
-|-------|----------|
-| `json_parser.py` | Robust JSON-parsning från LLM-svar (raw_decode) |
-| `date_service.py` | Central datumhantering med fallback-kedja |
-| `document_dna.py` | Metadata-extraktion från dokument |
-| `export_search.py` | Exportera kandidater som symlinks till hotfolder |
+**Två faser:**
+1. **Foundation Phase (`--phase foundation`):** Bygger grunden från textkällor (Slack, Documents, Mail, Calendar). Transcriber är **exkluderad** för att säkerställa att grafen byggs på ren textdata först.
+2. **Enrichment Phase (`--phase enrichment`):** Bearbetar ljud/transkript med kontext från grunden. Transcriber är **aktiverad** och använder grafens etablerade entiteter och alias för bättre kvalitet.
 
-## 8. Kända Begränsningar (2025-12-16)
+**Manifest-baserad spårning:**
+- `.rebuild_manifest.json` spårar progress per UUID och fas.
+- Systemet hoppar automatiskt över redan processerade filer.
+- Stödjer återupptagning efter avbrott.
 
-Aktuell status efter Pipeline v8.2:
+**Användning:**
+```bash
+python tools/tool_staged_rebuild.py --confirm --phase foundation
+python tools/tool_staged_rebuild.py --confirm --phase enrichment --multipass
+```
 
-| Problem | Objekt | Status |
-|---------|--------|--------|
-| Aggregerad insikt | OBJEKT-41 | ⚠️ Utvärdera - Tornet kan lösa detta |
-| Temporal filtering | OBJEKT-42 | ⚠️ Delvis löst - IntentRouter parsar tid, filtering saknas |
-| Långsam syntes | LÖST-57 | ✅ Time-Aware Reranking + TOP_N_FULLTEXT |
-| Entity Resolution | OBJEKT-44 | ⚠️ Delvis löst - Infrastruktur finns, inlärning saknas |
-| Context Injection vid insamling | OBJEKT-45 | ⚠️ Delvis löst - Graf-kontext finns, ej i prompts |
-| Entiteter i taxonomin | OBJEKT-51 | ⚠️ Delvis löst - Graf har Entity-noder, taxonomi ej städad |
-| Embedding-migration | OBJEKT-47 | ⚠️ DEADLINE 2026-01-14 |
+**Legacy-lägen:**
+- **Taxonomy Only:** Snabbare ombyggnad av enbart taxonomin från "Trusted Sources" (exkluderar transcripts). Använder Multipass för att bygga en ren struktur.
+
+### tool_hard_reset.py
+Nollställer systemet men **bevarar** `taxonomy.json` via en template-strategi (`config/taxonomy_template.json`) för att inte tappa definitioner. Raderar även `.rebuild_manifest.json`.
