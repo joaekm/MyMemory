@@ -10,6 +10,7 @@ import yaml
 import json
 import logging
 import re
+import time
 
 # Lägg till projektroten i sys.path för att hitta services-paketet
 # graph_builder.py ligger i services/indexers/, så vi behöver gå upp 3 nivåer för att nå projektroten
@@ -74,7 +75,9 @@ def _get_graph() -> GraphStore:
         with _GRAPH_LOCK:
             # Double-checked locking
             if _GRAPH_INSTANCE is None:
-                _GRAPH_INSTANCE = GraphStore(GRAPH_PATH)
+                # Använd read_write (default) för att undvika konflikter med read_only-anslutningar
+                # read_write kan användas för både läsning och skrivning
+                _GRAPH_INSTANCE = GraphStore(GRAPH_PATH, read_only=False)
     
     return _GRAPH_INSTANCE
 
@@ -88,125 +91,196 @@ def close_db_connection():
             _GRAPH_INSTANCE = None
 
 
+def _entity_exists_in_taxonomy(entity_name: str, taxonomy: dict) -> bool:
+    """
+    Kolla om en entitet redan finns i någon masternod i taxonomin.
+    
+    Args:
+        entity_name: Entitetens namn att kolla
+        taxonomy: Taxonomi-dict
+        
+    Returns:
+        True om entiteten finns i någon masternod
+    """
+    if not taxonomy:
+        return False
+    
+    for master_node, data in taxonomy.items():
+        if entity_name in data.get("sub_nodes", []):
+            return True
+    return False
+
+
 # --- GRAPH ENGINE ---
 
 def process_lake_batch():
     """Huvudloop för grafbyggande - Nu med GraphStore (DuckDB)."""
     
+    # Retry-logik för att hantera DuckDB-lock-konflikter efter att tjänster stoppats
+    # DuckDB kan ta tid att frigöra låset efter att processer dödats
+    max_retries = 10
+    retry_delay = 1.0
     graph = None
     
+    for attempt in range(max_retries):
+        try:
+            graph = GraphStore(GRAPH_PATH, read_only=False)
+            break
+        except Exception as e:
+            error_str = str(e).lower()
+            if ("lock" in error_str or "conflicting" in error_str or "different configuration" in error_str) and attempt < max_retries - 1:
+                LOGGER.warning(f"Kunde inte öppna GraphStore (försök {attempt + 1}/{max_retries}), väntar {retry_delay:.1f}s: {e}")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 1.5, 5.0)  # Exponential backoff, max 5s
+            else:
+                LOGGER.error(f"HARDFAIL: Kunde inte öppna GraphStore efter {attempt + 1} försök: {e}", exc_info=True)
+                raise
+    
+    if graph is None:
+        raise RuntimeError("HARDFAIL: Kunde inte öppna GraphStore efter alla försök")
+    
+    # Använd context manager för att säkerställa korrekt stängning
     try:
-        graph = GraphStore(GRAPH_PATH)
-        
-        files_processed = 0
-        relations_created = 0
-        
-        print(f"🔍 Scannar {LAKE_STORE}...")
-
-        for filename in os.listdir(LAKE_STORE):
-            if not filename.endswith(".md"):
-                continue
-            
-            match = UUID_SUFFIX_PATTERN.search(filename)
-            unit_id = match.group(1) if match else None
-            if not unit_id:
-                continue
-            
-            filepath = os.path.join(LAKE_STORE, filename)
+        with graph:
+            # Starta en enda transaktion för hela batch-processningen
+            # Detta förhindrar write-write conflicts när flera filer skriver samma noder
+            with graph._lock:
+                graph.conn.execute("BEGIN TRANSACTION")
             
             try:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                if "---" not in content:
-                    continue
-                parts = content.split("---", 2)
-                metadata = yaml.safe_load(parts[1])
+                files_processed = 0
+                relations_created = 0
                 
-                # Metadata Extraction
-                timestamp = metadata.get('timestamp_created') or ""
-                source_type = metadata.get('source_type') or "unknown"
-                summary = (metadata.get('summary') or "").replace('"', "'")
+                # Ladda taxonomi en gång för hela batch-processningen
+                taxonomy = {}
+                try:
+                    if os.path.exists(TAXONOMY_FILE):
+                        with open(TAXONOMY_FILE, 'r', encoding='utf-8') as f:
+                            taxonomy = json.load(f)
+                        LOGGER.debug(f"Taxonomi laddad: {len(taxonomy)} masternoder")
+                except Exception as e:
+                    LOGGER.warning(f"Kunde inte ladda taxonomi för entity-check: {e}")
+                    taxonomy = {}
                 
-                # 1. Skapa Dokument-noden (Unit)
-                graph.upsert_node(
-                    id=unit_id,
-                    type="Unit",
-                    properties={
-                        "timestamp": timestamp,
-                        "source_type": source_type,
-                        "summary": summary[:500] if summary else ""  # Begränsa längd
-                    }
-                )
+                print(f"🔍 Scannar {LAKE_STORE}...")
 
-                # 2. Skapa Relationer baserat på EXPLICIT DATA
-                
-                # A. GRAPH_NODES (Ny struktur med viktade koncept och typade entiteter)
-                graph_nodes = metadata.get('graph_nodes', {})
-                
-                # Hantera legacy-format (graph_master_node/graph_sub_node)
-                if not graph_nodes:
-                    master_node = metadata.get('graph_master_node')
-                    if master_node:
-                        graph_nodes[master_node] = 1.0
-                    sub_node = metadata.get('graph_sub_node')
-                    if sub_node:
-                        graph_nodes[sub_node] = 0.5
-                
-                for node_key, node_value in graph_nodes.items():
-                    # Abstrakt koncept (masternode) - värde är float
-                    if isinstance(node_value, (int, float)):
-                        graph.upsert_node(id=node_key, type="Concept")
-                        graph.upsert_edge(
-                            source=unit_id, 
-                            target=node_key, 
-                            edge_type="DEALS_WITH",
-                            properties={"weight": node_value}
-                        )
-                        relations_created += 1
+                for filename in os.listdir(LAKE_STORE):
+                    if not filename.endswith(".md"):
+                        continue
                     
-                    # Typad entitet - värde är dict med namn -> relevans
-                    elif isinstance(node_value, dict):
-                        entity_type = node_key  # Typ från taxonomin
-                        for entity_name, relevance in node_value.items():
-                            # Skapa Entity-nod
-                            graph.upsert_node(
-                                id=entity_name,
-                                type="Entity",
-                                properties={"entity_type": entity_type}
-                            )
-                            # Skapa relation Unit -> Entity
+                    match = UUID_SUFFIX_PATTERN.search(filename)
+                    unit_id = match.group(1) if match else None
+                    if not unit_id:
+                        continue
+                    
+                    filepath = os.path.join(LAKE_STORE, filename)
+                    
+                    try:
+                        with open(filepath, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        if "---" not in content:
+                            continue
+                        parts = content.split("---", 2)
+                        metadata = yaml.safe_load(parts[1])
+                        
+                        # Metadata Extraction
+                        timestamp = metadata.get('timestamp_created') or ""
+                        source_type = metadata.get('source_type') or "unknown"
+                        summary = (metadata.get('summary') or "").replace('"', "'")
+                        
+                        # 1. Skapa Dokument-noden (Unit)
+                        graph.upsert_node(
+                            id=unit_id,
+                            type="Unit",
+                            properties={
+                                "timestamp": timestamp,
+                                "source_type": source_type,
+                                "summary": summary[:500] if summary else ""  # Begränsa längd
+                            }
+                        )
+
+                        # 2. Skapa Relationer baserat på EXPLICIT DATA
+                        
+                        # A. GRAPH_NODES (Ny struktur med viktade koncept och typade entiteter)
+                        graph_nodes = metadata.get('graph_nodes', {})
+                        
+                        # Hantera legacy-format (graph_master_node/graph_sub_node)
+                        if not graph_nodes:
+                            master_node = metadata.get('graph_master_node')
+                            if master_node:
+                                graph_nodes[master_node] = 1.0
+                            sub_node = metadata.get('graph_sub_node')
+                            if sub_node:
+                                graph_nodes[sub_node] = 0.5
+                        
+                        for node_key, node_value in graph_nodes.items():
+                            # Abstrakt koncept (masternode) - värde är float
+                            if isinstance(node_value, (int, float)):
+                                graph.upsert_node(id=node_key, type="Concept")
+                                graph.upsert_edge(
+                                    source=unit_id, 
+                                    target=node_key, 
+                                    edge_type="DEALS_WITH",
+                                    properties={"weight": node_value}
+                                )
+                                relations_created += 1
+                            
+                            # Typad entitet - värde är dict med namn -> relevans
+                            elif isinstance(node_value, dict):
+                                entity_type = node_key  # Typ från taxonomin
+                                for entity_name, relevance in node_value.items():
+                                    # Kolla om entiteten redan finns i taxonomin
+                                    if _entity_exists_in_taxonomy(entity_name, taxonomy):
+                                        LOGGER.debug(f"Skippar '{entity_name}' - finns redan i taxonomin")
+                                        continue  # Hoppa över - entiteten är redan klar
+                                    
+                                    # Skapa Entity-nod
+                                    graph.upsert_node(
+                                        id=entity_name,
+                                        type="Entity",
+                                        properties={"entity_type": entity_type}
+                                    )
+                                    # Skapa relation Unit -> Entity
+                                    graph.upsert_edge(
+                                        source=unit_id,
+                                        target=entity_name,
+                                        edge_type="UNIT_MENTIONS",
+                                        properties={"relevance": relevance}
+                                    )
+                                    relations_created += 1
+
+                        # C. PERSON (Ägare)
+                        owner = metadata.get('owner_id')
+                        if owner:
+                            graph.upsert_node(id=owner, type="Person")
                             graph.upsert_edge(
                                 source=unit_id,
-                                target=entity_name,
-                                edge_type="UNIT_MENTIONS",
-                                properties={"relevance": relevance}
+                                target=owner,
+                                edge_type="CREATED_BY"
                             )
-                            relations_created += 1
+                        
+                        files_processed += 1
 
-                # C. PERSON (Ägare)
-                owner = metadata.get('owner_id')
-                if owner:
-                    graph.upsert_node(id=owner, type="Person")
-                    graph.upsert_edge(
-                        source=unit_id,
-                        target=owner,
-                        edge_type="CREATED_BY"
-                    )
+                    except Exception as e:
+                        LOGGER.error(f"Fel vid graf-processning av {filename}: {e}")
+                        # Fortsätt med nästa fil även om denna misslyckades
+                        continue
                 
-                files_processed += 1
-
+                # Commit transaktionen när alla filer är processade
+                with graph._lock:
+                    graph.conn.execute("COMMIT")
+                print(f"✅ Klar. {files_processed} filer bearbetade. {relations_created} relationer skapade.")
+            
             except Exception as e:
-                LOGGER.error(f"Fel vid graf-processning av {filename}: {e}")
-
-        print(f"✅ Klar. {files_processed} filer bearbetade. {relations_created} relationer skapade.")
-
+                # Rollback vid fel
+                with graph._lock:
+                    graph.conn.execute("ROLLBACK")
+                LOGGER.error(f"Fel i batch-transaktion: {e}", exc_info=True)
+                raise
+    
     except Exception as main_e:
         LOGGER.error(f"Kritiskt fel i Graf-loopen: {main_e}")
         raise
-
-    finally:
-        if graph:
-            graph.close()
 
 
 # === ENTITY FUNCTIONS ===
