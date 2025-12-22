@@ -43,11 +43,12 @@ def parse_llm_json(text: str, context: str = "unknown") -> dict:
     text = re.sub(r',\s*]', ']', text)
     
     # Steg 3: Hitta STÖRSTA giltiga JSON-objekt med raw_decode
-    # (Undviker att returnera inre objekt som time_filter istället för yttre)
-    # Prioriterar objekt ({}) över arrayer ([]) - tar STÖRSTA av varje typ
+    # Prioriterar yttre objekt över inre objekt (yttre börjar tidigare i texten)
+    # Detta löser problemet där inre objekt med fler nycklar väljs istället för yttre objekt
     decoder = json.JSONDecoder()
     best_object = None
     best_object_size = 0
+    best_object_start = float('inf')  # Börjar så tidigt som möjligt
     best_array = None
     best_array_size = 0
     
@@ -56,11 +57,13 @@ def parse_llm_json(text: str, context: str = "unknown") -> dict:
             try:
                 obj, end = decoder.raw_decode(text, i)
                 if isinstance(obj, dict):
-                    # Ta STÖRSTA objektet (fler nycklar = mer komplett)
+                    # Prioritera objekt som börjar tidigast (yttre objekt)
+                    # Om två objekt börjar på samma position, ta det med flest nycklar
                     obj_size = len(obj)
-                    if obj_size > best_object_size:
+                    if i < best_object_start or (i == best_object_start and obj_size > best_object_size):
                         best_object = obj
                         best_object_size = obj_size
+                        best_object_start = i
                         LOGGER.debug(f"[{context}] Kandidat-objekt vid pos {i}: {obj_size} nycklar")
             except json.JSONDecodeError:
                 continue
@@ -78,7 +81,7 @@ def parse_llm_json(text: str, context: str = "unknown") -> dict:
     
     # Prioritera objekt över arrayer (LLM-svar är oftast objekt)
     if best_object is not None:
-        LOGGER.debug(f"[{context}] Returnerar objekt med {best_object_size} nycklar")
+        LOGGER.debug(f"[{context}] Returnerar objekt med {best_object_size} nycklar (startade vid pos {best_object_start})")
         return best_object
     if best_array is not None:
         LOGGER.debug(f"[{context}] Returnerar array med {best_array_size} element")

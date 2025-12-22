@@ -3,6 +3,8 @@
 # --- Transformations-agenten (Ljud/Video) ---
 transcriber:
   analysis_prompt: |
+    {context_injection}
+
     Du får en rå transkription från en ljudfil. Utför följande tre steg:
     
     STEG 1: KVALITETSKONTROLL
@@ -16,15 +18,17 @@ transcriber:
     Om FAILED: Ange failure_reason och hoppa över steg 2-3.
     
     STEG 2: KORRIGERAD TRANSKRIPTION (endast om quality_status är "OK")
-    - Identifiera talarna från innehållet (de presenterar sig ofta i början)
-    - Skriv ut HELA transkriptionen med riktiga namn där det är möjligt
-    - Format: "Namn: text" (kolon, mellanslag, en rad per replik)
-    - Om ett namn är okänt, behåll "Talare N"
-    - Standardisera formatet (ta bort hakparenteser, fixa radbrytningar)
-    - Behåll allt innehåll - korta inte ner
+    - Identifiera talarna från innehållet (de presenterar sig ofta i början).
+    - VIKTIGT: Om "MÖTESKONTEXT" angavs ovan, använd deltagarlistan därifrån för att avgöra vilka talarna är.
+    - Skriv ut HELA transkriptionen med riktiga namn där det är möjligt.
+    - Format: "Namn: text" (Talarnamn, kolon, mellanslag).
+    - Om ett namn är okänt, behåll "Talare N".
+    - Standardisera formatet (ta bort hakparenteser, fixa radbrytningar).
+    - Behåll allt innehåll - korta inte ner.
     
     STEG 3: METADATA
     Extrahera strukturerad information från innehållet.
+    Använd MÖTESKONTEXT för att fylla i syfte och entiteter om det är otydligt i ljudet.
     
     RETURNERA EXAKT DENNA JSON-STRUKTUR:
     {
@@ -45,6 +49,12 @@ doc_converter:
 
     GILTIGA MASTER NODER:
     {valid_nodes}
+
+    KRITISK INSTRUKTION - VALIDERING MOT TIDIGARE BESLUT:
+    - Om ett förslag uppvisar Olikhet mot referenser eller Likhet med avfärdade termer, kasta det omedelbart.
+    - Använd GODKÄNDA_REFERENSER som mallar för hur entiteter i denna kategori ska se ut.
+    - Om en entitet liknar en TIDIGARE_AVFÄRDADE_EXEMPEL, inkludera den INTE.
+    - Använd Validering-frågan från multipass_definition för att avgöra om en entitet passar kategorin.
 
     DEFINITIONER AV NODER:
     - Vision: Framtidsbilder, syfte, långsiktiga mål (2-5 år), "Varför vi finns".
@@ -81,20 +91,21 @@ doc_converter:
     Om texten nämner en person eller ett projekt som finns i listan KÄNDA PERSONER/PROJEKT,
     använd EXAKT det namnet. Gissa INTE egna varianter.
     
-    ENTITETSNAMN REGLER:
-    - IGNORERA filnamn som entiteter (*.py, *.js, *.md, *.txt etc) - de är INTE projekt
-    - KORTA namn till max 40 tecken. "Abelsson eller annan funktionell..." → "Abelsson"
-    - Om ett namn har förkortning i parentes, t.ex. "Carbon Copy Machine (CCM)", 
-      använd BARA huvudnamnet "Carbon Copy Machine" och lägg förkortningen som alias
-    - Entiteter ska vara NAMN på personer/organisationer/projekt, inte beskrivningar
+    ENTITETSNAMN REGLER (CLEANUP):
+    - DÖDA SJÄLVREFERENSER: Skapa ALDRIG en subnod med samma namn som Masternoden. Om du under Projekt inte hittar ett unikt namn, returnera endast Projekt: <vikt>, men lämna sub_nodes tom.
+    - HÄRDA AKTÖRER: Digitalist är SUBJEKTET. Alla enheter som "Drive", "Digitalist Open Tech" eller dotterbolag är vi själva. Lägg ALDRIG till oss som en Aktör. Aktörer är endast externa parter.
+    - NORMALISERING: Använd Title Case för alla entiteter (t.ex. "Joakim Ekman" istället för "joakim ekman").
+    - KORTA KODER: Korta, kryptiska koder (t.ex. "msf") ska endast sparas som Teknologier om de representerar ett etablerat ramverk, annars ignorera dem.
+    - IGNORERA filnamn som entiteter (*.py, *.js, *.md, *.txt etc) - de är INTE projekt.
+    - KORTA namn till max 40 tecken.
+    - Om ett namn har förkortning i parentes, använd BARA huvudnamnet och lägg förkortningen som alias.
     
     ALIAS-DETEKTION:
     Om texten innehåller namnvarianter som troligen refererar till samma entitet,
     rapportera dessa som "potential_aliases". Exempel:
-    - "Sänk" nämns i samma kontext som "Cenk" → potential alias
-    - "Adda-grejen" och "Adda PoC" → potential alias
+    - Exempel: "Jonte" nämns i samma kontext som "Jonas" → potential alias
+    - Exempel: "SOK-grejen" och "Sök och Kasta -projektet" → potential alias
     - Smeknamn, förkortningar, felstavningar
-    - "CCM" och "Carbon Copy Machine" → potential alias
     
     OUTPUT KRAV (Returnera ENDAST denna JSON):
     {
@@ -132,25 +143,79 @@ doc_converter:
 # --- Dreamer (Taxonomi-konsolidering) ---
 dreamer:
   consolidation_prompt: |
-    Du är en taxonomi-expert. Din uppgift är att kategorisera NYA noder under rätt masternode.
+    Du är en taxonomi-expert och 'Taxonomisk Granskare'. Din uppgift är att kategorisera NYA noder och städa BEFINTLIGA noder under rätt masternode.
     
-    BEFINTLIGA MASTERNODER (med beskrivningar):
+    BEFINTLIGA MASTERNODER (med beskrivningar och definitioner):
     {master_nodes}
     
-    NYA KONCEPT (okategoriserade):
-    {new_concepts}
-    
-    NYA ENTITETER (per typ):
-    {new_entities}
+    SUB-NODES ATT GRANSKA (Befintliga och Nya):
+    {sub_nodes_to_review}
     
     INSTRUKTIONER:
-    1. Placera varje nytt koncept under den MEST passande masternoden
-    2. Använd EXAKT nodnamn från BEFINTLIGA MASTERNODER ovan som nycklar
-    3. Om ett koncept är ett ALIAS för något som redan finns, lägg det i aliases_detected
-    4. Var konsekvent - liknande koncept ska hamna under samma masternode
-    5. VARJE koncept MÅSTE placeras under en masternode - ingen får utelämnas
+    1. Placera varje koncept under den MEST passande masternoden enligt definitionerna.
+    2. PRUNING: Identifiera noder som bryter mot masternodens definition (t.ex. interna enheter under 'Aktör' eller datum under 'Händelser') och markera dem för radering.
+    3. MERGING: Identifiera synonymer (t.ex. 'Jocke' och 'Joakim Ekman') och föreslå en sammanslagning till ett kanoniskt namn (Title Case).
+    4. NORMALISERING: Justera namn till Title Case (t.ex. 'python' -> 'Python').
+    5. Om ett koncept är ett ALIAS för något som redan finns, markera det som alias.
+    6. Var konsekvent - liknande koncept ska hamna under samma masternode.
+    7. VARJE koncept som behålls MÅSTE placeras under en masternode.
     
     RETURNERA ENDAST GILTIG JSON. Exempel på korrekt format:
-    {"Händelser": ["Sprint review", "Standup"], "Teknologier": ["Kubernetes"], "Person": ["Anna"], "aliases_detected": [{"alias": "K8s", "canonical": "Kubernetes", "confidence": "high"}]}
+    {
+      "categorized": {
+        "Händelser": ["Sprint review", "Standup"],
+        "Teknologier": ["Kubernetes"],
+        "Person": ["Anna"]
+      },
+      "aliases": [
+        {"alias": "K8s", "canonical": "Kubernetes", "confidence": "high"}
+      ],
+      "pruned": [
+        {"node": "msf", "reason": "Kryptisk kod utan kontext"},
+        {"node": "Digitalist Open Tech", "reason": "Intern enhet, ej extern Aktör"},
+        {"node": "2025-01-01", "reason": "Datum hör ej hemma som nodnamn"}
+      ],
+      "merged": [
+        {"old": "jocke", "new": "Joakim Ekman", "reason": "Smeknamn till kanoniskt namn"}
+      ]
+    }
     
-    Nycklar MÅSTE vara exakta nodnamn från BEFINTLIGA MASTERNODER. Inkludera INTE noder utan nya koncept.
+    Nycklar i "categorized" MÅSTE vara exakta nodnamn från BEFINTLIGA MASTERNODER.
+
+# --- Similarity Review Service ---
+similarity_review:
+  similarity_analysis_prompt: |
+    Du är en taxonomisk expert. Din uppgift är att bedöma om en ny entitet passar i kategorin "{master_node}" baserat på semantisk likhet mot godkända referenser.
+
+    NY ENTITET ATT BEDÖMA:
+    "{entity_name}"
+
+    GODKÄNDA REFERENSER (exempel på vad som passar i {master_node}):
+    {approved_references}
+
+    TIDIGARE AVFÄRDADE EXEMPEL (undvik dessa):
+    {rejected_examples}
+
+    INSTRUKTIONER:
+    1. Jämför "{entity_name}" semantiskt mot GODKÄNDA REFERENSER. Är det en "katt bland hermeliner" (semantisk avvikelse) eller passar det mönstret?
+    2. Kolla om "{entity_name}" liknar något i TIDIGARE AVFÄRDADE EXEMPEL.
+    3. Bedöm similarity_score (0.0-1.0) där:
+       - 0.9-1.0: Mycket hög semantisk likhet, passar perfekt
+       - 0.7-0.89: Hög likhet, passar bra
+       - 0.5-0.69: Måttlig likhet, kan passa men behöver granskning
+       - 0.3-0.49: Låg likhet, osannolikt att passa
+       - 0.0-0.29: Mycket låg likhet eller semantisk avvikelse
+    4. Identifiera den närmaste matchningen från GODKÄNDA REFERENSER (om similarity >= 0.5).
+    5. Bestäm suggested_action:
+       - APPROVE: similarity_score >= 0.7 och liknar INTE avfärdade exempel
+       - REJECT: Liknar avfärdade exempel eller similarity_score < 0.3
+       - REVIEW: Annars (ambivalens eller behöver mänsklig bedömning)
+
+    Returnera ENDAST JSON:
+    {{
+        "similarity_score": 0.0-1.0,
+        "closest_match": {{"entity_name": "...", "similarity": 0.X}} eller null,
+        "matches_rejected": true/false,
+        "suggested_action": "APPROVE|REVIEW|REJECT",
+        "reason": "Kort motivering för suggested_action"
+    }}

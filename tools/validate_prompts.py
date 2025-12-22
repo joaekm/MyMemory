@@ -152,7 +152,8 @@ def check_hardcoded_taxonomy(prompt_key: str, prompt_content: str, filepath: str
         found_nodes = [node for node in TAXONOMY_NODES if f'"{node}"' in line or f"'{node}'" in line]
         
         # Om 3+ noder på samma rad = troligen hårdkodad lista
-        if len(found_nodes) >= 3:
+        # UNDANTAG: validate_prompts.py själv (validatorn behöver känna till taxonomi-noder)
+        if len(found_nodes) >= 3 and 'validate_prompts.py' not in filepath:
             violations.append({
                 "file": filepath,
                 "prompt": prompt_key,
@@ -279,7 +280,10 @@ def check_redundant_prompts(prompts: dict, filepath: str, project_root: str) -> 
             try:
                 with open(py_file, 'r', encoding='utf-8') as f:
                     all_code += f.read()
-            except Exception:
+            except Exception as e:
+                # HARDFAIL: Logga men fortsätt med nästa fil (validator ska inte krascha)
+                import sys
+                sys.stderr.write(f"HARDFAIL: Kunde inte läsa {py_file}: {e}\n")
                 continue
     
     # Kolla varje prompt-nyckel
@@ -331,7 +335,10 @@ def fix_violations_with_llm(filepath: str, violations: list, dry_run: bool = Fal
     # Lazy import av google.genai
     try:
         from google import genai
-    except ImportError:
+    except ImportError as e:
+        # HARDFAIL: Logga och returnera False (detta är intentional - saknad dependency)
+        import sys
+        sys.stderr.write(f"HARDFAIL: google-genai inte installerat: {e}\n")
         print("❌ google-genai inte installerat. Kör: pip install google-genai")
         return False
     
@@ -426,6 +433,9 @@ FIXAD FIL (endast YAML, inga förklaringar):"""
         return True
         
     except Exception as e:
+        # HARDFAIL: Logga och returnera False (detta är intentional - LLM-fix är optional)
+        import sys
+        sys.stderr.write(f"HARDFAIL: LLM-fix misslyckades: {e}\n")
         print(f"❌ LLM-fix misslyckades: {e}")
         return False
 
@@ -440,6 +450,17 @@ def validate_prompt_file(filepath: str, project_root: str = None) -> list:
         with open(filepath, 'r', encoding='utf-8') as f:
             prompts = yaml.safe_load(f)
     except Exception as e:
+        # HARDFAIL: Returnera violation istället för att krascha validatorn (detta är intentional)
+        import sys
+        sys.stderr.write(f"HARDFAIL: Kunde inte läsa YAML-fil {filepath}: {e}\n")
+        return [{
+            "file": filepath,
+            "line": 0,
+            "rule": "ERROR",
+            "prompt": "",
+            "message": f"Kunde inte läsa YAML-fil: {e}",
+            "code": ""
+        }]
         return [{
             "file": filepath,
             "prompt": "",

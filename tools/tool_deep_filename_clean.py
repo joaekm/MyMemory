@@ -4,7 +4,13 @@ import shutil
 import uuid
 
 # --- CONFIG ---
-ASSET_STORE = os.path.expanduser("~/MyMemory/Assets")
+# Läs sökvägar från config (Princip 8)
+import yaml
+script_dir = os.path.dirname(os.path.abspath(__file__))
+config_path = os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml')
+with open(config_path, 'r') as f:
+    config = yaml.safe_load(f)
+ASSET_STORE = os.path.expanduser(config['paths']['asset_store'])
 
 # NY REGEX: Hanterar både bindestreck (-) och understreck (_) i UUIDt
 # Matchar 8-4-4-4-12 tecken i början av filnamnet.
@@ -93,7 +99,9 @@ def run_reorder():
                 print(f"🔧 {f}\n   -> {new_name} [{action}]")
                 changes += 1
             except Exception as e:
-                print(f"❌ Fel {f}: {e}")
+                # HARDFAIL: Logga men fortsätt med nästa fil (detta är intentional - fortsätt vid fel)
+                import sys
+                sys.stderr.write(f"HARDFAIL: Kunde inte byta namn på {f}: {e}\n")
         
         count += 1
 

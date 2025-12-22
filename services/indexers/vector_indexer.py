@@ -94,7 +94,12 @@ def indexera_vektor(filväg, filnamn):
         ai_summary = metadata.get('ai_summary') or ""
         timestamp = metadata.get('timestamp_created') or ""
         
-        full_doc = f"FILENAME: {filnamn}\nSUMMARY: {ai_summary}\n\nCONTENT:\n{text[:8000]}"
+        # Bygg graf-kontext om den finns (backpropagerad av Dreamer), annars ingen extra kontext
+        graph_ctx = metadata.get("graph_context_summary")
+        if graph_ctx:
+            full_doc = f"KONTEXT (Grafrelationer):\n{graph_ctx}\n\nFILENAME: {filnamn}\nSUMMARY: {ai_summary}\n\nCONTENT:\n{text[:8000]}"
+        else:
+            full_doc = f"FILENAME: {filnamn}\nSUMMARY: {ai_summary}\n\nCONTENT:\n{text[:8000]}"
 
         VECTOR_COLLECTION.upsert(
             ids=[unit_id],

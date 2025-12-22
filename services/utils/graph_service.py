@@ -7,21 +7,65 @@ Ersätter KuzuDB (LÖST-54).
 
 import os
 import json
+import uuid
+import datetime
 import logging
 import threading
+import time
 import duckdb
 
 # --- LOGGING ---
 LOGGER = logging.getLogger('GraphStore')
+
+# --- KANONISKA RELATIONER ---
+AVAILABLE_RELATIONS = {
+    "WORKS_AT": {
+        "from": "Person",
+        "to": "Aktör",
+        "description": "Anställning eller konsultuppdrag hos ett bolag."
+    },
+    "MEMBER_OF": {
+        "from": "Person",
+        "to": "Organisation",
+        "description": "Medlemskap i internt team, styrelse eller förening."
+    },
+    "LEADS": {
+        "from": "Person",
+        "to": "Projekt",
+        "description": "Ansvarig ledare, projektledare eller PO."
+    },
+    "PART_OF": {
+        "from": "Projekt",
+        "to": "Aktör",
+        "description": "Ett projekt som tillhör en kund eller organisation."
+    },
+    "USES": {
+        "from": "Projekt",
+        "to": "Teknologier",
+        "description": "Verktyg eller språk som används i ett specifikt projekt."
+    },
+    "REPORTS_TO": {
+        "from": "Person",
+        "to": "Person",
+        "description": "Hierarkisk koppling (t.ex. chef/medarbetare)."
+    },
+    "ASSOCIATED_WITH": {
+        "from": "Valfri",
+        "to": "Valfri",
+        "description": "Fallback: Allmän koppling när ingen annan passar."
+    }
+}
 
 
 class GraphStore:
     """
     Thread-safe grafdatabas med DuckDB backend.
     
-    Schema:
+        Schema:
         nodes(id, type, aliases, properties)
         edges(source, target, edge_type, properties)
+        evidence(id, entity_name, master_node_candidate, context_description, source_file,
+                 source_timestamp, extraction_pass, confidence, created_at)
     """
     
     def __init__(self, db_path: str, read_only: bool = False):
@@ -40,11 +84,85 @@ class GraphStore:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         
         # Öppna anslutning
+        # DuckDB tillåter inte att öppna samma databasfil med olika konfigurationer samtidigt
+        # Lösning: Använd alltid read_write om det finns en konflikt, eftersom read_write kan användas för både läsning och skrivning
+        connection_attempted = False
         if read_only:
-            self.conn = duckdb.connect(db_path, read_only=True)
+            try:
+                self.conn = duckdb.connect(db_path, read_only=True)
+                connection_attempted = True
+            except Exception as e:
+                error_str = str(e).lower()
+                # Om det finns en konflikt, försök med read_write istället
+                # Detta kan hända om en annan process redan har öppnat med read_write
+                if "different configuration" in error_str or "can't open" in error_str or "connection error" in error_str:
+                    LOGGER.warning(f"Kunde inte öppna med read_only=True (konflikt med befintlig anslutning), försöker med read_write: {e}")
+                    # Vänta lite för att låta den andra anslutningen stängas om den gör det
+                    import time
+                    time.sleep(0.1)
+                    try:
+                        self.conn = duckdb.connect(db_path)
+                        self.read_only = False  # Uppdatera flaggan
+                        self._init_schema()
+                        connection_attempted = True
+                    except Exception as e2:
+                        # Om det fortfarande misslyckas, kan det vara att read_only-anslutningen fortfarande är öppen
+                        # I detta fall, vänta lite längre och försök igen
+                        error_str2 = str(e2).lower()
+                        if "different configuration" in error_str2 or "can't open" in error_str2 or "connection error" in error_str2:
+                            LOGGER.warning(f"Första read_write-försöket misslyckades, väntar 0.5s och försöker igen: {e2}")
+                            time.sleep(0.5)
+                            try:
+                                self.conn = duckdb.connect(db_path)
+                                self.read_only = False
+                                self._init_schema()
+                                connection_attempted = True
+                            except Exception as e3:
+                                LOGGER.error(f"HARDFAIL: Kunde inte öppna GraphStore även efter retry: {e3}")
+                                raise
+                        else:
+                            LOGGER.error(f"HARDFAIL: Kunde inte öppna GraphStore: {e2}")
+                            raise
+                else:
+                    raise
         else:
-            self.conn = duckdb.connect(db_path)
-            self._init_schema()
+            try:
+                self.conn = duckdb.connect(db_path)
+                self._init_schema()
+                connection_attempted = True
+            except Exception as e:
+                error_str = str(e).lower()
+                if "different configuration" in error_str or "can't open" in error_str or "connection error" in error_str:
+                    # Det finns redan en read_only-anslutning, vänta lite och försök igen
+                    LOGGER.warning(f"Kunde inte öppna med read_write (konflikt med read_only-anslutning), väntar 0.1s och försöker igen: {e}")
+                    import time
+                    time.sleep(0.1)
+                    try:
+                        self.conn = duckdb.connect(db_path)
+                        self.read_only = False
+                        self._init_schema()
+                        connection_attempted = True
+                    except Exception as e2:
+                        error_str2 = str(e2).lower()
+                        if "different configuration" in error_str2 or "can't open" in error_str2 or "connection error" in error_str2:
+                            LOGGER.warning(f"Första retry misslyckades, väntar 0.5s och försöker igen: {e2}")
+                            time.sleep(0.5)
+                            try:
+                                self.conn = duckdb.connect(db_path)
+                                self.read_only = False
+                                self._init_schema()
+                                connection_attempted = True
+                            except Exception as e3:
+                                LOGGER.error(f"HARDFAIL: Kunde inte öppna GraphStore även efter retry: {e3}")
+                                raise
+                        else:
+                            LOGGER.error(f"HARDFAIL: Kunde inte öppna GraphStore: {e2}")
+                            raise
+                else:
+                    raise
+        
+        if not connection_attempted:
+            raise RuntimeError("HARDFAIL: GraphStore connection failed - no connection attempted")
         
         LOGGER.info(f"GraphStore öppnad: {db_path} (read_only={read_only})")
     
@@ -72,6 +190,104 @@ class GraphStore:
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target)")
+            # Evidence-tabell (lagrar LLM-bevis per entitet/masternod)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS evidence (
+                    id TEXT PRIMARY KEY,
+                    entity_name TEXT NOT NULL,
+                    master_node_candidate TEXT NOT NULL,
+                    context_description TEXT NOT NULL,
+                    source_file TEXT NOT NULL,
+                    source_timestamp TEXT,
+                    extraction_pass TEXT,
+                    confidence DOUBLE,
+                    created_at TEXT
+                )
+            """)
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_entity ON evidence(entity_name)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_master ON evidence(master_node_candidate)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_source ON evidence(source_file)")
+        
+        # Validation rules-tabell (anropas utanför lock för att undvika deadlock)
+        # _init_validation_table hanterar sin egen lock
+        self._init_validation_table()
+    
+    def _init_validation_table(self):
+        """Skapa validation_rules tabell för att spara användarens beslut."""
+        # Använd filbaserad lock för att säkerställa att bara en process skapar tabellen
+        lock_file = self.db_path + ".validation_table.lock"
+        max_retries = 10
+        retry_delay = 0.2
+        
+        lock_acquired = False
+        lock_fd = None
+        
+        try:
+            # Försök få filbaserad lock
+            for attempt in range(max_retries):
+                try:
+                    lock_fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    lock_acquired = True
+                    break
+                except FileExistsError:
+                    # HARDFAIL: Lock finns redan (förväntat beteende vid concurrent access)
+                    # Vänta och försök igen - detta är intentional för thread-safety
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                    else:
+                        # Kunde inte få lock efter alla försök, antag att tabellen redan finns
+                        LOGGER.debug(f"Kunde inte få lock för validation table (försök {attempt + 1}/{max_retries}), antag att tabellen redan finns")
+                        return
+            
+            if lock_acquired:
+                try:
+                    # Försök skapa tabellen (IF NOT EXISTS hanterar concurrent creation)
+                    try:
+                        self.conn.execute("""
+                            CREATE TABLE IF NOT EXISTS validation_rules (
+                                id TEXT PRIMARY KEY,
+                                entity_name TEXT NOT NULL,
+                                master_node TEXT NOT NULL,
+                                decision TEXT NOT NULL,
+                                reason TEXT,
+                                adjusted_name TEXT,
+                                adjusted_master_node TEXT,
+                                created_at TEXT,
+                                similarity_score DOUBLE
+                            )
+                        """)
+                    except Exception as db_error:
+                        # Om tabellen redan finns eller databasen är låst, det är OK
+                        error_msg = str(db_error).lower()
+                        if "already exists" in error_msg or "duplicate" in error_msg or "locked" in error_msg:
+                            # Tabellen finns redan eller DB är låst, fortsätt med index
+                            pass
+                        else:
+                            raise  # Kasta vidare om det är ett annat fel
+                    
+                    # Skapa index (IF NOT EXISTS är säkert även om de redan finns)
+                    self.conn.execute("CREATE INDEX IF NOT EXISTS idx_validation_entity ON validation_rules(entity_name)")
+                    self.conn.execute("CREATE INDEX IF NOT EXISTS idx_validation_master ON validation_rules(master_node)")
+                    self.conn.execute("CREATE INDEX IF NOT EXISTS idx_validation_decision ON validation_rules(decision)")
+                finally:
+                    # Frigör filbaserad lock
+                    if lock_fd is not None:
+                        try:
+                            os.close(lock_fd)
+                            os.unlink(lock_file)
+                        except Exception as e:
+                            # HARDFAIL: Logga men fortsätt (cleanup-fel ska inte krascha)
+                            LOGGER.debug(f"Kunde inte frigöra lock-fil {lock_file}: {e}")
+        except Exception as e:
+            error_str = str(e)
+            # Om tabellen redan finns (från annan process), det är OK
+            if "already exists" in error_str.lower() or "duplicate" in error_str.lower():
+                LOGGER.debug(f"Validation table already exists (from another process), continuing...")
+                return
+            
+            # Om det är sista försöket, kasta felet
+            LOGGER.error(f"HARDFAIL: _init_validation_table failed: {e}", exc_info=True)
+            raise
     
     def close(self):
         """Stäng databasanslutningen."""
@@ -373,6 +589,117 @@ class GraphStore:
                 "properties": json.loads(row[3]) if row[3] else {}
             })
         return nodes
+
+    # --- EVIDENCE LAYER ---
+
+    def _row_to_evidence(self, row) -> dict:
+        """Intern helper för att mappa evidence-rad till dict."""
+        if not row:
+            return {}
+        return {
+            "id": row[0],
+            "entity_name": row[1],
+            "master_node_candidate": row[2],
+            "context_description": row[3],
+            "source_file": row[4],
+            "source_timestamp": row[5],
+            "extraction_pass": row[6],
+            "confidence": row[7],
+            "created_at": row[8],
+        }
+
+    def add_evidence(
+        self,
+        id: str,
+        entity_name: str,
+        master_node_candidate: str,
+        context_description: str,
+        source_file: str,
+        source_timestamp: str = None,
+        extraction_pass: str = None,
+        confidence: float = None,
+        created_at: str = None,
+    ):
+        """
+        Spara eller uppdatera ett evidence-item.
+        """
+        if self.read_only:
+            raise RuntimeError("HARDFAIL: Försöker skriva i read_only mode")
+
+        if not created_at:
+            created_at = datetime.datetime.now().isoformat()
+
+        with self._lock:
+            try:
+                self.conn.execute(
+                    """
+                    INSERT INTO evidence (
+                        id, entity_name, master_node_candidate, context_description,
+                        source_file, source_timestamp, extraction_pass, confidence, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (id) DO UPDATE SET
+                        entity_name = EXCLUDED.entity_name,
+                        master_node_candidate = EXCLUDED.master_node_candidate,
+                        context_description = EXCLUDED.context_description,
+                        source_file = EXCLUDED.source_file,
+                        source_timestamp = EXCLUDED.source_timestamp,
+                        extraction_pass = EXCLUDED.extraction_pass,
+                        confidence = EXCLUDED.confidence,
+                        created_at = EXCLUDED.created_at
+                    """,
+                    [
+                        id,
+                        entity_name,
+                        master_node_candidate,
+                        context_description,
+                        source_file,
+                        source_timestamp,
+                        extraction_pass,
+                        confidence,
+                        created_at,
+                    ],
+                )
+                self.conn.commit()
+            except Exception as e:
+                LOGGER.error(f"HARDFAIL: Kunde inte spara evidence {id}: {e}")
+                raise
+
+    def get_evidence_for_entity(self, entity_name: str, limit: int = 200) -> list[dict]:
+        """
+        Hämta evidence för en given entitet.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT id, entity_name, master_node_candidate, context_description,
+                       source_file, source_timestamp, extraction_pass, confidence, created_at
+                FROM evidence
+                WHERE entity_name = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                [entity_name, limit],
+            ).fetchall()
+        return [self._row_to_evidence(r) for r in rows]
+
+    def get_evidence_by_masternode(self, master_node: str, limit: int = 200) -> list[dict]:
+        """
+        Hämta evidence för en viss masternod-kandidat.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT id, entity_name, master_node_candidate, context_description,
+                       source_file, source_timestamp, extraction_pass, confidence, created_at
+                FROM evidence
+                WHERE master_node_candidate = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                [master_node, limit],
+            ).fetchall()
+        return [self._row_to_evidence(r) for r in rows]
     
     def get_related_units(self, entity_id: str, limit: int = 10) -> list[str]:
         """
@@ -394,3 +721,102 @@ class GraphStore:
             """, [entity_id, limit]).fetchall()
         
         return [row[0] for row in results]
+    
+    def get_extraction_context(self, master_node: str) -> dict:
+        """
+        Hämta extraction context för en masternod (GODKÄNDA_REFERENSER och TIDIGARE_AVFÄRDADE_EXEMPEL).
+        
+        Args:
+            master_node: Masternodens namn
+            
+        Returns:
+            Dict med approved_references och rejected_examples
+        """
+        with self._lock:
+            # GODKÄNDA_REFERENSER: De 20 vanligaste APPROVED-entiteterna
+            approved_rows = self.conn.execute("""
+                SELECT entity_name, COUNT(*) as count, MAX(created_at) as last_seen
+                FROM validation_rules
+                WHERE master_node = ? AND decision = 'APPROVED'
+                GROUP BY entity_name
+                ORDER BY count DESC, last_seen DESC
+                LIMIT 20
+            """, [master_node]).fetchall()
+            
+            approved_references = [
+                {
+                    "entity_name": row[0],
+                    "count": row[1],
+                    "last_seen": row[2]
+                }
+                for row in approved_rows
+            ]
+            
+            # TIDIGARE_AVFÄRDADE_EXEMPEL: Alla REJECTED-entiteter med reason
+            rejected_rows = self.conn.execute("""
+                SELECT DISTINCT entity_name, reason
+                FROM validation_rules
+                WHERE master_node = ? AND decision = 'REJECTED'
+            """, [master_node]).fetchall()
+            
+            rejected_examples = [
+                {
+                    "entity_name": row[0],
+                    "reason": row[1] or ""
+                }
+                for row in rejected_rows
+            ]
+            
+            return {
+                "approved_references": approved_references,
+                "rejected_examples": rejected_examples
+            }
+    
+    def add_validation_rule(
+        self,
+        entity: str,
+        master_node: str,
+        decision: str,
+        reason: str = None,
+        adjusted_name: str = None,
+        adjusted_master_node: str = None,
+        similarity_score: float = None
+    ):
+        """
+        Lägg till en validation rule (användarens beslut).
+        
+        Args:
+            entity: Entitetens namn
+            master_node: Masternodens namn
+            decision: 'APPROVED', 'REJECTED', eller 'ADJUSTED'
+            reason: Orsak (obligatorisk för REJECTED)
+            adjusted_name: Nytt namn om decision är 'ADJUSTED'
+            adjusted_master_node: Ny masternod om decision är 'ADJUSTED'
+            similarity_score: Likhetsgrad mot referenser (0.0-1.0)
+        """
+        if not entity or not master_node or not decision:
+            raise ValueError("HARDFAIL: entity, master_node och decision är obligatoriska")
+        
+        if decision == 'REJECTED' and not reason:
+            raise ValueError("HARDFAIL: reason är obligatorisk för REJECTED-beslut")
+        
+        rule_id = str(uuid.uuid4())
+        created_at = datetime.datetime.now().isoformat()
+        
+        with self._lock:
+            try:
+                self.conn.execute("""
+                    INSERT INTO validation_rules 
+                    (id, entity_name, master_node, decision, reason, adjusted_name, 
+                     adjusted_master_node, created_at, similarity_score)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, [
+                    rule_id, entity, master_node, decision, reason,
+                    adjusted_name, adjusted_master_node, created_at, similarity_score
+                ])
+                self.conn.commit()
+                LOGGER.debug(f"Validation rule tillagd: {entity} -> {master_node} ({decision})")
+            except Exception as e:
+                self.conn.rollback()
+                LOGGER.error(f"HARDFAIL: Kunde inte lägga till validation rule: {e}")
+                raise

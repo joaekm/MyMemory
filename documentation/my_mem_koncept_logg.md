@@ -86,11 +86,6 @@ Vi etablerade ett scenario (baserat på inspelningar, post-its, Slack) för att 
 * **Påstående:** `koncept.md` måste vara en rik "berättelse" som fångar "resonemanget", inte bara "slutsatser".
 * **Resonemang (Kritik):** De första utkasten av WoW var otydliga. `_koncept.md` var felaktigt definierat som en "summary", och `_koncept_logg.md` var inte den råa källan.
 * **Slutsats:** `Way_of_Working` uppdaterades till `v2.4` för att lösa detta. Vi har nu fyra kärndokument: `dfm_koncept_logg.md` (rå-data/resonemang), `dfm_summary.md` (slutsatser), `dfm_arkitektur.md` (vad), och `dfm_backlog.md` (nu). Detta säkerställer full spårbarhet.
-## Konflikt 8: Iteration av WoW (Spårbarhet)
-
-* **Påstående:** `_koncept_logg.md` måste vara en rik "berättelse" som fångar "resonemanget", inte bara "slutsatser".
-* **Resonemang (Kritik):** De första utkasten av WoW var otydliga. `_koncept.md` var felaktigt definierat som en "summary", och `_koncept_logg.md` var inte den råa källan utan en felaktig sammanfattning.
-* **Slutsats:** `Way_of_Working` uppdaterades till `v2.4` för att lösa detta. Vi har nu fyra kärndokument: `dfm_koncept_logg.md` (rå-data/resonemang), `dfm_summary.md` (slutsatser), `dfm_arkitektur.md` (vad), och `dfm_backlog.md` (nu). Detta säkerställer full spårbarhet.
 
 ## Konflikt 9: MVP-Prioritering (OBJEKT-1)
 
@@ -108,7 +103,7 @@ Vi etablerade ett scenario (baserat på inspelningar, post-its, Slack) för att 
 * **Nytt Problem:** Hur kan en användare då veta om "någon jobbar på liknande spår" om all okategoriserad data är 100% privat?
 * **Slutsats (Lösningen):** Vi måste implementera en **"Kollaborativ Signal-agent"**.
     * **Praktik (Hur):** 1) Den *lokala* agenten (Nivå 1) skapar en *anonymiserad, abstraherad signatur* (vektor) av den privata texten. 2) *Endast* denna anonyma signatur skickas till den centrala Signal-agenten. 3) Signal-agenten matchar anonyma signaturer från olika användare. 4) Om en match hittas, skickas en "inbjudan till samarbete" (HIIT-notis) till båda parter, som *sedan* kan välja att ta kontakt ("ta en kaffe").
-    * **Resultat:** Detta löser konflikten mellan integritet och samarbete.
+    * **Resultat:** Detta löses konflikten mellan integritet och samarbete.
 
     ## Utvecklingsfas: OBJEKT-5 (Insamlaren)
 
@@ -201,32 +196,6 @@ Vi etablerade ett scenario (baserat på inspelningar, post-its, Slack) för att 
     * **Problem:** Launchern kraschade ("File not found" / "Module not found") för att den: 1) Inte hittade rätt mapp (cd file vs dir). 2) Inte använde den virtuella miljön (`venvP312`).
     * **Lösning:** Vi hårdkodade (temporärt) sökvägarna i scriptet för stabilitet och pekade explicit ut Python-tolken i `venv`.
     * **Framtid (OBJEKT-27):** För att kunna distribuera detta till andra ("Nivå 3") krävs en "Installer" som genererar detta script dynamiskt vid installation.
-
-## Livscykel & Reaktivitet (v3.2)
-
-* **Konflikt 22: Det "Tidskrävande Dokumentet" (Versionshantering)**
-    * **Problem:** Mänskligt minne skriver över gammal information med ny (t.ex. utkast dag 1 vs final dag 5). Systemet sparade båda som likvärdiga "sanningar", vilket skapar dubbletter och förvirring i chatten.
-    * **Analys:** Vi behöver uppnå "Evolutionary Memory". Enkelt "append" fungerar inte för strukturerade dokument (Word/PDF).
-    * **Strategi:** Vi identifierade tre vägar: A) Kill Switch (Ersätt), B) Linked Evolution (Graf-historik), C) Content Hashing.
-    * **Beslut:** Vi utreder en hybridmodell (OBJEKT-29). För identiska filnamn i Nivå 1 lutar vi åt "Ersätt". För delade dokument lutar vi åt "Länkad historik".
-
-* **Konflikt 23: Det "Döda" Chat-minnet (Refresh)**
-    * **Problem:** Chatten laddade DB-anslutningen *en* gång vid start. Om Indexeraren lade till ny kunskap medan chatten var igång, var chatten "blind" för detta tills omstart.
-    * **Lösning:** Vi flyttar DB-uppkopplingen (eller collection-hämtningen) in i sök-loopen. Detta kostar några millisekunder men garanterar att chatten alltid har "realtids-access" till det senaste minnet.
-
-## UX-Polering & Launcher-Stabilitet (v3.2 - "The Overwriter")
-
-* **Konflikt 19: Launcher UX vs. Utvecklarbehov (Debug Mode)**
-    * **Problem:** Användaren ville ha en enkel start ("One Click") men ibland behövs djup insyn i loggarna.
-    * **Lösning:** Vi implementerade **"Smart Startup"** i AppleScript. En dialogruta visas i 3 sekunder. Ingen åtgärd = Standard (Snyggt). Klick = Debug (Rått). Detta ger "Zero Friction" till vardags men "Full Control" vid behov.
-
-* **Konflikt 20: "Zombien" (Race Conditions i Terminalen)**
-    * **Problem:** När Launchern startade Terminalen, hann macOS skapa ett tomt standardfönster ("Zombien") innan scriptet hann köra, vilket ledde till dubbla fönster.
-    * **Lösning (The Overwriter):** Vi bytte strategi till **"Aggressiv Kapning"**. Scriptet väntar nu *aktivt* på att ett fönster ska dyka upp och återanvänder det oavsett status.
-
-* **Konflikt 21: Distribution & Miljö (The Venv Trap)**
-    * **Problem:** Launchern kraschade ("Module not found") för att den inte använde den virtuella miljön.
-    * **Lösning:** Vi hårdkodade sökvägarna (temporärt) och pekade explicit ut Python-tolken i `venv`.
 
 ## Livscykel & Reaktivitet (v3.2)
 
@@ -970,3 +939,28 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
     - `print_iteration_live()` i `chat.py` anpassar output efter `debug_mode`
 
 * **Varför:** Användaren vill se att systemet "tänker" utan att distraheras av tekniska detaljer. Resonemang ger förtroende, siffror ger inte det.
+
+---
+
+### Konflikt 53: Graph-Boosted Ingestion (2025-12-21)
+
+* **Problem:** Transcriber genererade dåliga talarnamn ("Talare 1", "Jocke") trots att systemet visste vem "Joakim Ekman" var. Evidence Layer fanns men användes inte proaktivt.
+* **Lösning:** Vi vände på flödet. Istället för att bara *skriva* till grafen, *läser* nu Transcriber från grafen *innan* analysen börjar.
+* **Implementation:**
+    1. **Pre-fetch:** Transcriber hämtar alla kända `Person`-entiteter och alias från GraphDB.
+    2. **Context Injection:** Prompten får en lista: "KÄNDA TALARE: Joakim Ekman... ALIAS: Jocke = Joakim Ekman".
+    3. **Normalisering:** Outputen mappas automatiskt till Canonical ID innan det sparas i metadata.
+* **Resultat:** Transkriberingen blir "graf-medveten" direkt vid födseln. Metadata är ren från start.
+
+### Konflikt 54: The Multipass Paradigm (2025-12-21)
+
+* **Problem:** DocConverter (Standard) missade nyanser. En fil om "Slack" taggades bara som "Teknologi", men missade att den också beskrev "Arbetsverktyg" och "Kommunikationskultur".
+* **Lösning:** Vi övergav "One-Shot Classification" för **"Multipass Extraction"**.
+* **Strategi:**
+    - Kör parallella LLM-anrop (Model Lite) för *varje* relevant masternod.
+    - Varje pass är "smalt och djupt": "Leta BARA efter Personer", "Leta BARA efter Verktyg".
+    - Resultaten sparas som `evidence` i GraphDB istället för direkt metadata.
+* **Effekt:**
+    - **Högre Recall:** Vi hittar fler entiteter eftersom prompten är fokuserad.
+    - **Spårbarhet:** Varje entitet har "Evidence" med confidence score och source context.
+    - **Self-Healing:** Dreamer kan nu använda evidence-massan för att statistiskt avgöra: "9 av 10 evidence säger att Slack är ett Arbetsverktyg → Flytta det dit."

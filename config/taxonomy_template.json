@@ -1,0 +1,132 @@
+{
+  "Vision": {
+    "description": "Framtidsbilder, syfte, långsiktiga mål (2-5 år), 'Varför vi finns'.",
+    "multipass_definition": "Vårt Syfte: Fånga de mest abstrakta och långsiktiga beskrivningarna av verksamhetens existensberättigande.\n• Validering: Svarar detta på en evig fråga snarare än ett kvartalsmål?",
+    "sub_nodes": []
+  },
+  "Strategi": {
+    "description": "Vägval, roadmaps, affärsplaner, målarkitektur, styrkor/utmaningar.",
+    "multipass_definition": "Våra Vägval: Fånga de övergripande planerna och principerna för hur visionen ska realiseras.\n• Validering: Påverkar detta riktningen för mer än ett team?",
+    "sub_nodes": []
+  },
+  "Förändring": {
+    "description": "Transformation, digitalisering, organisationsförändring, kulturresor.",
+    "multipass_definition": "Vår Evolution: Fånga beskrivningar av organisationens inre utveckling och förflyttning.\n• Validering: Blir organisationen fundamentalt annorlunda av detta?",
+    "sub_nodes": []
+  },
+  "Marknad": {
+    "description": "Positionering, konkurrenter, omvärldsanalys, leads, varumärke.",
+    "multipass_definition": "Vår Terräng: Fånga förståelsen för omvärlden, branschen och positioneringen.\n• Validering: Beskriver detta terrängen utanför Digitalist?",
+    "sub_nodes": []
+  },
+  "Affär": {
+    "description": "Affärsmodeller, lönsamhet, kalkyl, prissättning, säljaktiviteter.",
+    "multipass_definition": "Vår Logik: Fånga mekanismerna för hur organisationen skapar, levererar och fångar värde.\n• Validering: Handlar detta om motorn i hur vi tjänar pengar?",
+    "sub_nodes": []
+  },
+  "Kultur": {
+    "description": "Värderingar, 'The Digitalist Way', psykologisk trygghet, samarbetsklimat.",
+    "multipass_definition": "Vår Anda: Fånga de mjuka strukturer, värderingar och normer som styr det interna livet.\n• Validering: Beskriver detta hur vi agerar mot varandra?",
+    "sub_nodes": []
+  },
+  "Projekt": {
+    "description": "Konkreta uppdrag, PoC, backlogs, projektledning.",
+    "multipass_definition": "Uppdraget: Fånga avgränsade initiativ eller uppdrag med tydliga start- och slutpunkter.\n• Validering: Är detta ett tidsbegränsat arbete med ett unikt egennamn?",
+    "sub_nodes": []
+  },
+  "Metodik": {
+    "description": "Hur vi arbetar. Agile, Service Design, WoW, HIIT, principer.",
+    "multipass_definition": "Vårt Arbetssätt: Fånga de teoretiska ramverk, principer och modeller som styr hur arbetet utförs.\n• Validering: Är detta en filosofi för hur hantverket utförs?",
+    "sub_nodes": []
+  },
+  "Erbjudande": {
+    "description": "Våra produkter och tjänster (MyMem, P-Bot, Konsulting).",
+    "multipass_definition": "Vår Produkt: Fånga de paketerade värden, tjänster eller produkter som organisationen tillhandahåller marknaden.\n• Validering: Är detta något en kund kan köpa från vår 'meny'?",
+    "sub_nodes": []
+  },
+  "Avtal": {
+    "description": "Offerter, ramavtal, licenser, upphandlingar (FKU).",
+    "multipass_definition": "Våra Bindningar: Fånga de formella och legala överenskommelserna mellan parter.\n• Validering: Kräver detta dokument en juridisk signatur?",
+    "sub_nodes": []
+  },
+  "Organisation": {
+    "description": "Rekrytering, team, roller, onboarding, personalfrågor.",
+    "multipass_definition": "Vår Struktur: Fånga hur verksamheten är strukturerad och bemannad.\n• Validering: Beskriver detta en ruta i organisationsschemat?",
+    "sub_nodes": []
+  },
+  "Händelser": {
+    "description": "Möten, workshops, konferenser, daglig status, incidenter.",
+    "multipass_definition": "Tidpunkterna: Fånga diskreta, tidsbundna aktiviteter och interaktioner som har ägt rum eller är inbokade.\n• Validering: Kan aktiviteten ges ett namn som fungerar utan datumet?",
+    "sub_nodes": []
+  },
+  "Administration": {
+    "description": "Tidrapportering, sjukanmälan, resursplanering, loggar.",
+    "multipass_definition": "Vår Hygien: Fånga de interna stödprocesserna och transaktionerna som håller verksamheten igång.\n• Validering: Är detta en intern stödtransaktion för hygienen?",
+    "sub_nodes": []
+  },
+  "Arbetsverktyg": {
+    "description": "Mjukvara vi använder (Slack, Jira, Fortnox), hårdvara.",
+    "multipass_definition": "Våra Redskap: Fånga de instrument, applikationer och fysiska redskap som används för att utföra arbete.\n• Validering: Är detta ett redskap som används för att utföra arbete?",
+    "sub_nodes": []
+  },
+  "Teknologier": {
+    "description": "Kodspråk (Python), ramverk, AI-modeller, databaser, 'Tech'.",
+    "multipass_definition": "Vårt Material: Fånga de tekniska byggstenar, språk och ramverk som används för att konstruera lösningar.\n• Validering: Är detta ett tekniskt råmaterial för att bygga lösningar?",
+    "sub_nodes": []
+  },
+  "Aktör": {
+    "description": "Externa organisationer, kunder, partners, myndigheter.",
+    "multipass_definition": "De Andra: Fånga externa juridiska personer och organisationer som Digitalist relaterar till.\n• Validering: Är detta en extern juridisk motpart?",
+    "sub_nodes": []
+  },
+  "Person": {
+    "description": "Specifika individer, medarbetare, kontaktpersoner.",
+    "multipass_definition": "Individerna: Fånga unika, namngivna människor som interagerar med organisationen.\n• Validering: Refererar detta till en unik individ av kött och blod?",
+    "sub_nodes": []
+  },
+  "Plats": {
+    "description": "Kontor, orter, fysiska/digitala rum.",
+    "multipass_definition": "Våra Rum: Fånga rumsliga sammanhang där verksamheten bedrivs, både fysiska och virtuella.\n• Validering: Svarar detta på frågan 'Var är vi?'",
+    "sub_nodes": []
+  },
+  "Process": {
+    "description": "Arbetsflöden, leveransprocesser, datahantering, 'Operating'.",
+    "multipass_definition": "Våra Flöden: Fånga de repeterbara, operativa aktivitetskedjorna och rutinerna.\n• Validering: Är detta en sekvens av steg i maskineriet?",
+    "sub_nodes": []
+  },
+  "Juridik": {
+    "description": "Lagkrav, GDPR, compliance, affärsjuridik.",
+    "multipass_definition": "Våra Regler: Fånga de externa lagkrav och regelverk som verksamheten måste förhålla sig till.\n• Validering: Är detta en lag som vi inte kan förhandla bort?",
+    "sub_nodes": []
+  },
+  "Kvalitet": {
+    "description": "Prestanda, tester, tillgänglighet, spårbarhet.",
+    "multipass_definition": "Vår Standard: Fånga arbetet med att säkerställa att leveransen möter kraven.\n• Validering: Är detta en kontrollstation för att säkra leveransen?",
+    "sub_nodes": []
+  },
+  "Säkerhet": {
+    "description": "Informationssäkerhet, behörighetskontroll, sårbarheter.",
+    "multipass_definition": "Vårt Skydd: Fånga mekanismer och protokoll för att skydda tillgångar, information och människor.\n• Validering: Handlar detta om att skydda tillgångar eller människor?",
+    "sub_nodes": []
+  },
+  "Standard": {
+    "description": "ISO-certifieringar, WCAG, öppna standarder.",
+    "multipass_definition": "Våra Normer: Fånga etablerade externa normer och certifieringar som adopterats.\n• Validering: Är detta definierat av en auktoritet utanför oss?",
+    "sub_nodes": []
+  },
+  "Arkitektur": {
+    "description": "Systemdesign, MACH, lösningar, integrationer.",
+    "multipass_definition": "Vår Konstruktion: Fånga den strukturella designen av system, information eller lösningar.\n• Validering: Visar detta hur systemets delar hänger ihop?",
+    "sub_nodes": []
+  },
+  "Data": {
+    "description": "Testdata, entiteter, metadata-strukturer.",
+    "multipass_definition": "Vår Information: Fånga råmaterialet i form av informationsenheter, testdata och specifika innehållsobjekt.\n• Validering: Handlar detta om innehållet snarare än behållaren?",
+    "sub_nodes": []
+  },
+  "Resultat": {
+    "description": "Utfall, succéer, måluppfyllnad.",
+    "multipass_definition": "Vår Effekt: Fånga de aggregerade bevisen på framgång eller misslyckande i relation till strategin.\n• Validering: Är detta facit på om en satsning fungerade?",
+    "sub_nodes": []
+  }
+}

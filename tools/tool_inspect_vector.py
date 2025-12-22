@@ -3,9 +3,12 @@ import os
 import yaml
 from chromadb.utils import embedding_functions
 
-# Config-hack för snabbhet
-base_path = os.path.expanduser("~/MyMemory")
-chroma_path = os.path.join(base_path, "Index/ChromaDB")
+# Läs sökvägar från config (Princip 8)
+script_dir = os.path.dirname(os.path.abspath(__file__))
+config_path = os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml')
+with open(config_path, 'r') as f:
+    config = yaml.safe_load(f)
+chroma_path = os.path.expanduser(config['paths']['chroma_db'])
 
 print(f"--- RÅDATA-ANALYS: {chroma_path} ---")
 
@@ -40,4 +43,5 @@ try:
             print("-" * 40)
 
 except Exception as e:
-    print(f"Krasch: {e}")
+    print(f"HARDFAIL: Krasch vid inspektion av vektordatabas: {e}")
+    raise

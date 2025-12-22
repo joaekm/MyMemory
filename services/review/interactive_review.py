@@ -607,6 +607,43 @@ def apply_review_decisions(taxonomy: dict, decisions: dict, graph: GraphStore):
                 if entity_name not in taxonomy[master_node].get("sub_nodes", []):
                     taxonomy[master_node].setdefault("sub_nodes", []).append(entity_name)
             
+            # Skapa Entity-nod i grafen om den inte redan finns
+            # Detta säkerställer att entiteten kan hittas av dreamer och similarity-beräkningar
+            try:
+                existing_node = graph.get_node(entity_name)
+                if not existing_node:
+                    # Skapa ny Entity-nod
+                    graph.upsert_node(
+                        id=entity_name,
+                        type="Entity",
+                        aliases=[],
+                        properties={"entity_type": master_node}
+                    )
+                    LOGGER.info(f"Skapade Entity-nod i grafen: {entity_name} ({master_node})")
+                elif existing_node.get("type") != "Entity":
+                    # Uppdatera befintlig nod till Entity-typ om den inte redan är det
+                    graph.upsert_node(
+                        id=entity_name,
+                        type="Entity",
+                        aliases=existing_node.get("aliases", []),
+                        properties={**existing_node.get("properties", {}), "entity_type": master_node}
+                    )
+                    LOGGER.info(f"Uppdaterade nod till Entity: {entity_name} ({master_node})")
+                else:
+                    # Uppdatera entity_type om den saknas eller är fel
+                    props = existing_node.get("properties", {})
+                    if props.get("entity_type") != master_node:
+                        props["entity_type"] = master_node
+                        graph.upsert_node(
+                            id=entity_name,
+                            type="Entity",
+                            aliases=existing_node.get("aliases", []),
+                            properties=props
+                        )
+                        LOGGER.info(f"Uppdaterade entity_type för {entity_name}: {master_node}")
+            except Exception as e:
+                LOGGER.warning(f"Kunde inte skapa/uppdatera Entity-nod för {entity_name}: {e}")
+            
             # Spara validation rule
             graph.add_validation_rule(
                 entity=entity_name,
@@ -627,6 +664,33 @@ def apply_review_decisions(taxonomy: dict, decisions: dict, graph: GraphStore):
                         taxonomy[master_node]["sub_nodes"].remove(entity_name)
                     if new_name not in taxonomy[master_node].get("sub_nodes", []):
                         taxonomy[master_node]["sub_nodes"].append(new_name)
+                    
+                    # Uppdatera Entity-nod i grafen: byt namn från entity_name till new_name
+                    try:
+                        old_node = graph.get_node(entity_name)
+                        if old_node:
+                            # Skapa ny nod med nytt namn och kopiera data
+                            graph.upsert_node(
+                                id=new_name,
+                                type="Entity",
+                                aliases=old_node.get("aliases", []) + [entity_name],  # Lägg till gammalt namn som alias
+                                properties={**old_node.get("properties", {}), "entity_type": master_node}
+                            )
+                            # Ta bort gammal nod om den inte är samma som ny
+                            if entity_name != new_name:
+                                graph.delete_node(entity_name)
+                            LOGGER.info(f"Omdöpte Entity-nod: {entity_name} -> {new_name}")
+                        else:
+                            # Skapa ny nod om den gamla inte fanns
+                            graph.upsert_node(
+                                id=new_name,
+                                type="Entity",
+                                aliases=[entity_name],
+                                properties={"entity_type": master_node}
+                            )
+                            LOGGER.info(f"Skapade Entity-nod med nytt namn: {new_name} (från {entity_name})")
+                    except Exception as e:
+                        LOGGER.warning(f"Kunde inte uppdatera Entity-nod vid RENAME {entity_name} -> {new_name}: {e}")
                 
                 graph.add_validation_rule(
                     entity=entity_name,
@@ -645,6 +709,31 @@ def apply_review_decisions(taxonomy: dict, decisions: dict, graph: GraphStore):
                         taxonomy[master_node]["sub_nodes"].remove(entity_name)
                     if entity_name not in taxonomy[new_master_node].get("sub_nodes", []):
                         taxonomy[new_master_node]["sub_nodes"].append(entity_name)
+                    
+                    # Uppdatera Entity-nod i grafen: ändra entity_type
+                    try:
+                        existing_node = graph.get_node(entity_name)
+                        if existing_node:
+                            props = existing_node.get("properties", {})
+                            props["entity_type"] = new_master_node
+                            graph.upsert_node(
+                                id=entity_name,
+                                type="Entity",
+                                aliases=existing_node.get("aliases", []),
+                                properties=props
+                            )
+                            LOGGER.info(f"Uppdaterade entity_type för {entity_name}: {master_node} -> {new_master_node}")
+                        else:
+                            # Skapa ny nod om den inte finns
+                            graph.upsert_node(
+                                id=entity_name,
+                                type="Entity",
+                                aliases=[],
+                                properties={"entity_type": new_master_node}
+                            )
+                            LOGGER.info(f"Skapade Entity-nod vid REMAP: {entity_name} ({new_master_node})")
+                    except Exception as e:
+                        LOGGER.warning(f"Kunde inte uppdatera Entity-nod vid REMAP {entity_name}: {e}")
                 
                 graph.add_validation_rule(
                     entity=entity_name,
@@ -719,6 +808,20 @@ def apply_review_decisions(taxonomy: dict, decisions: dict, graph: GraphStore):
                     if master_node in taxonomy:
                         if new_entity not in taxonomy[master_node].get("sub_nodes", []):
                             taxonomy[master_node]["sub_nodes"].append(new_entity)
+                    
+                    # Skapa Entity-nod för varje split-entitet
+                    try:
+                        existing_node = graph.get_node(new_entity)
+                        if not existing_node:
+                            graph.upsert_node(
+                                id=new_entity,
+                                type="Entity",
+                                aliases=[],
+                                properties={"entity_type": master_node}
+                            )
+                            LOGGER.info(f"Skapade Entity-nod vid SPLIT: {new_entity} ({master_node})")
+                    except Exception as e:
+                        LOGGER.warning(f"Kunde inte skapa Entity-nod vid SPLIT för {new_entity}: {e}")
                 
                 graph.add_validation_rule(
                     entity=entity_name,

@@ -41,6 +41,12 @@ HARDCODED_PATH_PATTERNS = [
     r'["\']/Users/\w+/',           # /Users/username/...
     r'["\']/home/\w+/',            # /home/username/...
     r'expanduser\(["\']~/',        # expanduser("~/...) utan config
+    r'os\.path\.join\([^,]+,\s*["\']Index["\']',  # os.path.join(..., "Index", ...)
+    r'os\.path\.join\([^,]+,\s*["\']Assets["\']',  # os.path.join(..., "Assets", ...)
+    r'os\.path\.join\([^,]+,\s*["\']Lake["\']',    # os.path.join(..., "Lake", ...)
+    r'os\.path\.join\([^,]+,\s*["\']ChromaDB["\']', # os.path.join(..., "ChromaDB", ...)
+    r'os\.path\.join\([^,]+,\s*["\']GraphDB["\']',  # os.path.join(..., "GraphDB", ...)
+    r'["\']my_mem_taxonomy\.json["\']',            # "my_mem_taxonomy.json" (specifik fil)
 ]
 
 # Princip 9: Mönster för hårdkodade config-värden (ska läsas från config)
@@ -148,6 +154,10 @@ def check_silent_fallbacks(filepath: str, content: str) -> list:
                 if 'exit(' in check_line or 'sys.exit(' in check_line:
                     has_logging = True
                     break
+                # sys.stderr.write() är också acceptabelt för tools/ som saknar LOGGER
+                if 'sys.stderr.write' in check_line or 'sys.stderr' in check_line:
+                    has_logging = True
+                    break
             
             # KeyboardInterrupt är OK (används för graceful shutdown)
             if 'KeyboardInterrupt' in stripped:
@@ -233,8 +243,9 @@ def check_hardcoded_taxonomy(filepath: str, content: str) -> list:
         
         # Om 3+ taxonomi-noder på samma rad → troligen hårdkodad lista
         if len(found_nodes) >= 3:
-            # Undantag: om det är i validate_rules.py själv
-            if 'validate_rules.py' in filepath:
+            # Undantag: om det är i validate_rules.py eller validate_prompts.py själva
+            # (validatorerna behöver känna till taxonomi-noder för att fungera)
+            if 'validate_rules.py' in filepath or 'validate_prompts.py' in filepath:
                 continue
             
             violations.append({
@@ -273,7 +284,12 @@ def check_hardcoded_paths(filepath: str, content: str) -> list:
         for pattern in HARDCODED_PATH_PATTERNS:
             if re.search(pattern, line):
                 # Undantag: om CONFIG finns på samma rad (läser från config)
-                if 'CONFIG' in line or 'config[' in line.lower():
+                if 'CONFIG' in line or 'config[' in line.lower() or "config['paths']" in line.lower():
+                    continue
+                
+                # Undantag: om det är en relativ sökväg från projektroten (t.ex. "config/", "tools/")
+                # Men INTE om det är specifika MyMemory-mappar som Index, Assets, Lake, etc.
+                if re.search(r'os\.path\.join\([^,]+,\s*["\'](config|tools|services|documentation)["\']', line):
                     continue
                 
                 # Undantag: validate_rules.py själv
@@ -355,6 +371,9 @@ def validate_file(filepath: str) -> list:
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()
     except Exception as e:
+        # HARDFAIL: Returnera violation istället för att krascha validatorn (detta är intentional)
+        import sys
+        sys.stderr.write(f"HARDFAIL: Kunde inte läsa fil {filepath}: {e}\n")
         return [{
             "file": filepath,
             "line": 0,
@@ -374,9 +393,12 @@ def validate_file(filepath: str) -> list:
 
 
 def validate_directory(dirpath: str) -> list:
-    """Validera alla .py-filer i en mapp."""
+    """Validera alla .py-filer i en mapp (rekursivt)."""
     violations = []
-    for filepath in Path(dirpath).glob('*.py'):
+    for filepath in Path(dirpath).rglob('*.py'):
+        # Hoppa över venv och .git
+        if 'venv' in str(filepath) or '.git' in str(filepath):
+            continue
         violations.extend(validate_file(str(filepath)))
     return violations
 

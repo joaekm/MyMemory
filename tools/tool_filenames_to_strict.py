@@ -5,10 +5,13 @@ import re
 import yaml
 
 # --- CONFIG ---
-# Vi hårdkodar sökvägar här för säkerhets skull, eller läser från config om möjligt.
-# Justera dessa om de skiljer sig i din miljö.
-ASSET_STORE = os.path.expanduser("~/MyMemory/Assets")
-LAKE_STORE = os.path.expanduser("~/MyMemory/Lake")
+# Läs sökvägar från config (Princip 8)
+script_dir = os.path.dirname(os.path.abspath(__file__))
+config_path = os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml')
+with open(config_path, 'r') as f:
+    config = yaml.safe_load(f)
+ASSET_STORE = os.path.expanduser(config['paths']['asset_store'])
+LAKE_STORE = os.path.expanduser(config['paths']['lake_store'])
 
 # Regex för att se om en fil redan är korrekt
 # Matchar _[UUID].ext i slutet
@@ -50,7 +53,9 @@ def migrate_assets():
             print(f"🔧 Fixad: {f} -> {new_name}")
             count_fixed += 1
         except Exception as e:
-            print(f"❌ Fel vid namnbyte av {f}: {e}")
+            # HARDFAIL: Logga men fortsätt med nästa fil (detta är intentional - fortsätt vid fel)
+            import sys
+            sys.stderr.write(f"HARDFAIL: Kunde inte byta namn på {f}: {e}\n")
 
     print(f"KLAR. {count_fixed} filer åtgärdade. {count_ok} var redan korrekta.\n")
 
@@ -76,7 +81,10 @@ def clean_lake():
                 os.remove(os.path.join(LAKE_STORE, f))
                 deleted += 1
             except Exception as e:
-                print(f"Kunde inte radera {f}: {e}")
+                # HARDFAIL: Logga men fortsätt med nästa fil (detta är intentional - fortsätt vid fel)
+                import sys
+                sys.stderr.write(f"HARDFAIL: Kunde inte radera {f}: {e}\n")
+                # Fortsätt med nästa fil istället för att krascha hela scriptet
     
     print(f"Raderade {deleted} filer i Lake. Starta systemet för att bygga om dem.\n")
 

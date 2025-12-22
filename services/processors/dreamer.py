@@ -15,6 +15,7 @@ import logging
 import datetime
 import zoneinfo
 from typing import Optional
+from dataclasses import dataclass
 from google import genai
 from google.genai import types
 
@@ -22,6 +23,11 @@ from google.genai import types
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.utils.graph_service import GraphStore
+from services.utils.json_parser import parse_llm_json
+from services.indexers.graph_builder import get_canonical_from_graph
+from services.processors.similarity_review_service import _calculate_similarity
+from glob import glob
+import re
 
 # --- CONFIG LOADER ---
 def _load_config():
@@ -85,9 +91,13 @@ LOGGER = logging.getLogger('Dreamer')
 # --- AI CLIENT ---
 API_KEY = CONFIG.get('ai_engine', {}).get('api_key', '')
 MODEL_FAST = CONFIG.get('ai_engine', {}).get('models', {}).get('model_fast', 'models/gemini-flash-latest')
+MODEL_LITE = CONFIG.get('ai_engine', {}).get('models', {}).get('model_lite', 'models/gemini-flash-latest')
+MODEL_PRO = CONFIG.get('ai_engine', {}).get('models', {}).get('model_pro', 'models/gemini-pro-latest')
 AI_CLIENT = genai.Client(api_key=API_KEY) if API_KEY else None
 
-LOGGER.info(f"Dreamer initierad: MODEL={MODEL_FAST}, GRAPH={GRAPH_PATH}, TAXONOMY={TAXONOMY_FILE}")
+LAKE_STORE = CONFIG['paths']['lake_store']
+
+LOGGER.info(f"Dreamer initierad: MODEL={MODEL_PRO}, GRAPH={GRAPH_PATH}, TAXONOMY={TAXONOMY_FILE}")
 
 # --- DREAMING INTERVAL ---
 DREAMING_INTERVAL_HOURS = 24
@@ -95,6 +105,17 @@ DREAMING_INTERVAL_HOURS = 24
 
 def _ts():
     return datetime.datetime.now(SYSTEM_TZ).strftime("[%H:%M:%S]")
+
+
+@dataclass
+class ReviewObject:
+    """Dataclass för entiteter som behöver granskas av användaren."""
+    entity_name: str
+    master_node: str
+    similarity_score: float
+    suggested_action: str  # 'APPROVE', 'REVIEW', 'REJECT'
+    reason: str
+    closest_match: str | None = None
 
 
 def should_run_dreaming() -> bool:
@@ -143,6 +164,47 @@ def _save_taxonomy(taxonomy: dict):
     LOGGER.info(f"Taxonomi uppdaterad: {TAXONOMY_FILE}")
 
 
+def backpropagate_to_lake(unit_id: str, context_summary: str):
+    """
+    Uppdatera Lake-filens frontmatter med grafkontext för att trigga re-indexering.
+    """
+    try:
+        pattern = os.path.join(LAKE_STORE, f"*_{unit_id}.md")
+        matches = glob(pattern)
+        if not matches:
+            LOGGER.warning(f"Hittade ingen Lake-fil för unit_id={unit_id}")
+            return False
+        target = matches[0]
+
+        with open(target, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        if not content.startswith("---"):
+            LOGGER.warning(f"Frontmatter saknas i {target}")
+            return False
+
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            LOGGER.warning(f"Kunde inte parsa frontmatter i {target}")
+            return False
+
+        fm = yaml.safe_load(parts[1]) or {}
+        fm["graph_context_updated_at"] = datetime.datetime.now(SYSTEM_TZ).isoformat()
+        fm["graph_context_summary"] = context_summary
+
+        new_frontmatter = yaml.dump(fm, allow_unicode=True, sort_keys=False)
+        new_content = f"---\n{new_frontmatter}---{parts[2]}"
+
+        with open(target, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+
+        LOGGER.info(f"Backpropagerade grafkontext till {target}")
+        return True
+    except Exception as e:
+        LOGGER.error(f"Fel vid backpropagate_to_lake för {unit_id}: {e}")
+        return False
+
+
 def collect_from_graph() -> dict:
     """
     Samla alla noder från grafen (synapserna).
@@ -161,7 +223,9 @@ def collect_from_graph() -> dict:
     
     graph = None
     try:
-        graph = GraphStore(GRAPH_PATH, read_only=True)
+        # Använd read_write istället för read_only för att undvika konflikter med andra processer
+        # read_write kan användas för både läsning och skrivning
+        graph = GraphStore(GRAPH_PATH, read_only=False)
         
         # 1. Hämta alla Concept-noder
         try:
@@ -218,6 +282,301 @@ def collect_from_graph() -> dict:
                 f"{len(result['aliases'])} aliases")
     
     return result
+
+
+def _resolve_canonical_entity(graph: GraphStore, entity_name: str) -> tuple[str, dict | None]:
+    """Returnera (canonical_name, node) för ett namn eller alias."""
+    node = graph.get_node(entity_name)
+    if node and node.get("type") == "Entity":
+        return entity_name, node
+
+    try:
+        alias_matches = graph.find_nodes_by_alias(entity_name)
+    except Exception as exc:
+        LOGGER.warning(f"Kunde inte slå upp alias för '{entity_name}': {exc}")
+        alias_matches = []
+
+    if alias_matches:
+        canonical_name = alias_matches[0]["id"]
+        node = graph.get_node(canonical_name)
+        if node and node.get("type") == "Entity":
+            LOGGER.debug(f"Alias '{entity_name}' -> canonical '{canonical_name}'")
+            return canonical_name, node
+    return entity_name, node
+
+
+def _filter_deterministic_noise(node_name: str, master_node: str) -> bool:
+    """
+    Deterministisk filter för att avvisa tekniskt brus.
+    
+    Returns:
+        False om noden ska avvisas, True om den ska behållas.
+    """
+    # Ladda dokumentändelser från config
+    doc_extensions = CONFIG.get('processing', {}).get('document_extensions', [])
+    extensions_lower = [ext.lower() for ext in doc_extensions]
+    
+    node_lower = node_name.lower()
+    
+    # 1. Filnamnsmönster: Avvisa noder som slutar på dokumentändelser
+    for ext in extensions_lower:
+        if node_lower.endswith(ext):
+            LOGGER.info(f"Filter: Avvisade '{node_name}' (filnamnsändelse: {ext})")
+            return False
+    
+    # 2. UUID-mönster: Avvisa noder som matchar UUID-regex
+    uuid_pattern = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
+    if uuid_pattern.search(node_name):
+        LOGGER.info(f"Filter: Avvisade '{node_name}' (UUID-mönster)")
+        return False
+    
+    # 3. Aktör-specifik: Avvisa "Digitalist" i Aktör-masternoden
+    if master_node == "Aktör" and "digitalist" in node_lower:
+        LOGGER.info(f"Filter: Avvisade '{node_name}' (Digitalist i Aktör)")
+        return False
+    
+    return True
+
+
+def _enforce_canonical(node_name: str, master_node: str, taxonomy: dict, graph: GraphStore) -> tuple[str | None, bool]:
+    """
+    Tvinga canonical truth från grafen.
+    
+    Args:
+        node_name: Nodnamn att validera
+        master_node: Masternod där noden ska läggas till
+        taxonomy: Taxonomi-dict
+        graph: GraphStore-instans
+    
+    Returns:
+        (canonical_name, should_reject) där:
+        - canonical_name: Canonical namn att använda (eller None om ska avvisas)
+        - should_reject: True om noden ska avvisas helt
+    """
+    # Hämta canonical från grafen
+    canonical = get_canonical_from_graph(node_name)
+    
+    if canonical and canonical != node_name:
+        # Canonical finns och skiljer sig från original
+        # Kolla om canonical redan finns i taxonomin
+        for mn, data in taxonomy.items():
+            if canonical in data.get("sub_nodes", []):
+                LOGGER.info(f"Canonical: Avvisade '{node_name}' (canonical '{canonical}' finns redan i {mn})")
+                return None, True
+        
+        LOGGER.info(f"Canonical: '{node_name}' -> '{canonical}'")
+        return canonical, False
+    
+    elif canonical and canonical == node_name:
+        # Detta är redan canonical - kolla om det finns i taxonomin
+        for mn, data in taxonomy.items():
+            if canonical in data.get("sub_nodes", []):
+                LOGGER.info(f"Canonical: Avvisade '{node_name}' (finns redan i {mn})")
+                return None, True
+        return node_name, False
+    
+    else:
+        # Ingen canonical hittades - behåll original om det inte redan finns
+        for mn, data in taxonomy.items():
+            if node_name in data.get("sub_nodes", []):
+                LOGGER.info(f"Canonical: Avvisade '{node_name}' (finns redan i {mn})")
+                return None, True
+        return node_name, False
+
+
+def consolidate_with_evidence(taxonomy: dict, graph_data: dict) -> dict:
+    """
+    Konsolidera entiteter mot taxonomi med Evidence Layer.
+    
+    - Hämtar alla unika entity_name direkt från evidence-tabellen (inte från grafen)
+    - För varje entity: räkna master_node_candidate-frekvens och välj högsta (tie-break på confidence-medel)
+    - Lägg till entiteten i taxonomin under vald masternod om den saknas
+    - Flytta entiteten om grafens canonical truth eller stark evidence visar annan masternod
+    
+    Returns:
+        {"entities_added": int, "entities_moved": int}
+    """
+    stats = {"entities_added": 0, "entities_moved": 0}
+
+    # Använd read_write istället för read_only för att undvika konflikter med andra processer
+    graph = GraphStore(GRAPH_PATH, read_only=False)
+    try:
+        # Hämta alla unika entity_name direkt från evidence-tabellen
+        # (Multipass-entities finns i evidence, inte i grafen ännu)
+        unique_entities = graph.conn.execute("""
+            SELECT DISTINCT entity_name 
+            FROM evidence
+            WHERE entity_name IS NOT NULL AND entity_name != ''
+        """).fetchall()
+        
+        all_entities = [row[0] for row in unique_entities]
+        
+        LOGGER.info(f"Konsoliderar {len(all_entities)} entities från Evidence Layer")
+        
+        entity_to_masters: dict[str, set[str]] = {}
+        for master_node, data in taxonomy.items():
+            for sub_node in data.get("sub_nodes", []):
+                entity_to_masters.setdefault(sub_node, set()).add(master_node)
+        
+        for entity_name in all_entities:
+            evidences = graph.get_evidence_for_entity(entity_name, limit=200)
+            if not evidences:
+                continue
+
+            # Räkna master_node_candidate-frekvenser och medelconfidence
+            counts = {}
+            confidence_sum = {}
+            for ev in evidences:
+                master = ev.get("master_node_candidate")
+                if not master:
+                    continue
+                counts[master] = counts.get(master, 0) + 1
+                conf = ev.get("confidence")
+                if conf is not None:
+                    try:
+                        conf_f = float(conf)
+                    except Exception as e:
+                        LOGGER.debug(f"Confidence parse misslyckades för {entity_name}: {e}")
+                        conf_f = 0.0
+                    confidence_sum[master] = confidence_sum.get(master, 0.0) + conf_f
+
+            if not counts:
+                continue
+
+            # Välj master med flest evidence, tie-break på högst medelconfidence
+            def score(item):
+                master, cnt = item
+                avg_conf = confidence_sum.get(master, 0.0) / cnt if cnt else 0.0
+                return (cnt, avg_conf)
+
+            best_master = max(counts.items(), key=score)[0]
+
+            canonical_name, graph_node = _resolve_canonical_entity(graph, entity_name)
+            graph_master = None
+            if graph_node:
+                graph_master = graph_node.get("properties", {}).get("entity_type")
+
+            correct_master = best_master
+            reason = f"{counts[best_master]} evidence"
+
+            if graph_master:
+                if graph_master in taxonomy:
+                    correct_master = graph_master
+                    reason = "grafens canonical entity_type"
+                    if graph_master != best_master:
+                        LOGGER.info(
+                            f"Graf överstyr evidence för '{canonical_name}': "
+                            f"graf={graph_master}, evidence={best_master}"
+                        )
+                else:
+                    LOGGER.warning(
+                        f"Graf pekar på okänd masternod '{graph_master}' för '{canonical_name}'. "
+                        f"Faller tillbaka till evidence '{best_master}'."
+                    )
+
+            if correct_master not in taxonomy:
+                LOGGER.warning(
+                    f"Skippar entity '{canonical_name}': okänd masternod '{correct_master}'"
+                )
+                continue
+
+            current_masters = entity_to_masters.get(canonical_name, set()).copy()
+
+            if not current_masters:
+                # Entitet saknas i taxonomin – validera innan läggning
+                # 1. Deterministisk filter
+                if not _filter_deterministic_noise(canonical_name, correct_master):
+                    LOGGER.info(f"Filter: Avvisade '{canonical_name}' från {correct_master} (deterministisk filter)")
+                    continue
+                
+                # 2. Canonical enforcement
+                final_name, should_reject = _enforce_canonical(canonical_name, correct_master, taxonomy, graph)
+                if should_reject or final_name is None:
+                    LOGGER.info(f"Canonical: Avvisade '{canonical_name}' från {correct_master} (duplikat eller ogiltig)")
+                    continue
+                
+                # Lägg till med canonical namn
+                taxonomy[correct_master].setdefault("sub_nodes", []).append(final_name)
+                taxonomy[correct_master]["sub_nodes"] = sorted(
+                    list(set(taxonomy[correct_master]["sub_nodes"]))
+                )
+                entity_to_masters.setdefault(final_name, set()).add(correct_master)
+                stats["entities_added"] += 1
+                if final_name != canonical_name:
+                    LOGGER.info(f"Lade till '{final_name}' (från '{canonical_name}') i {correct_master} ({reason})")
+                else:
+                    LOGGER.info(f"Lade till '{canonical_name}' i {correct_master} ({reason})")
+                continue
+
+            if correct_master in current_masters and len(current_masters) == 1:
+                # Redan placerad rätt – inget att göra
+                continue
+
+            # Graf saknas → använd evidence-tröskel innan flytt
+            evidence_reason = reason
+            if not graph_master:
+                master_count = counts.get(correct_master, 0)
+                avg_conf = (
+                    confidence_sum.get(correct_master, 0.0) / master_count
+                    if master_count
+                    else 0.0
+                )
+                evidence_strong = master_count >= 3 or avg_conf >= 0.7
+                if not evidence_strong:
+                    LOGGER.debug(
+                        f"Behåller '{canonical_name}' i {sorted(current_masters)}: "
+                        f"evidence för '{correct_master}' är för svagt "
+                        f"(count={master_count}, avg_conf={avg_conf:.2f})"
+                    )
+                    continue
+                evidence_reason = f"{master_count} evidence (avg_conf {avg_conf:.2f})"
+
+            # Flytta: ta bort från samtliga gamla masternoder
+            for old_master in sorted(current_masters):
+                if canonical_name in taxonomy[old_master].get("sub_nodes", []):
+                    taxonomy[old_master]["sub_nodes"] = sorted(
+                        list(
+                            set(
+                                node
+                                for node in taxonomy[old_master]["sub_nodes"]
+                                if node != canonical_name
+                            )
+                        )
+                    )
+                    LOGGER.info(
+                        f"Tog bort '{canonical_name}' från {old_master} "
+                        f"(flyttas till {correct_master})"
+                    )
+            entity_to_masters[canonical_name] = {correct_master}
+
+            # Lägg till i korrekt masternod
+            taxonomy[correct_master].setdefault("sub_nodes", []).append(canonical_name)
+            taxonomy[correct_master]["sub_nodes"] = sorted(
+                list(set(taxonomy[correct_master]["sub_nodes"]))
+            )
+            stats["entities_moved"] += 1
+            LOGGER.info(
+                f"Flyttade '{canonical_name}' till {correct_master} "
+                f"(källa: {reason if graph_master else evidence_reason})"
+            )
+    finally:
+        graph.close()
+
+    LOGGER.info(
+        f"Evidence-konsolidering: {stats['entities_added']} entities tillagda, "
+        f"{stats['entities_moved']} entities flyttade"
+    )
+    return stats
+
+
+def get_evidence_for_entity(entity_name: str, limit: int = 200) -> list[dict]:
+    """Hämta evidence för en entitet."""
+    # Använd read_write istället för read_only för att undvika konflikter med andra processer
+    graph = GraphStore(GRAPH_PATH, read_only=False)
+    try:
+        return graph.get_evidence_for_entity(entity_name, limit=limit)
+    finally:
+        graph.close()
 
 
 def _synchronize_taxonomy_with_graph(taxonomy: dict, graph: GraphStore) -> dict:
@@ -339,16 +698,57 @@ def _find_unrecognized_nodes(graph_data: dict, taxonomy: dict) -> dict:
     }
 
 
+def _prune_taxonomy(taxonomy: dict) -> int:
+    """
+    Deterministisk städning av taxonomin (Grovtvätt).
+    
+    1. Tar bort självreferenser (sub_node == master_node).
+    2. Tar bort dubbletter (deduplicering).
+    """
+    total_pruned = 0
+    for master_node, data in taxonomy.items():
+        sub_nodes = data.get("sub_nodes", [])
+        if not sub_nodes:
+            continue
+
+        original_count = len(sub_nodes)
+        clean_nodes = []
+        seen = set()
+
+        for node in sub_nodes:
+            # 1. Självreferens check (case-insensitive)
+            if node.lower() == master_node.lower():
+                LOGGER.info(f"Pruning: Tog bort självreferens '{node}' från {master_node}")
+                continue
+            
+            # 2. Deduplicering (case-insensitive check men behåll original casing)
+            if node.lower() in seen:
+                continue
+            
+            seen.add(node.lower())
+            clean_nodes.append(node)
+        
+        data["sub_nodes"] = sorted(clean_nodes)
+        pruned_here = original_count - len(clean_nodes)
+        total_pruned += pruned_here
+        
+        if pruned_here > 0:
+            LOGGER.info(f"Pruning: {pruned_here} noder borttagna från {master_node}")
+
+    return total_pruned
+
+
 def consolidate() -> dict:
     """
     Huvudfunktion: Konsolidera grafens noder till taxonomin.
     
     Steg:
+    0. Pruning: Grovtvätt av taxonomin.
     1. Samla noder från grafen
     2. Ladda taxonomin
     2.5. Synkronisera taxonomin med grafens canonical truth (validera aliases, pruna stale noder)
     3. Jämför med taxonomin (hitta nya noder)
-    4. Skicka nya noder till LLM för kategorisering
+    4. Skicka noder (både nya och befintliga) till LLM för kategorisering/finstädning
     5. Uppdatera taxonomin
     
     Returns:
@@ -361,21 +761,31 @@ def consolidate() -> dict:
         "concepts_added": 0,
         "entities_added": 0,
         "aliases_found": 0,
-        "status": "OK"
+        "pruned_count": 0,
+        "status": "OK",
+        "evidence_entities_added": 0
     }
     
     try:
+        # 2. Ladda taxonomin (Gör detta tidigt för att pruna)
+        taxonomy = _load_taxonomy()
+        
+        # 0. Pruning (Grovtvätt)
+        pruned_deterministic = _prune_taxonomy(taxonomy)
+        stats["pruned_count"] += pruned_deterministic
+        if pruned_deterministic > 0:
+             print(f"{_ts()} 🧹 Grovtvätt: {pruned_deterministic} noder raderade")
+
         # 1. Samla från grafen
         graph_data = collect_from_graph()
-        
-        # 2. Ladda taxonomin
-        taxonomy = _load_taxonomy()
         
         # 2.5. Synkronisera taxonomin med grafens canonical truth (NYTT)
         # Öppna graf-anslutning för synkronisering
         graph = None
         try:
-            graph = GraphStore(GRAPH_PATH, read_only=True)
+            # Använd read_write istället för read_only för att undvika konflikter med andra processer
+            # read_write kan användas för både läsning och skrivning
+            graph = GraphStore(GRAPH_PATH, read_only=False)
             sync_stats = _synchronize_taxonomy_with_graph(taxonomy, graph)
             
             if sync_stats["aliases_replaced"] > 0 or sync_stats["pruned"] > 0 or sync_stats["stale_removed"] > 0:
@@ -390,48 +800,174 @@ def consolidate() -> dict:
             if graph:
                 graph.close()
         
-        # 3. Hitta nya noder
+        # 3. Evidence-konsolidering: använd Evidence Layer för att placera entiteter
+        ev_stats = consolidate_with_evidence(taxonomy, graph_data)
+        stats["evidence_entities_added"] = ev_stats.get("entities_added", 0)
+
+        # 4. Hitta nya noder (efter evidence-konsolidering)
         unrecognized = _find_unrecognized_nodes(graph_data, taxonomy)
         
         new_concepts = unrecognized["new_concepts"]
         new_entities = unrecognized["new_entities"]
         
-        if not new_concepts and not new_entities:
-            print(f"{_ts()} ✅ Dreaming klar: Inga nya noder att konsolidera")
-            LOGGER.info("Inga nya noder att konsolidera")
-            # Spara även om inga nya noder (synkroniseringen kan ha ändrat taxonomin)
+        # VIKTIGT: Skicka BARA nya noder till LLM för granskning
+        # Befintliga noder i taxonomin behöver inte granskas om de redan finns
+        # Detta förhindrar att samma entiteter skickas om och om igen
+        
+        all_nodes_to_review = new_concepts.copy()
+        
+        # Lägg till nya entities
+        for entity_list in new_entities.values():
+            all_nodes_to_review.extend(entity_list)
+        
+        # Deduplicera
+        all_nodes_to_review = list(set(all_nodes_to_review))
+
+        if not all_nodes_to_review:
+            print(f"{_ts()} ✅ Dreaming klar: Inget att granska")
+            stats["review_list"] = []
+            stats["review_count"] = 0
             _save_taxonomy(taxonomy)
             _save_timestamp()
             return stats
         
-        print(f"{_ts()} 🔍 Hittade {len(new_concepts)} nya concepts, "
-              f"{sum(len(v) for v in new_entities.values())} nya entities")
+        print(f"{_ts()} 🔍 Granskar {len(all_nodes_to_review)} nya noder via LLM...")
         
-        # 4. Skicka till LLM för kategorisering
+        # 5. Skicka till LLM för kategorisering OCH städning
+        # Samla ReviewObject-lista istället för att direkt uppdatera taxonomy
+        review_list = []
+        
         if AI_CLIENT:
-            categorized = _llm_categorize(new_concepts, new_entities, taxonomy)
-            
-            # 5. Uppdatera taxonomin
-            if categorized:
-                for master_node, additions in categorized.items():
-                    if master_node in taxonomy:
+            # Öppna graf-anslutning för similarity-beräkningar
+            # Använd read_write istället för read_only för att undvika konflikter med andra processer
+            # read_write kan användas för både läsning och skrivning
+            graph = GraphStore(GRAPH_PATH, read_only=False)
+            try:
+                # Använd _llm_categorize för att få kategoriseringar
+                review_result = _llm_categorize(all_nodes_to_review, taxonomy)
+                
+                if review_result:
+                    # Hantera 'categorized' (Lägg till/Flytta) - skapa ReviewObject för varje
+                    categorized = review_result.get("categorized", {})
+                    
+                    for master_node, items in categorized.items():
+                        if master_node not in taxonomy:
+                            continue
                         current_subs = set(taxonomy[master_node].get("sub_nodes", []))
-                        for item in additions:
-                            if item not in current_subs:
-                                taxonomy[master_node]["sub_nodes"].append(item)
-                                stats["concepts_added"] += 1
+                        for item in items:
+                            if item in current_subs:
+                                continue
+                            
+                            # 1. Deterministisk filter
+                            if not _filter_deterministic_noise(item, master_node):
+                                LOGGER.info(f"Filter: Avvisade '{item}' från {master_node} (deterministisk filter)")
+                                continue
+                            
+                            # 2. Canonical enforcement
+                            final_name, should_reject = _enforce_canonical(item, master_node, taxonomy, graph)
+                            if should_reject or final_name is None:
+                                LOGGER.info(f"Canonical: Avvisade '{item}' från {master_node} (duplikat eller ogiltig)")
+                                continue
+                            
+                            # 3. Beräkna similarity och skapa ReviewObject
+                            similarity_result = _calculate_similarity(final_name, master_node, graph)
+                            
+                            closest_match_str = None
+                            if similarity_result.get("closest_match"):
+                                closest_match_str = similarity_result["closest_match"].get("entity_name")
+                            
+                            review_obj = ReviewObject(
+                                entity_name=final_name,
+                                master_node=master_node,
+                                similarity_score=similarity_result.get("similarity_score", 0.0),
+                                suggested_action=similarity_result.get("suggested_action", "REVIEW"),
+                                reason=similarity_result.get("reason", ""),
+                                closest_match=closest_match_str
+                            )
+                            review_list.append(review_obj)
+                            
+                            LOGGER.info(f"ReviewObject skapad: {final_name} -> {master_node} (similarity: {review_obj.similarity_score}, action: {review_obj.suggested_action})")
                 
-                # Deduplicera och sortera efter att ha lagt till nya noder
-                for master_node, data in taxonomy.items():
-                    if "sub_nodes" in data:
-                        data["sub_nodes"] = sorted(list(set(data["sub_nodes"])))
-                
-                _save_taxonomy(taxonomy)
-                print(f"{_ts()} ✅ Dreaming klar: {stats['concepts_added']} noder tillagda i taxonomin")
+                # Hantera 'pruned' (Ta bort) - skapa ReviewObject med REJECT
+                pruned_list = review_result.get("pruned", [])
+                for pruned_item in pruned_list:
+                    node_to_remove = pruned_item.get("node")
+                    reason = pruned_item.get("reason", "Ingen orsak")
+                    
+                    # Hitta masternod
+                    found_master = None
+                    for master_node, data in taxonomy.items():
+                        if node_to_remove in data.get("sub_nodes", []):
+                            found_master = master_node
+                            break
+                    
+                    if found_master:
+                        # Beräkna similarity även för prunade noder
+                        similarity_result = _calculate_similarity(node_to_remove, found_master, graph)
+                        
+                        review_obj = ReviewObject(
+                            entity_name=node_to_remove,
+                            master_node=found_master,
+                            similarity_score=similarity_result.get("similarity_score", 0.0),
+                            suggested_action="REJECT",
+                            reason=reason,
+                            closest_match=None
+                        )
+                        review_list.append(review_obj)
+
+                # Hantera 'merged' (Sammanslagning/Rename) - skapa ReviewObject för både old och new
+                merged_list = review_result.get("merged", [])
+                for merge_item in merged_list:
+                    old_name = merge_item.get("old")
+                    new_name = merge_item.get("new")
+                    
+                    if old_name and new_name:
+                        # Hitta masternod för old_name
+                        found_master = None
+                        for master_node, data in taxonomy.items():
+                            if old_name in data.get("sub_nodes", []):
+                                found_master = master_node
+                                break
+                        
+                        if found_master:
+                            # Skapa ReviewObject för new_name (RENAME-åtgärd)
+                            similarity_result = _calculate_similarity(new_name, found_master, graph)
+                            
+                            closest_match_str = None
+                            if similarity_result.get("closest_match"):
+                                closest_match_str = similarity_result["closest_match"].get("entity_name")
+                            
+                            review_obj = ReviewObject(
+                                entity_name=new_name,
+                                master_node=found_master,
+                                similarity_score=similarity_result.get("similarity_score", 0.0),
+                                suggested_action="REVIEW",  # Merged behöver alltid granskning
+                                reason=f"Merged från '{old_name}'",
+                                closest_match=closest_match_str
+                            )
+                            review_list.append(review_obj)
+            finally:
+                graph.close()
+            
+            # Deduplicera och sortera taxonomy (behåll för backward compatibility)
+            for master_node, data in taxonomy.items():
+                if "sub_nodes" in data:
+                    data["sub_nodes"] = sorted(list(set(data["sub_nodes"])))
+            
+            # Lägg till review_list i stats
+            stats["review_list"] = review_list
+            stats["review_count"] = len(review_list)
+            
+            print(f"{_ts()} ✅ Dreaming klar: {len(review_list)} entiteter behöver granskning")
         else:
             LOGGER.warning("AI-klient saknas, kan inte kategorisera nya noder")
             stats["status"] = "NO_AI"
-            # Spara även om AI saknas (synkroniseringen kan ha ändrat taxonomin)
+            stats["review_list"] = []
+            stats["review_count"] = 0
+        
+        # Spara taxonomy endast om review_list är tom (backward compatibility)
+        # Annars väntar vi på användarens beslut via interactive review
+        if not review_list:
             _save_taxonomy(taxonomy)
         
         _save_timestamp()
@@ -440,49 +976,51 @@ def consolidate() -> dict:
         LOGGER.error(f"Fel under dreaming: {e}")
         stats["status"] = "ERROR"
         stats["error"] = str(e)
+        stats["review_list"] = []
+        stats["review_count"] = 0
         print(f"{_ts()} ❌ Dreaming misslyckades: {e}")
     
     return stats
 
 
-def _llm_categorize(new_concepts: list, new_entities: dict, taxonomy: dict) -> Optional[dict]:
+def _llm_categorize(nodes_to_review: list, taxonomy: dict) -> Optional[dict]:
     """
-    Använd LLM för att kategorisera nya noder under rätt masternode.
-    
-    Returns:
-        dict med {masternode: [items to add]} eller None vid fel
+    Använd LLM för att granska, kategorisera och städa noder.
     """
-    if not new_concepts and not new_entities:
+    if not nodes_to_review:
         return None
     
     prompt_template = PROMPTS.get('dreamer', {}).get('consolidation_prompt', '')
     if not prompt_template:
-        LOGGER.error("HARDFAIL: dreamer.consolidation_prompt saknas i services_prompts.yaml")
+        LOGGER.error("HARDFAIL: dreamer.consolidation_prompt saknas")
         raise RuntimeError("HARDFAIL: dreamer.consolidation_prompt saknas")
     
-    # Bygg input för LLM (använd replace istället för format för att undvika {}-konflikter)
-    master_nodes_info = {
-        k: v.get("description", "") for k, v in taxonomy.items()
-    }
+    # Bygg master node info med definitioner
+    master_nodes_info = {}
+    for k, v in taxonomy.items():
+        desc = v.get("description", "")
+        defi = v.get("multipass_definition", "")
+        master_nodes_info[k] = f"{desc} | Definition: {defi}"
+
+    # Batching om det är extremt många noder (safety catch)
+    # För nu: skicka allt men trunkera listan om den är för stor för context
+    # En enkel string-dump
+    nodes_str = json.dumps(nodes_to_review, ensure_ascii=False)
     
     prompt = prompt_template
     prompt = prompt.replace("{master_nodes}", json.dumps(master_nodes_info, ensure_ascii=False, indent=2))
-    prompt = prompt.replace("{new_concepts}", json.dumps(new_concepts, ensure_ascii=False))
-    prompt = prompt.replace("{new_entities}", json.dumps(new_entities, ensure_ascii=False))
+    prompt = prompt.replace("{sub_nodes_to_review}", nodes_str)
     
     try:
-        LOGGER.info(f"Skickar {len(new_concepts)} concepts och {len(new_entities)} entities till LLM")
+        LOGGER.info(f"Skickar {len(nodes_to_review)} noder till LLM för granskning")
         
-        # DEBUG: Spara prompten till fil för inspektion
-        debug_prompt_file = os.path.join(os.path.dirname(TAXONOMY_FILE), "dreamer_debug_prompt.txt")
+        # DEBUG: Spara prompt
+        debug_prompt_file = os.path.join(os.path.dirname(TAXONOMY_FILE), "dreamer_review_prompt.txt")
         with open(debug_prompt_file, "w", encoding="utf-8") as f:
-            f.write(f"=== DREAMER PROMPT ({len(prompt)} tecken) ===\n\n")
             f.write(prompt)
-        LOGGER.info(f"Prompt sparad till: {debug_prompt_file}")
-        print(f"{_ts()} 📝 Prompt sparad till: {debug_prompt_file}")
-        
+            
         response = AI_CLIENT.models.generate_content(
-            model=MODEL_FAST,
+            model=MODEL_PRO,
             contents=[
                 types.Content(role="user", parts=[types.Part.from_text(text=prompt)])
             ],
@@ -490,17 +1028,11 @@ def _llm_categorize(new_concepts: list, new_entities: dict, taxonomy: dict) -> O
         )
         
         raw_text = response.text.replace('```json', '').replace('```', '').strip()
-        LOGGER.info(f"LLM svarade: {raw_text[:500]}...")  # Logga första 500 tecken
-        
         result = json.loads(raw_text)
-        LOGGER.info(f"LLM kategoriserade {len(result)} noder")
         return result
         
-    except json.JSONDecodeError as e:
-        LOGGER.error(f"JSON-parse fel: {e}. Råsvar: {response.text[:200] if response else 'inget svar'}")
-        return None
     except Exception as e:
-        LOGGER.error(f"LLM-kategorisering misslyckades: {e}")
+        LOGGER.error(f"LLM-granskning misslyckades: {e}")
         return None
 
 
