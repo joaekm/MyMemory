@@ -244,47 +244,6 @@ class EvidenceConsolidator:
     def close(self):
         self.graph.close()
 
-# --- BACKPROPAGATION ---
-def backpropagate_to_lake(source_files: List[str], topic: str, summary: str):
-    if not source_files: return
-    unique_files = list(set(source_files))
-    import re
-    
-    for unit_id in unique_files:
-        uuid_match = re.search(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', unit_id)
-        clean_uuid = uuid_match.group(1) if uuid_match else unit_id
-
-        target_file = None
-        for f in os.listdir(LAKE_STORE):
-            if f.endswith(f"_{clean_uuid}.md"):
-                target_file = os.path.join(LAKE_STORE, f)
-                break
-        
-        if not target_file: continue
-
-        try:
-            with open(target_file, 'r', encoding='utf-8') as f: content = f.read()
-            if "---" not in content: continue
-            parts = content.split("---", 2)
-            if len(parts) < 3: continue
-            
-            frontmatter = yaml.safe_load(parts[1]) or {}
-            ctx = frontmatter.get('graph_context_summary', "")
-            new_item = f"{topic}: {summary}"
-            
-            if new_item not in ctx:
-                if ctx: ctx += f"\n- {new_item}"
-                else: ctx = f"- {new_item}"
-                frontmatter['graph_context_summary'] = ctx
-                frontmatter['graph_context_updated_at'] = datetime.datetime.now().isoformat()
-                frontmatter['graph_context_status'] = "consolidated"
-                new_fm = yaml.dump(frontmatter, allow_unicode=True, sort_keys=False)
-                with open(target_file, 'w', encoding='utf-8') as f:
-                    f.write(f"---\n{new_fm}---\n{parts[2]}")
-                LOGGER.info(f"Backpropagated till {os.path.basename(target_file)}")
-        except Exception as e:
-            LOGGER.error(f"Backprop error {target_file}: {e}")
-
 # --- BATCH ORCHESTRATION ---
 async def process_all_evidence_batch() -> Dict:
     """
@@ -326,9 +285,36 @@ async def process_all_evidence_batch() -> Dict:
         evidence_list = evidence_map.get(entity_name)
         
         if not evidence_list: continue
+
+        # --- VALIDATION RULES CHECK ---
+        val_rule = dreamer.graph.get_validation_rule(entity_name)
+        force_approved = False
+
+        if val_rule:
+            decision = val_rule.get('decision')
+            if decision == 'REJECTED':
+                # Tyst kastas (REJECTED) -> Rensa evidence så det inte loopar
+                dreamer.clear_processed_evidence(entity_name)
+                continue
+            
+            elif decision in ['APPROVED', 'ADJUSTED']:
+                # Hantera APPROVED/ADJUSTED automatiskt
+                force_approved = True
+                
+                if decision == 'ADJUSTED':
+                    # Applicera justeringar
+                    if val_rule.get('adjusted_name'):
+                        res['suggested_node_id'] = val_rule['adjusted_name']
+                        res['is_atomic_node'] = True
+                    if val_rule.get('adjusted_master_node'):
+                        res['master_node'] = val_rule['adjusted_master_node']
+                
+                elif decision == 'APPROVED':
+                    res['is_atomic_node'] = True
             
         is_node = res.get('is_atomic_node')
-        agg_conf = dreamer._calculate_aggregated_confidence(evidence_list)
+        # Om validerad -> 1.0 konfidens, annars beräkna
+        agg_conf = 1.0 if force_approved else dreamer._calculate_aggregated_confidence(evidence_list)
         
         should_commit = False
         if not is_node:
@@ -354,8 +340,8 @@ async def process_all_evidence_batch() -> Dict:
             source_files = [e['source_file'] for e in evidence_list]
             success, msg = dreamer.commit_to_graph(res, source_files)
             if success:
-                topic = res.get('suggested_node_id') if is_node else res.get('master_node')
-                backpropagate_to_lake(source_files, topic, res.get('canonical_summary', ''))
+                # topic = res.get('suggested_node_id') if is_node else res.get('master_node')
+                # backpropagate_to_lake removed (Graph is SSOT)
                 dreamer.clear_processed_evidence(entity_name)
                 print(f"   {msg}")
 

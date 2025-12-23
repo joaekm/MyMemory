@@ -820,3 +820,40 @@ class GraphStore:
                 self.conn.rollback()
                 LOGGER.error(f"HARDFAIL: Kunde inte lägga till validation rule: {e}")
                 raise
+
+    def get_validation_rule(self, entity: str) -> dict | None:
+        """
+        Hämta senaste validation rule för en entitet (case-insensitive).
+        
+        Args:
+            entity: Entitetens namn
+            
+        Returns:
+            Dict med regel-data eller None om ingen regel finns.
+        """
+        with self._lock:
+            # Hämtar den senaste regeln (case-insensitive matchning)
+            row = self.conn.execute("""
+                SELECT id, entity_name, master_node, decision, reason, 
+                       adjusted_name, adjusted_master_node, created_at, similarity_score
+                FROM validation_rules
+                WHERE entity_name ILIKE ?
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, [entity]).fetchone()
+            
+            if not row:
+                return None
+                
+            return {
+                "id": row[0],
+                "entity_name": row[1],
+                "master_node": row[2],
+                "decision": row[3],
+                "reason": row[4],
+                "adjusted_name": row[5],
+                "adjusted_master_node": row[6],
+                "created_at": row[7],
+                "similarity_score": row[8]
+            }
+
