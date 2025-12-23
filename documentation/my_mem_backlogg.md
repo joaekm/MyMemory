@@ -19,7 +19,7 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
 
 * **LÖST-1 till LÖST-10:** (Se tidigare koncept-dokumentation).
 * **LÖST-11:** Implementera **Centraliserad Loggning**.
-* **LÖST-12:** Implementera **Robust Transformator** (Pivot till `pypdf`/`python-docx`).
+* **LÖST-12:** Implementera **Robust Transformator** (Pivot till `pymupdf`/`python-docx`).
 * **LÖST-13:** Funktionellt verifiera **Desktop-agentens** Insamlar-flöde (fil-dump).
 * **LÖST-14:** Implementera **Konfigurationsdrivna Sökvägar**.
 * **LÖST-15:** Implementera **Metadata-berikning ("Enricher")** i Desktop-agenten med Google GenAI.

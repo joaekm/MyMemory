@@ -242,3 +242,4 @@ class FileManager:
             LOGGER.info("🧹 Staging-katalog borttagen")
 
 
+

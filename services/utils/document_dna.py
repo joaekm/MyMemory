@@ -44,11 +44,11 @@ except ImportError as e:
     LOGGER.info(f"Pillow ej tillgängligt: {e}")
 
 try:
-    import pypdf
-    PYPDF_AVAILABLE = True
+    import fitz  # pymupdf
+    FITZ_AVAILABLE = True
 except ImportError as e:
-    PYPDF_AVAILABLE = False
-    LOGGER.info(f"pypdf ej tillgängligt: {e}")
+    FITZ_AVAILABLE = False
+    LOGGER.info(f"pymupdf (fitz) ej tillgängligt: {e}")
 
 try:
     import docx
@@ -245,10 +245,10 @@ def _check_encryption(filepath: str) -> bool:
     ext = os.path.splitext(filepath)[1].lower()
     
     # PDF encryption check
-    if ext == '.pdf' and PYPDF_AVAILABLE:
+    if ext == '.pdf' and FITZ_AVAILABLE:
         try:
-            reader = pypdf.PdfReader(filepath)
-            return reader.is_encrypted
+            with fitz.open(filepath) as doc:
+                return doc.is_encrypted
         except Exception as e:
             LOGGER.debug(f"PDF encryption check misslyckades: {e}")
     
@@ -301,22 +301,23 @@ def _extract_pdf_metadata(filepath: str) -> dict:
     """Extrahera metadata från PDF."""
     result = {}
     
-    if not PYPDF_AVAILABLE:
+    if not FITZ_AVAILABLE:
         return result
     
     try:
-        reader = pypdf.PdfReader(filepath)
-        result['page_count'] = len(reader.pages)
-        
-        if reader.metadata:
-            if reader.metadata.author:
-                result['author_embedded'] = reader.metadata.author
-            if reader.metadata.title:
-                result['title_embedded'] = reader.metadata.title
-            if reader.metadata.creator:
-                result['creation_tool'] = reader.metadata.creator
-            elif reader.metadata.producer:
-                result['creation_tool'] = reader.metadata.producer
+        with fitz.open(filepath) as doc:
+            result['page_count'] = doc.page_count
+            
+            metadata = doc.metadata
+            if metadata:
+                if metadata.get('author'):
+                    result['author_embedded'] = metadata['author']
+                if metadata.get('title'):
+                    result['title_embedded'] = metadata['title']
+                if metadata.get('creator'):
+                    result['creation_tool'] = metadata['creator']
+                elif metadata.get('producer'):
+                    result['creation_tool'] = metadata['producer']
     except Exception as e:
         LOGGER.warning(f"PDF-metadata extraction misslyckades: {e}")
     
@@ -469,15 +470,15 @@ def _extract_text_sample(filepath: str, mime_type: str, max_chars: int = 10000) 
             LOGGER.debug(f"Text extraction misslyckades (plaintext): {e}")
     
     # PDF
-    if (mime_type == 'application/pdf' or ext == '.pdf') and PYPDF_AVAILABLE:
+    if (mime_type == 'application/pdf' or ext == '.pdf') and FITZ_AVAILABLE:
         try:
-            reader = pypdf.PdfReader(filepath)
-            text = ""
-            for page in reader.pages[:5]:  # Max 5 sidor
-                text += page.extract_text() or ""
-                if len(text) >= max_chars:
-                    break
-            return text[:max_chars]
+            with fitz.open(filepath) as doc:
+                text = ""
+                for page in doc[:5]:  # Max 5 sidor
+                    text += page.get_text() or ""
+                    if len(text) >= max_chars:
+                        break
+                return text[:max_chars]
         except Exception as e:
             LOGGER.debug(f"Text extraction misslyckades (PDF): {e}")
     

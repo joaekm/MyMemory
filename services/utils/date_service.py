@@ -152,7 +152,7 @@ class PDFExtractor(DateExtractor):
     """
     Läser CreationDate från PDF-metadata.
     
-    Kräver: pypdf
+    Kräver: pymupdf (fitz)
     """
     
     @property
@@ -164,35 +164,31 @@ class PDFExtractor(DateExtractor):
     
     def extract(self, filepath: str) -> Optional[datetime]:
         try:
-            from pypdf import PdfReader
-            reader = PdfReader(filepath)
+            import fitz  # type: ignore
             
-            if reader.metadata:
-                # Försök creation_date först
-                if hasattr(reader.metadata, 'creation_date') and reader.metadata.creation_date:
-                    cd = reader.metadata.creation_date
-                    if isinstance(cd, datetime):
-                        return cd
+            with fitz.open(filepath) as doc:
+                metadata = doc.metadata
+                if not metadata:
+                    return None
+                    
+                creation_date_str = metadata.get('creationDate', '')
                 
-                # Försök /CreationDate som sträng
-                creation_date_str = reader.metadata.get('/CreationDate')
-                if creation_date_str:
-                    # PDF-format: D:YYYYMMDDHHmmSS+TZ
-                    # Exempel: D:20231215143052+01'00'
-                    if creation_date_str.startswith('D:'):
-                        date_part = creation_date_str[2:16]  # YYYYMMDDHHMMSS
+                # PDF-format: D:YYYYMMDDHHmmSS+TZ
+                # Exempel: D:20231215143052+01'00'
+                if creation_date_str and creation_date_str.startswith('D:'):
+                    date_part = creation_date_str[2:16]  # YYYYMMDDHHMMSS
+                    try:
+                        return datetime.strptime(date_part, '%Y%m%d%H%M%S')
+                    except ValueError:
+                        LOGGER.debug(f"Kunde inte parsa PDF-datum med tid: {date_part}")
+                        # Försök bara datum
                         try:
-                            return datetime.strptime(date_part, '%Y%m%d%H%M%S')
+                            return datetime.strptime(date_part[:8], '%Y%m%d')
                         except ValueError:
-                            LOGGER.debug(f"Kunde inte parsa PDF-datum med tid: {date_part}")
-                            # Försök bara datum
-                            try:
-                                return datetime.strptime(date_part[:8], '%Y%m%d')
-                            except ValueError:
-                                LOGGER.debug(f"Kunde inte parsa PDF-datum: {date_part[:8]}")
-                                
+                            LOGGER.debug(f"Kunde inte parsa PDF-datum: {date_part[:8]}")
+                            
         except ImportError:
-            LOGGER.warning("pypdf inte installerat - kan inte läsa PDF-metadata")
+            LOGGER.warning("pymupdf (fitz) inte installerat - kan inte läsa PDF-metadata")
         except Exception as e:
             LOGGER.debug(f"PDFExtractor misslyckades för {filepath}: {e}")
         

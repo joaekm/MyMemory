@@ -26,10 +26,10 @@ from pathlib import Path
 
 # Imports Dependencies
 try:
-    import pypdf
+    import fitz  # pymupdf
     import docx
 except ImportError:
-    print("[CRITICAL] Saknar nödvändiga bibliotek (pypdf, python-docx).")
+    print("[CRITICAL] Saknar nödvändiga bibliotek (pymupdf, python-docx).")
     sys.exit(1)
 
 # Lägg till projektroten
@@ -127,8 +127,9 @@ def extract_text(filväg: str, ext: str) -> str | None:
         text = ""
         ext = ext.lower()
         if ext == '.pdf':
-            reader = pypdf.PdfReader(filväg)
-            for page in reader.pages: text += (page.extract_text() or "") + "\n"
+            with fitz.open(filväg) as doc:
+                for page in doc:
+                    text += (page.get_text() or "") + "\n"
         elif ext == '.docx':
             doc = docx.Document(filväg)
             for para in doc.paragraphs: text += para.text + "\n"

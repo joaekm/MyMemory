@@ -7,7 +7,7 @@ watchdog
 pyyaml
 
 # Text-extrahering (Dokument)
-pypdf
+pymupdf
 python-docx
 
 # Dataanalys & Tabellhantering (Nytt för v4.2)

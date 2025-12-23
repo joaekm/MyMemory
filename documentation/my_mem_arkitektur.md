@@ -176,7 +176,7 @@ Systemet följer strikt principen att **inga prompter får finnas i kod**.
 | **Språk** | Python 3.12 |
 | **Vektordatabas** | ChromaDB |
 | **Grafdatabas** | DuckDB (relationell graf via nodes/edges/evidence) |
-| **Parsing** | pandas, pypdf, python-docx |
+| **Parsing** | pandas, pymupdf, python-docx |
 | **UI** | Rich (CLI) |
 | **AI-klient** | google-genai (v1.0+ syntax) |
 

@@ -112,7 +112,7 @@ Vi etablerade ett scenario (baserat på inspelningar, post-its, Slack) för att 
 * **LÖST (Refaktorering):** Skriptet refaktoreras för att läsa alla sökvägar (Drop Folder, Lake Store, Asset Store) från `dfm_config.yaml`, vilket återställer "medarbetarkontrollen".
 
 * **Problemlösning (Transformation):** Första MVP misslyckades på grund av det felaktiga `tika`-biblioteket (krävde Java-server). Andra försöket (med `textract`) misslyckades på grund av trasig paketmetadata.
-* **LÖST (Teknik-Pivot):** Vi gjorde en teknik-pivot till en mer robust arkitektur: att använda explicita, välunderhållna Python-bibliotek (`pypdf` och `python-docx`) för att explicit hantera filtyper.
+* **LÖST (Teknik-Pivot):** Vi gjorde en teknik-pivot till en mer robust arkitektur: att använda explicita, välunderhållna Python-bibliotek (`pymupdf` och `python-docx`) för att explicit hantera filtyper.
 
 * **Implementering av Loggning:** Ett nytt krav lades till: "centraliserad loggning" för "robust felsökning och kontroll". Detta implementerades genom att lägga till `log_path` i `dfm_config.yaml` och konfigurera en `logging.Logger` som skriver till filen, samtidigt som diskret `print` i terminalen behölls för realtidsfeedback.
 
