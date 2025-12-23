@@ -1,5 +1,5 @@
 
-# Systemarkitektur (v9.3 - The Graph Awakens)
+# Systemarkitektur (v9.5 - The Graph Awakens)
 
 Detta dokument beskriver den tekniska sanningen om systemets implementation, uppdaterad December 2025.
 
@@ -90,11 +90,11 @@ DocConverter använder nu en parallelliserad "Multipass"-strategi för djupare a
 2. **Evidence Generation:** Varje träff sparas som ett "Evidence Item" i GraphDB (`evidence`-tabellen) med confidence score.
 3. **Parallellism:** Använder ThreadPoolExecutor för att köra alla masternoder samtidigt.
 
-### 3.2.3 Idempotens & Robusthet (v9.3)
-DocConverter har fullt stöd för idempotens:
-- Kontrollerar om filen redan finns i Lake innan bearbetning startar.
-- Robust konfigurationshantering för att undvika krascher vid saknade inställningar.
-- Klusterbaserad Multipass-analys för effektivare extraktion.
+### 3.2.3 DocConverter v9.3: Clustered Multipass & Idempotens
+DocConverter har genomgått en omfattande refaktorering för prestanda och stabilitet:
+1. **Clustered Multipass:** Istället för ett anrop per masternod, grupperas noder i semantiska kluster (`Entities`, `Business`, `Strategy`, `Ops`). Detta minskar API-anropen med ~80% samtidigt som precisionen bibehålls.
+2. **Idempotens:** Processen kontrollerar nu explicit om filen redan finns i Lake *innan* bearbetning påbörjas. Detta gör återstart av processer (Rebuild) snabb och säker.
+3. **Robust Config:** Config-hanteringen har härdats för att hantera sökvägar och promptar dynamiskt från `services_prompts.yaml`.
 
 ### 3.3 Indexering (Delad Arkitektur)
 
@@ -104,14 +104,13 @@ DocConverter har fullt stöd för idempotens:
 | **Graph Builder** | Batch (Manuell) | Konsoliderar mot OTS | Struktur & relationer |
 | **Dreamer** | Batch (Schemalagd) | Evidence-baserad konsolidering | Taxonomi-vård |
 
-### 3.3.1 Dreamer & Evidence Consolidation
-Dreamer har uppgraderats för att använda Evidence Layer:
-1. **Sync:** Synkroniserar taxonomin mot grafens "Canonical Truth" (rensar alias/stale noder).
-2. **Consolidate:** Analyserar `evidence`-tabellen.
-   - Om grafen redan vet entitetstyp: Använd den (Truth).
-   - Om ny entitet: Använd statistisk slutledning från evidence (High Confidence/Frequency).
-   - Flyttar automatiskt entiteter mellan masternoder om bevisen pekar rätt.
-3. **Backpropagation:** Skriver "Graph Context Summary" tillbaka till Lake-filen för att göra vektorn smartare.
+### 3.3.1 Dreamer v9.5: Batch Processing & Human-in-the-Loop
+Dreamer har uppgraderats från en enkel loop till en batch-orienterad motor:
+1. **Batch Processing:** Använder `consolidate_batch`-prompten för att bearbeta listor av kandidater i ett enda anrop. Detta ökar genomströmningen dramatiskt.
+2. **ReviewObject:** Osäkra noder (confidence < 0.9) skickas inte längre automatiskt till grafen. Istället skapas `ReviewObject` som samlas i en kö för manuell granskning via `interactive_review`.
+3. **Aggregerad Konfidens:** En ny algoritm beräknar sannolikheten för en entitet baserat på bevis från flera oberoende källor.
+4. **Sync:** Synkroniserar taxonomin mot grafens "Canonical Truth" (rensar alias/stale noder).
+5. **Backpropagation:** Skriver "Graph Context Summary" tillbaka till Lake-filen för att göra vektorn smartare.
 
 ## 4. Konsumtion & Gränssnitt
 
