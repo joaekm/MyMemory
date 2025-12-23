@@ -42,6 +42,8 @@ from services.utils.json_parser import parse_llm_json
 try:
     from services.utils.date_service import get_timestamp as date_service_timestamp
 except ImportError:
+    # date_service is optional, fallback to datetime.now()
+    sys.stderr.write("[INFO] date_service inte tillgänglig, använder datetime.now()\n")
     date_service_timestamp = lambda x: datetime.datetime.now()
 
 # Entity Register imports (samma som förut)
@@ -53,7 +55,8 @@ try:
         close_db_connection
     )
 except ImportError:
-    # Fallback om imports misslyckas
+    # Graph builder imports are optional in some contexts
+    sys.stderr.write("[INFO] graph_builder inte tillgänglig, kör utan entity-funktioner\n")
     get_known_entities = lambda: []
     get_canonical = lambda x: None
     add_entity_alias = lambda x, y, z: False
@@ -129,7 +132,11 @@ def extract_text(filväg: str, ext: str) -> str | None:
         if ext == '.pdf':
             with fitz.open(filväg) as doc:
                 for page in doc:
-                    text += (page.get_text() or "") + "\n"
+                    # Använd block-baserad extraktion för bättre layout-hantering (stycken)
+                    blocks = page.get_text("blocks")
+                    for b in blocks:
+                        if b[6] == 0:  # Text block (0=text, 1=image)
+                            text += b[4] + "\n"
         elif ext == '.docx':
             doc = docx.Document(filväg)
             for para in doc.paragraphs: text += para.text + "\n"
@@ -165,20 +172,46 @@ def get_best_timestamp(filepath: str, text_content: str) -> str:
     except: return datetime.datetime.now().isoformat()
 
 # --- CLUSTERED MULTIPASS ---
-CATEGORY_CLUSTERS = {
-    "Entities": ["Person", "Organisation", "Plats", "Aktör", "Händelser", "Dokument"],
-    "Business": ["Projekt", "Erbjudande", "Tjänst", "Produkt", "Avtal", "Ekonomi", "Affär"],
-    "Strategy": ["Vision", "Strategi", "Mål", "Marknad", "Kultur", "Förändring", "Resultat"],
-    "Ops": ["Metodik", "Process", "Verktyg", "Arbetsverktyg", "Teknologier", "Data", "Säkerhet", "Kvalitet", "Juridik", "Standard", "Arkitektur"]
-}
 
-def load_valid_taxonomy():
-    if not os.path.exists(TAXONOMY_FILE): return []
+def load_taxonomy_data():
+    """Laddar hela taxonomi-strukturen från JSON-filen."""
+    if not os.path.exists(TAXONOMY_FILE): 
+        LOGGER.warning(f"Taxonomy file not found at {TAXONOMY_FILE}")
+        return {}
     try:
-        with open(TAXONOMY_FILE, 'r') as f: return list(json.load(f).keys())
-    except: return []
+        with open(TAXONOMY_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        LOGGER.error(f"HARDFAIL: Could not load taxonomy: {e}")
+        return {}
 
-VALID_NODES = load_valid_taxonomy()
+def get_dynamic_clusters():
+    """
+    Bygger kluster dynamiskt genom att läsa 'cluster'-fältet från taxonomin.
+    Gör Taxonomin till SSOT för både noder och deras gruppering.
+    """
+    taxonomy = load_taxonomy_data()
+    clusters = {}
+    
+    for node, data in taxonomy.items():
+        # Hämta kluster-tagg, fallback till 'Other' om den saknas i datan
+        cluster_name = data.get('cluster', 'Other')
+        
+        if cluster_name not in clusters:
+            clusters[cluster_name] = []
+        
+        clusters[cluster_name].append(node)
+    
+    # Logga om taxonomin var tom (kan hända innan first run)
+    if not clusters:
+        LOGGER.warning("No clusters found in taxonomy. Is it initialized?")
+        
+    return clusters
+
+# Initiera globala variabler dynamiskt vid start
+CATEGORY_CLUSTERS = get_dynamic_clusters()
+# VALID_NODES blir en platt lista av alla noder som hittades i klustren
+VALID_NODES = [node for sublist in CATEGORY_CLUSTERS.values() for node in sublist]
 
 def analyze_cluster(text_chunk, cluster_name, categories, doc_name):
     active = [c for c in categories if c in VALID_NODES]
@@ -242,7 +275,9 @@ def generate_summary(text):
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         return parse_llm_json(response.text)
-    except: return {"summary": "", "keywords": []}
+    except Exception as e:
+        LOGGER.error(f"Generate Metadata Error: {e}")
+        return {"summary": "", "keywords": []}
 
 # --- MAIN PROCESS ---
 def processa_dokument(filväg: str, filnamn: str):
@@ -300,11 +335,6 @@ def processa_dokument(filväg: str, filnamn: str):
             "timestamp_created": ts,
             "summary": meta.get('summary', ''),
             "keywords": meta.get('keywords', []),
-            "multipass_stats": {
-                "evidence_count": total_evidence,
-                "clusters_processed": len(CATEGORY_CLUSTERS),
-                "details": node_stats
-            },
             "graph_context_status": "pending_consolidation",
             "ai_model": MODEL_NAME
         }
@@ -325,7 +355,8 @@ def _move_to_failed(filepath):
     os.makedirs(FAILED_FOLDER, exist_ok=True)
     try:
         shutil.move(filepath, os.path.join(FAILED_FOLDER, os.path.basename(filepath)))
-    except: pass
+    except Exception as e:
+        LOGGER.error(f"Kunde inte flytta till failed: {filepath} -> {e}")
 
 # --- WATCHDOG ---
 from watchdog.observers import Observer
