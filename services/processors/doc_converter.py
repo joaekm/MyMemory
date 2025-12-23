@@ -310,7 +310,6 @@ def processa_dokument(filväg: str, filnamn: str):
 
         graph = GraphStore(GRAPH_DB_PATH)
         total_evidence = 0
-        node_stats = {}
         
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {
@@ -322,9 +321,6 @@ def processa_dokument(filväg: str, filnamn: str):
                 if items:
                     count = save_to_evidence_db(items, unit_id, graph)
                     total_evidence += count
-                    for i in items:
-                        c = i.get('category')
-                        node_stats[c] = node_stats.get(c, 0) + 1
         
         graph.close()
 
