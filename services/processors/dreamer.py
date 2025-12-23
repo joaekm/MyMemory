@@ -244,6 +244,66 @@ class EvidenceConsolidator:
     def close(self):
         self.graph.close()
 
+# --- TAXONOMY SYNC ---
+def _sync_taxonomy_file(taxonomy_path: str, graph_path: str):
+    """
+    Läser alla Entity-noder från grafen och uppdaterar sub_nodes i taxonomi-filen.
+    Detta gör att taxonomifilen alltid speglar grafens innehåll (Terrängen -> Kartan).
+    """
+    if not os.path.exists(taxonomy_path):
+        LOGGER.error(f"Taxonomy file not found: {taxonomy_path}")
+        return
+
+    try:
+        # 1. Läs nuvarande taxonomi för att behålla struktur/beskrivningar
+        with open(taxonomy_path, 'r', encoding='utf-8') as f:
+            taxonomy_data = json.load(f)
+        
+        # 2. Hämta alla entities från grafen
+        # Vi öppnar en temporär read-only connection för att inte störa Dreamer
+        # OBS: Vi måste hantera låsning om Dreamer redan kör
+        # I detta kontext körs sync EFTER att Dreamer stängt sin connection
+        graph = GraphStore(graph_path, read_only=True)
+        all_entities = graph.find_nodes_by_type("Entity")
+        graph.close()
+
+        # 3. Gruppera entities per masternod
+        # { "Person": ["Alice", "Bob"], "Projekt": ["P1", "P2"] }
+        graph_entities = defaultdict(set)
+        for node in all_entities:
+            props = node.get('properties', {})
+            entity_type = props.get('entity_type') # Detta är masternoden (t.ex. "Person")
+            entity_name = node.get('id')
+            
+            if entity_type and entity_name:
+                graph_entities[entity_type].add(entity_name)
+
+        # 4. Uppdatera taxonomi-strukturen
+        updates_count = 0
+        for master_node, entities in graph_entities.items():
+            if master_node in taxonomy_data:
+                current_sub_nodes = set(taxonomy_data[master_node].get('sub_nodes', []))
+                # Union av filens och grafens noder för att inte tappa bort manuella
+                new_sub_nodes = sorted(list(current_sub_nodes.union(entities)))
+                
+                if new_sub_nodes != taxonomy_data[master_node].get('sub_nodes', []):
+                    taxonomy_data[master_node]['sub_nodes'] = new_sub_nodes
+                    updates_count += 1
+            else:
+                LOGGER.warning(f"Grafen innehåller okänd masternod: {master_node}")
+
+        # 5. Skriv tillbaka till fil om ändringar gjordes
+        if updates_count > 0:
+            with open(taxonomy_path, 'w', encoding='utf-8') as f:
+                json.dump(taxonomy_data, f, indent=2, ensure_ascii=False)
+            LOGGER.info(f"Uppdaterade {updates_count} masternoder i taxonomifilen.")
+        else:
+            LOGGER.info("Taxonomifilen är redan synkad.")
+
+    except Exception as e:
+        LOGGER.error(f"Kunde inte synka taxonomi-fil: {e}")
+        raise # Kasta vidare för att loggas i anroparen
+
 # --- BATCH ORCHESTRATION ---
 async def process_all_evidence_batch() -> Dict:
     """
@@ -346,6 +406,14 @@ async def process_all_evidence_batch() -> Dict:
                 print(f"   {msg}")
 
     dreamer.close()
+
+    # --- AUTO SYNC ---
+    try:
+        _sync_taxonomy_file(TAXONOMY_FILE, GRAPH_PATH)
+        print(f"{_ts()} 🔄 Taxonomi-fil synkad med Grafen.")
+    except Exception as e:
+        LOGGER.error(f"Auto Sync failed: {e}")
+
     print(f"{_ts()} ✨ Klar. {stats['auto_nodes']} noder, {stats['themes']} teman sparade.")
     if review_list:
         print(f"{_ts()} ⚠️  {len(review_list)} noder skickas till manuell granskning.")
