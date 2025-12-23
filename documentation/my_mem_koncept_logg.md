@@ -273,7 +273,7 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
 * **Lösning:** Vi införde en strikt hierarki baserad på abstraktionsnivå (OTS):
     1.  **Strategiskt:** (Vision, Affär, Kultur).
     2.  **Taktiskt:** (Projekt, Metodik, Organisation).
-    3.  **Operativt:** (Händelser, Admin, Verktyg).
+    3.  **Operativ:** (Händelser, Admin, Verktyg).
 * **Genombrott:** Genom att lyfta in **Kultur** på strategisk nivå och döpa om **Kompetens** till **Organisation** fick vi en hemvist för både mjuka och hårda värden.
 
 ### Konflikt 33: "Zombie-Processer" och SDK-Syntax
@@ -964,3 +964,22 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
     - **Högre Recall:** Vi hittar fler entiteter eftersom prompten är fokuserad.
     - **Spårbarhet:** Varje entitet har "Evidence" med confidence score och source context.
     - **Self-Healing:** Dreamer kan nu använda evidence-massan för att statistiskt avgöra: "9 av 10 evidence säger att Slack är ett Arbetsverktyg → Flytta det dit."
+
+### Konflikt 55: Prompt Management & Separationsprincipen (2025-12-23)
+
+* **Problem:** Hårdkodade promptar i Python-kod gör det svårt att iterera (kräver omstart) och bryter mot "Separation of Concerns".
+* **Beslut:** Strikt efterlevnad av Princip 7: "Inga hårdkodade promptar".
+* **Implementation:**
+    - Alla promptar flyttade till `config/services_prompts.yaml`.
+    - Koden använder `PROMPTS.get()` med HARDFAIL-validering om nyckeln saknas.
+    - Detta möjliggör snabbare prompt engineering utan att röra logiken.
+
+### Konflikt 56: Human-in-the-Loop Validering (2025-12-23)
+
+* **Problem:** Automatisk entitetsextraktion skapar oundvikligen fel (dubbletter, felkategoriseringar) som är svåra att städa i efterhand.
+* **Lösning:** "Interactive Review" - ett verktyg där människan validerar maskinens förslag *innan* de blir sanning.
+* **Design:**
+    - Ett CLI-gränssnitt som presenterar "Nya Entiteter".
+    - Alternativ: Godkänn, Justera (Byt namn, Flytta, Alias), Kasta.
+    - Besluten sparas som "Validation Rules" i grafen så systemet inte gör om samma fel.
+* **Filosofi:** AI föreslår, Människan beslutar. Systemet lär sig av besluten.

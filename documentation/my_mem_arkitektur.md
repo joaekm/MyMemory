@@ -1,5 +1,5 @@
 
-# Systemarkitektur (v8.3 - The Graph Awakens)
+# Systemarkitektur (v9.3 - The Graph Awakens)
 
 Detta dokument beskriver den tekniska sanningen om systemets implementation, uppdaterad December 2025.
 
@@ -90,6 +90,12 @@ DocConverter använder nu en parallelliserad "Multipass"-strategi för djupare a
 2. **Evidence Generation:** Varje träff sparas som ett "Evidence Item" i GraphDB (`evidence`-tabellen) med confidence score.
 3. **Parallellism:** Använder ThreadPoolExecutor för att köra alla masternoder samtidigt.
 
+### 3.2.3 Idempotens & Robusthet (v9.3)
+DocConverter har fullt stöd för idempotens:
+- Kontrollerar om filen redan finns i Lake innan bearbetning startar.
+- Robust konfigurationshantering för att undvika krascher vid saknade inställningar.
+- Klusterbaserad Multipass-analys för effektivare extraktion.
+
 ### 3.3 Indexering (Delad Arkitektur)
 
 | Agent | Status | Funktion | Syfte |
@@ -155,7 +161,14 @@ All styrning sker via konfigurationsfiler:
 | `my_mem_taxonomy.json` | Masternoder (OTS) + **Multipass Definitions** |
 | `chat_prompts.yaml` | System-prompter för chatten |
 | `services_prompts.yaml` | Prompter för insamlingsagenter |
+| `agent_prompts.yaml` | Prompter för agenter (Chronologist, etc.) |
 | `.cursorrules` | **Utvecklingsregler** (HARDFAIL, Ingen AI-cringe) |
+
+### Prompt Management (Princip 7)
+Systemet följer strikt principen att **inga prompter får finnas i kod**.
+- Alla prompter laddas dynamiskt från YAML-filer vid uppstart.
+- Koden validerar att nödvändiga prompter finns (HARDFAIL annars).
+- `doc_converter` och `dreamer` använder nu config-drivna prompter för full flexibilitet.
 
 ## 6. Tech Stack & Beroenden
 
@@ -203,3 +216,16 @@ python tools/tool_staged_rebuild.py --confirm --phase enrichment --multipass
 
 ### tool_hard_reset.py
 Nollställer systemet men **bevarar** `taxonomy.json` via en template-strategi (`config/taxonomy_template.json`) för att inte tappa definitioner. Raderar även `.rebuild_manifest.json`.
+
+### Interactive Review (`services/review/interactive_review.py`)
+Ett interaktivt CLI-verktyg för Human-in-the-Loop validering av entiteter.
+- Låter användaren godkänna, justera eller avvisa nya entiteter.
+- Stödjer namnbyten, omflyttning till annan masternod, alias-koppling och relationsskapande.
+- Sparar beslut som "Validation Rules" i grafen för att systemet ska minnas och inte fråga igen.
+- Används både fristående och integrerat i Rebuild-processen.
+
+### Process Manager (`tools/rebuild/process_manager.py`)
+Orkestrerar uppstart och övervakning av bakgrundstjänster under rebuild.
+- Startar tjänster (File Retriever, Transcriber, Doc Converter, Vector Indexer).
+- Övervakar progress via Lake och Failed-mappar.
+- Hanterar timeouts och process-städning.

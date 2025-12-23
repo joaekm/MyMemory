@@ -1,323 +1,140 @@
 #!/usr/bin/env python3
 """
-Graph Inspector - Inspektera Evidence, Relationer och Alias
+test_full_flow.py - End-to-End test av MyMemory v8.3 (REAL DREAMER)
 
-Användning:
-    python tools/inspect_graph.py
-    python tools/inspect_graph.py --evidence-only
-    python tools/inspect_graph.py --relations-only
-    python tools/inspect_graph.py --aliases-only
-    python tools/inspect_graph.py --entity "Jocke"  # Visa detaljer för specifik entitet
+Detta skript kör det faktiska systemflödet:
+1. DocConverter (Multipass -> Skapar Evidence i DB)
+2. Dreamer (Consolidate -> Läser Evidence -> Uppdaterar Graf & Taxonomi)
+3. Vector Indexer (Indexerar den uppdaterade filen)
+4. Rapport
+
+Ingen simulering. Ingen manuell handpåläggning.
 """
 
 import os
 import sys
-import json
-import argparse
 import yaml
+import logging
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
-# Lägg till project root i path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Setup paths
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
 
+# Imports
+from services.processors.doc_converter import processa_dokument, UUID_SUFFIX_PATTERN
+from services.processors.dreamer import consolidate
+from services.indexers.vector_indexer import indexera_vektor
 from services.utils.graph_service import GraphStore
 
+console = Console()
+# Sätt logging till INFO för att se Dreamers output, men filtrera bort brus
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logging.getLogger('googleapiclient').setLevel(logging.WARNING)
 
+# --- CONFIG ---
 def load_config():
-    """Ladda config för att hitta GraphDB-sökväg."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml')
-    
-    if not os.path.exists(config_path):
-        print(f"❌ HARDFAIL: Kunde inte hitta config: {config_path}")
-        sys.exit(1)
-    
-    with open(config_path, 'r') as f:
+    with open(os.path.join(project_root, 'config', 'my_mem_config.yaml'), 'r') as f:
         config = yaml.safe_load(f)
-    
-    graph_path = os.path.expanduser(config['paths']['graph_db'])
-    return graph_path
+    for k, v in config['paths'].items():
+        config['paths'][k] = os.path.expanduser(v)
+    return config
 
+CONFIG = load_config()
+LAKE_STORE = CONFIG['paths']['lake_store']
+GRAPH_PATH = CONFIG['paths']['graph_db']
 
-def inspect_evidence(graph: GraphStore, limit: int = 20):
-    """Inspektera Evidence Layer."""
-    print("=" * 60)
-    print("EVIDENCE LAYER (Learnings)")
-    print("=" * 60)
+def get_evidence_count(unit_id):
+    """Kolla hur många bevis som skapades (innan de tas bort av Dreamer)."""
+    graph = GraphStore(GRAPH_PATH, read_only=True)
+    try:
+        count = graph.conn.execute(
+            "SELECT count(*) FROM evidence WHERE source_file = ?", [unit_id]
+        ).fetchone()[0]
+        return count
+    except Exception:
+        return 0
+    finally:
+        graph.close()
+
+def main(filepath):
+    console.clear()
+    console.print(Panel.fit(f"[bold blue]MyMem Full Flow (Real AI)[/bold blue]\nFil: {os.path.basename(filepath)}"))
+
+    # 0. SETUP
+    filename = os.path.basename(filepath)
+    match = UUID_SUFFIX_PATTERN.search(filename)
+    if not match:
+        console.print("[bold red]❌ Filen saknar giltigt UUID-suffix![/bold red]")
+        return
+    unit_id = match.group(1)
     
-    # Total statistik
-    evidence_count = graph.conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0]
-    print(f"\n📊 Total evidence items: {evidence_count}")
+    lake_file = os.path.join(LAKE_STORE, f"{os.path.splitext(filename)[0]}.md")
     
-    if evidence_count == 0:
-        print("  ⚠️  Inga evidence items hittades.")
+    # Rensa gammalt (Lake) för rent test
+    if os.path.exists(lake_file):
+        os.remove(lake_file)
+        console.print("[dim]🗑️  Rensade gammal Lake-fil[/dim]")
+
+    # 1. DOC CONVERTER (MULTIPASS)
+    console.print("\n[bold yellow]1. DocConverter (Genererar Evidence)...[/bold yellow]")
+    try:
+        processa_dokument(filepath, filename)
+    except Exception as e:
+        console.print(f"[bold red]DocConverter kraschade: {e}[/bold red]")
+        return
+
+    if not os.path.exists(lake_file):
+        console.print("[bold red]❌ Ingen Lake-fil skapades![/bold red]")
         return
     
-    # Statistik per masternod
-    evidence_by_master = graph.conn.execute("""
-        SELECT master_node_candidate, COUNT(*) as count, AVG(confidence) as avg_conf
-        FROM evidence
-        GROUP BY master_node_candidate
-        ORDER BY count DESC
-        LIMIT 10
-    """).fetchall()
-    
-    print("\n📈 Top 10 Master Nodes (efter antal evidence):")
-    for row in evidence_by_master:
-        master_node = row[0]
-        count = row[1]
-        avg_conf = row[2] if row[2] is not None else 0.0
-        print(f"  {master_node:30} {count:4} items  (avg confidence: {avg_conf:.2f})")
-    
-    # Senaste evidence
-    print(f"\n📝 Senaste {limit} evidence items:")
-    recent_evidence = graph.conn.execute("""
-        SELECT entity_name, master_node_candidate, context_description, 
-               source_file, confidence, created_at
-        FROM evidence
-        ORDER BY created_at DESC
-        LIMIT ?
-    """, [limit]).fetchall()
-    
-    for ev in recent_evidence:
-        entity_name = ev[0]
-        master_node = ev[1]
-        context = ev[2][:80] + "..." if len(ev[2]) > 80 else ev[2]
-        source_file = ev[3]
-        confidence = ev[4] if ev[4] is not None else "N/A"
-        created_at = ev[5]
-        
-        print(f"\n  Entity: {entity_name}")
-        print(f"    Master Node: {master_node}")
-        print(f"    Context: {context}")
-        print(f"    Source: {source_file}")
-        print(f"    Confidence: {confidence}")
-        print(f"    Created: {created_at}")
+    ev_count_pre = get_evidence_count(unit_id)
+    console.print(f"[green]✅ DocConverter klar. Skapade {ev_count_pre} bevis i grafen.[/green]")
 
-
-def inspect_relations(graph: GraphStore, limit: int = 20):
-    """Inspektera Relationer (Edges)."""
-    print("\n" + "=" * 60)
-    print("RELATIONER (Edges)")
-    print("=" * 60)
-    
-    # Total statistik
-    total_edges = graph.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
-    print(f"\n📊 Total relationer: {total_edges}")
-    
-    if total_edges == 0:
-        print("  ⚠️  Inga relationer hittades.")
-        return
-    
-    # Relationstyper och antal
-    edge_types = graph.conn.execute("""
-        SELECT edge_type, COUNT(*) as count
-        FROM edges
-        GROUP BY edge_type
-        ORDER BY count DESC
-    """).fetchall()
-    
-    print("\n🔗 Relationstyper:")
-    for et in edge_types:
-        edge_type = et[0]
-        count = et[1]
-        print(f"  {edge_type:30} {count:6} relationer")
-    
-    # Exempel på relationer
-    print(f"\n📝 Exempel på relationer (top {limit}):")
-    sample_edges = graph.conn.execute("""
-        SELECT source, target, edge_type, properties
-        FROM edges
-        LIMIT ?
-    """, [limit]).fetchall()
-    
-    for edge in sample_edges:
-        source = edge[0]
-        target = edge[1]
-        edge_type = edge[2]
-        props = json.loads(edge[3]) if edge[3] else {}
-        
-        print(f"\n  {source} --[{edge_type}]--> {target}")
-        if props:
-            props_str = ", ".join([f"{k}={v}" for k, v in props.items()])
-            print(f"    Properties: {props_str}")
-
-
-def inspect_aliases(graph: GraphStore, limit: int = 20):
-    """Inspektera Alias."""
-    print("\n" + "=" * 60)
-    print("ALIAS")
-    print("=" * 60)
-    
-    # Total statistik
-    total_entities = graph.conn.execute("""
-        SELECT COUNT(*) FROM nodes WHERE type = 'Entity'
-    """).fetchone()[0]
-    
-    entities_with_aliases = graph.conn.execute("""
-        SELECT COUNT(*) 
-        FROM nodes 
-        WHERE type = 'Entity' AND aliases IS NOT NULL AND aliases != '[]'
-    """).fetchone()[0]
-    
-    print(f"\n📊 Totala entiteter: {total_entities}")
-    print(f"📊 Entiteter med aliases: {entities_with_aliases}")
-    
-    if entities_with_aliases == 0:
-        print("  ⚠️  Inga entiteter med aliases hittades.")
-        return
-    
-    # Hämta alla Entity-noder med aliases
-    entities_with_aliases_list = graph.conn.execute("""
-        SELECT id, aliases, properties
-        FROM nodes
-        WHERE type = 'Entity' AND aliases IS NOT NULL AND aliases != '[]'
-        ORDER BY id
-        LIMIT ?
-    """, [limit]).fetchall()
-    
-    print(f"\n📝 Entiteter med aliases (top {limit}):")
-    for entity in entities_with_aliases_list:
-        entity_id = entity[0]
-        aliases = json.loads(entity[1]) if entity[1] else []
-        props = json.loads(entity[2]) if entity[2] else {}
-        entity_type = props.get('entity_type', 'Unknown')
-        
-        if aliases:
-            aliases_str = ", ".join(aliases)
-            print(f"\n  {entity_id} ({entity_type}):")
-            print(f"    Aliases: {aliases_str}")
-
-
-def inspect_entity(graph: GraphStore, entity_name: str):
-    """Inspektera detaljer för en specifik entitet."""
-    print("=" * 60)
-    print(f"ENTITET: {entity_name}")
-    print("=" * 60)
-    
-    # Hitta noden (kan vara canonical eller alias)
-    node = graph.get_node(entity_name)
-    if not node:
-        # Försök hitta via alias
-        matches = graph.find_nodes_by_alias(entity_name)
-        if matches:
-            node = matches[0]
-            print(f"⚠️  '{entity_name}' är ett alias för canonical: {node['id']}")
-        else:
-            print(f"❌ Hittade ingen nod med ID eller alias: {entity_name}")
-            return
-    
-    # Visa nodinformation
-    print(f"\n📋 Nodinformation:")
-    print(f"  ID: {node['id']}")
-    print(f"  Type: {node.get('type', 'Unknown')}")
-    
-    aliases = node.get('aliases', [])
-    if aliases:
-        print(f"  Aliases: {', '.join(aliases)}")
-    else:
-        print(f"  Aliases: (inga)")
-    
-    properties = node.get('properties', {})
-    if properties:
-        print(f"  Properties: {json.dumps(properties, indent=4, ensure_ascii=False)}")
-    
-    # Relationer
-    edges_from = graph.get_edges_from(node['id'])
-    edges_to = graph.get_edges_to(node['id'])
-    
-    print(f"\n🔗 Relationer:")
-    print(f"  Utgående: {len(edges_from)}")
-    for e in edges_from[:10]:
-        props_str = ""
-        if e.get('properties'):
-            props_str = f" ({json.dumps(e['properties'], ensure_ascii=False)})"
-        print(f"    -> {e['target']} [{e['type']}]{props_str}")
-    
-    print(f"  Inkommande: {len(edges_to)}")
-    for e in edges_to[:10]:
-        props_str = ""
-        if e.get('properties'):
-            props_str = f" ({json.dumps(e['properties'], ensure_ascii=False)})"
-        print(f"    <- {e['source']} [{e['type']}]{props_str}")
-    
-    # Evidence
-    evidences = graph.get_evidence_for_entity(node['id'], limit=10)
-    if evidences:
-        print(f"\n📚 Evidence ({len(evidences)} items):")
-        for ev in evidences[:5]:
-            context = ev['context_description'][:100] + "..." if len(ev['context_description']) > 100 else ev['context_description']
-            print(f"  - {ev['master_node_candidate']}: {context}")
-            print(f"    Source: {ev['source_file']}, Confidence: {ev.get('confidence', 'N/A')}")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Inspektera GraphDB: Evidence, Relationer och Alias"
-    )
-    parser.add_argument(
-        '--evidence-only',
-        action='store_true',
-        help='Visa endast Evidence Layer'
-    )
-    parser.add_argument(
-        '--relations-only',
-        action='store_true',
-        help='Visa endast Relationer'
-    )
-    parser.add_argument(
-        '--aliases-only',
-        action='store_true',
-        help='Visa endast Alias'
-    )
-    parser.add_argument(
-        '--entity',
-        type=str,
-        help='Visa detaljerad information för en specifik entitet'
-    )
-    parser.add_argument(
-        '--limit',
-        type=int,
-        default=20,
-        help='Antal exempel att visa (default: 20)'
-    )
-    
-    args = parser.parse_args()
-    
-    # Ladda config och öppna graf
-    graph_path = load_config()
-    
-    if not os.path.exists(graph_path):
-        print(f"❌ HARDFAIL: GraphDB finns inte: {graph_path}")
-        sys.exit(1)
+    # 2. DREAMER (CONSOLIDATION)
+    console.print("\n[bold yellow]2. Dreamer (Konsoliderar Sanning)...[/bold yellow]")
+    console.print("[dim]Detta läser bevisen, kör LLM-bedömning och uppdaterar grafen...[/dim]")
     
     try:
-        graph = GraphStore(graph_path, read_only=True)
-        
-        # Om specifik entitet angiven, visa endast den
-        if args.entity:
-            inspect_entity(graph, args.entity)
-        else:
-            # Visa alla sektioner (eller endast vald)
-            show_all = not (args.evidence_only or args.relations_only or args.aliases_only)
-            
-            if show_all or args.evidence_only:
-                inspect_evidence(graph, limit=args.limit)
-            
-            if show_all or args.relations_only:
-                inspect_relations(graph, limit=args.limit)
-            
-            if show_all or args.aliases_only:
-                inspect_aliases(graph, limit=args.limit)
-        
-        graph.close()
-        
+        dream_stats = consolidate()
     except Exception as e:
-        print(f"❌ HARDFAIL: Fel vid inspektion: {e}")
+        console.print(f"[bold red]Dreamer kraschade: {e}[/bold red]")
         import traceback
         traceback.print_exc()
-        sys.exit(1)
+        return
 
+    # 3. VECTOR INDEXER
+    console.print("\n[bold yellow]3. Vector Indexer (Smart Indexering)...[/bold yellow]")
+    # Nu indexerar vi Lake-filen som (förhoppningsvis) har fått backpropagated context
+    indexera_vektor(lake_file, os.path.basename(lake_file))
+    
+    # 4. SLUTRAPPORT
+    console.print("\n[bold green]✅ FULL FLOW COMPLETE[/bold green]")
+    
+    # Analysera resultatet
+    ev_count_post = get_evidence_count(unit_id) # Borde vara 0 om Dreamer städat
+    
+    processed = dream_stats.get('processed', 0)
+    consolidated = dream_stats.get('consolidated', 0)
+    rejected = dream_stats.get('rejected', 0)
+    
+    console.print(Panel(f"""
+    **Resultat:**
+    - **Evidence:** {ev_count_pre} skapade -> {ev_count_post} kvar (Dreamer städar: {'Ja' if ev_count_post==0 else 'Nej'})
+    - **Dreamer Analys:**
+        - Processade entiteter: {processed}
+        - Godkända (nya noder): {consolidated}
+        - Avvisade: {rejected}
+    
+    **Status:**
+    Dokumentet är nu indexerat och grafen har lärt sig de nya entiteterna.
+    """, title="Slutrapport"))
 
 if __name__ == "__main__":
-    main()
-
+    if len(sys.argv) < 2:
+        print("Användning: python tools/test_full_flow.py <path_to_file>")
+        sys.exit(1)
+    
+    main(sys.argv[1])

@@ -11,7 +11,7 @@ policy_tags: []
 original_binary_ref: null
 ---
 
-# Projektets Konceptuella Sammanfattning (v8.2)
+# Projektets Konceptuella Sammanfattning (v9.3)
 
 Detta dokument är en "torr" sammanfattning av de slutsatser som framkommit. För fullständigt resonemang, se `my_mem_koncept_logg.md`.
 
@@ -107,7 +107,24 @@ SessionEngine → IntentRouter → ContextBuilder → Planner (ReAct) → Synthe
 - Långsam responstid
 - Ingen aggregerad insikt
 
-## 6. Senaste Förbättringar (v8.2)
+## 6. Senaste Förbättringar (v9.3)
+
+### Config-Driven Prompts (LÖST-Princip 7)
+Alla promptar är nu flyttade från kod till YAML-config (`services_prompts.yaml`).
+- **Transcriber:** `analysis_prompt`
+- **DocConverter:** `multipass_prompt`, `doc_summary_prompt`
+- **Dreamer:** `entity_analysis_prompt`
+
+### Interactive Review (v1.0)
+Nytt CLI-verktyg för Human-in-the-Loop validering av entiteter.
+- Godkänn, justera eller kasta nya entiteter.
+- Sparar beslut som valideringsregler i grafen.
+
+### Rebuild System v2.1 (Phase-Aware)
+Robustare rebuild-process med:
+- **Process Manager:** Övervakar tjänster och hanterar timeouts.
+- **Fas-baserad rebuild:** Foundation (text) -> Enrichment (ljud).
+- **Idempotens:** Alla tjänster hoppar över redan klara filer.
 
 ### Pipeline v8.2 "Pivot or Persevere" (LÖST-55)
 Helt ny pipeline-arkitektur med:
@@ -163,6 +180,6 @@ Definierade i `.cursorrules`:
 | UI | Rich (CLI) |
 
 ---
-*Senast uppdaterad: 2025-12-16*
+*Senast uppdaterad: 2025-12-23*
 *Se `my_mem_arkitektur.md` för teknisk implementation.*
 *Se `my_mem_backlogg.md` för aktiva objekt.*

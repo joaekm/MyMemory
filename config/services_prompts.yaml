@@ -41,146 +41,132 @@ transcriber:
       "entities": ["Personer", "Organisationer", "Projekt som nämns"]
     }
 
-# --- Doc Converter (Textfiler/Dokument) ---
+# --- Doc Converter (Textfiler/Dokument) - OPTIMERAD ---
 doc_converter:
-  # Denna prompt används för att injicera OTS-taxonomin
-  ots_injection_prompt: |
-    Din uppgift är att strukturera ostrukturerad text enligt en strikt taxonomi.
+  # Denna prompt hanterar nu en LISTA av kategorier
+  multipass_analysis: |
+    ANALYSERA TEXTEN OCH EXTRAHERA INFORMATION FÖR FÖLJANDE KATEGORIER:
+    {categories_list}
 
-    GILTIGA MASTER NODER:
-    {valid_nodes}
+    DOKUMENT: {doc_name}
+    TEXT (Utdrag):
+    {text_chunk}
 
-    KRITISK INSTRUKTION - VALIDERING MOT TIDIGARE BESLUT:
-    - Om ett förslag uppvisar Olikhet mot referenser eller Likhet med avfärdade termer, kasta det omedelbart.
-    - Använd GODKÄNDA_REFERENSER som mallar för hur entiteter i denna kategori ska se ut.
-    - Om en entitet liknar en TIDIGARE_AVFÄRDADE_EXEMPEL, inkludera den INTE.
-    - Använd Validering-frågan från multipass_definition för att avgöra om en entitet passar kategorin.
+    INSTRUKTIONER:
+    1. Gå igenom texten och hitta entiteter/insikter som passar in i någon av kategorierna ovan.
+    2. Ignorera allt som inte passar i listan.
+    3. Var specifik. Citera meningen (context) som bevisar varför det passar.
+    4. Ange "confidence" (0.0 - 1.0).
 
-    DEFINITIONER AV NODER:
-    - Vision: Framtidsbilder, syfte, långsiktiga mål (2-5 år), "Varför vi finns".
-    - Strategi: Vägval, roadmaps, affärsplaner, målarkitektur, styrkor/utmaningar.
-    - Förändring: Transformation, digitalisering, organisationsförändring, kulturresor.
-    - Marknad: Positionering, konkurrenter, omvärldsanalys, leads, varumärke.
-    - Affär: Affärsmodeller, lönsamhet, kalkyl, prissättning, säljaktiviteter.
-    - Kultur: Värderingar, "The Digitalist Way", psykologisk trygghet, samarbetsklimat.
-    - Projekt: Konkreta uppdrag, PoC (t.ex. Vulkan), backlogs, projektledning.
-    - Metodik: Hur vi arbetar. Agile, Service Design, WoW, HIIT, principer.
-    - Erbjudande: Våra produkter och tjänster (MyMem, P-Bot, Konsulting).
-    - Avtal: Offerter, ramavtal, licenser, upphandlingar (FKU).
-    - Organisation: Rekrytering, team, roller, onboarding, personalfrågor.
-    - Händelser: Möten, workshops, konferenser, daglig status, incidenter.
-    - Administration: Tidrapportering, sjukanmälan, resursplanering, loggar.
-    - Arbetsverktyg: Mjukvara vi använder (Slack, Jira, Fortnox), hårdvara.
-    - Teknologier: Kodspråk (Python), ramverk, AI-modeller, databaser, "Tech".
-    - Aktör: Externa organisationer, kunder, partners, myndigheter.
-    - Person: Specifika individer, medarbetare, kontaktpersoner.
-    - Plats: Kontor, orter, fysiska/digitala rum.
-    - Process: Arbetsflöden, leveransprocesser, datahantering, "Operating".
-    - Juridik: Lagkrav, GDPR, compliance, affärsjuridik.
-    - Kvalitet: Prestanda, tester, tillgänglighet, spårbarhet.
-    - Säkerhet: Informationssäkerhet, lösenordshantering, sårbarheter.
-    - Standard: ISO-certifieringar, WCAG, öppna standarder.
-    - Arkitektur: Systemdesign, MACH, lösningar, integrationer.
-    - Data: Testdata, entiteter, metadata-strukturer.
-    - Resultat: Utfall, succéer, måluppfyllnad.
-
-    INSTRUKTION:
-    Analysera texten och placera den i exakt EN av ovanstående kategorier.
-
-    VIKTIG INSTRUKTION FÖR ENTITETER:
-    Om texten nämner en person eller ett projekt som finns i listan KÄNDA PERSONER/PROJEKT,
-    använd EXAKT det namnet. Gissa INTE egna varianter.
-    
-    ENTITETSNAMN REGLER (CLEANUP):
-    - DÖDA SJÄLVREFERENSER: Skapa ALDRIG en subnod med samma namn som Masternoden. Om du under Projekt inte hittar ett unikt namn, returnera endast Projekt: <vikt>, men lämna sub_nodes tom.
-    - HÄRDA AKTÖRER: Digitalist är SUBJEKTET. Alla enheter som "Drive", "Digitalist Open Tech" eller dotterbolag är vi själva. Lägg ALDRIG till oss som en Aktör. Aktörer är endast externa parter.
-    - NORMALISERING: Använd Title Case för alla entiteter (t.ex. "Joakim Ekman" istället för "joakim ekman").
-    - KORTA KODER: Korta, kryptiska koder (t.ex. "msf") ska endast sparas som Teknologier om de representerar ett etablerat ramverk, annars ignorera dem.
-    - IGNORERA filnamn som entiteter (*.py, *.js, *.md, *.txt etc) - de är INTE projekt.
-    - KORTA namn till max 40 tecken.
-    - Om ett namn har förkortning i parentes, använd BARA huvudnamnet och lägg förkortningen som alias.
-    
-    ALIAS-DETEKTION:
-    Om texten innehåller namnvarianter som troligen refererar till samma entitet,
-    rapportera dessa som "potential_aliases". Exempel:
-    - Exempel: "Jonte" nämns i samma kontext som "Jonas" → potential alias
-    - Exempel: "SOK-grejen" och "Sök och Kasta -projektet" → potential alias
-    - Smeknamn, förkortningar, felstavningar
-    
-    OUTPUT KRAV (Returnera ENDAST denna JSON):
-    {
-      "summary": "Kort sammanfattning på svenska. INKLUDERA viktiga datum och aktiviteter.",
-      "graph_nodes": {
-        "Händelser": 0.7,
-        "Teknologier": 0.3,
-        "Person": {
-          "Tommy Olsson": 0.6
-        },
-        "Aktör": {
-          "Adda": 0.8
-        },
-        "Projekt": {
-          "Adda PoC": 0.9
-        }
-      },
-      "dates_mentioned": ["YYYY-MM-DD format för alla datum nämnda i texten"],
-      "actions": ["Aktiviteter som nämns (t.ex. 'Användartester', 'Demo', 'Möte')"],
-      "deadlines": [
-        {"what": "Vad som ska ske", "when": "YYYY-MM-DD"}
-      ],
-      "potential_aliases": [
-        {"name_variant": "Smeknamn/variant", "likely_refers_to": "Formellt namn", "entity_type": "Person|Aktör|Projekt", "confidence": "low|medium|high"}
+    RETURNERA JSON (Grupperat per kategori):
+    {{
+      "found_items": [
+        {{
+          "category": "Kategorinamn (t.ex. Person)",
+          "entity": "Namnet på entiteten",
+          "context": "Citat från texten...",
+          "confidence": 0.95
+        }},
+        ...
       ]
-    }
-    
-    GRAPH_NODES INSTRUKTION:
-    - Abstrakta koncept (masternoder som Händelser, Teknologier): Ange relevans 0.0-1.0
-    - Typade entiteter (Person, Aktör, Projekt): Dict med namn → relevans
-    - CUTOFF: Inkludera ENDAST noder med relevans >= 0.2
-    - Dokumentet kan vara relevant för FLERA masternoder (viktat)
-    - Använd EXAKT namn från KÄNDA PERSONER/PROJEKT om tillgängliga
+    }}
+
+  generate_metadata: |
+    Sammanfatta följande text på svenska.
+    Fokusera på det viktigaste innehållet, beslut och entiteter.
+    Generera även 5-10 relevanta nyckelord (tags).
+
+    Text:
+    {text_chunk}
+
+    JSON Output:
+    {{
+      "summary": "...",
+      "keywords": ["tag1", "tag2"]
+    }}
+
+  doc_summary_prompt: |
+    Sammanfatta detta dokument kortfattat och informativt på svenska.
+    Fokusera på VAD det är, VEM det berör och VILKA beslut/händelser som nämns.
+
+    TEXT:
+    {text}
+
+    RETURNERA JSON:
+    {{
+      "summary": "Din sammanfattning här...",
+      "keywords": ["nyckelord1", "nyckelord2"]
+    }}
 
 # --- Dreamer (Taxonomi-konsolidering) ---
 dreamer:
-  consolidation_prompt: |
-    Du är en taxonomi-expert och 'Taxonomisk Granskare'. Din uppgift är att kategorisera NYA noder och städa BEFINTLIGA noder under rätt masternode.
-    
-    BEFINTLIGA MASTERNODER (med beskrivningar och definitioner):
-    {master_nodes}
-    
-    SUB-NODES ATT GRANSKA (Befintliga och Nya):
-    {sub_nodes_to_review}
-    
-    INSTRUKTIONER:
-    1. Placera varje koncept under den MEST passande masternoden enligt definitionerna.
-    2. PRUNING: Identifiera noder som bryter mot masternodens definition (t.ex. interna enheter under 'Aktör' eller datum under 'Händelser') och markera dem för radering.
-    3. MERGING: Identifiera synonymer (t.ex. 'Jocke' och 'Joakim Ekman') och föreslå en sammanslagning till ett kanoniskt namn (Title Case).
-    4. NORMALISERING: Justera namn till Title Case (t.ex. 'python' -> 'Python').
-    5. Om ett koncept är ett ALIAS för något som redan finns, markera det som alias.
-    6. Var konsekvent - liknande koncept ska hamna under samma masternode.
-    7. VARJE koncept som behålls MÅSTE placeras under en masternode.
-    
-    RETURNERA ENDAST GILTIG JSON. Exempel på korrekt format:
-    {
-      "categorized": {
-        "Händelser": ["Sprint review", "Standup"],
-        "Teknologier": ["Kubernetes"],
-        "Person": ["Anna"]
-      },
-      "aliases": [
-        {"alias": "K8s", "canonical": "Kubernetes", "confidence": "high"}
-      ],
-      "pruned": [
-        {"node": "msf", "reason": "Kryptisk kod utan kontext"},
-        {"node": "Digitalist Open Tech", "reason": "Intern enhet, ej extern Aktör"},
-        {"node": "2025-01-01", "reason": "Datum hör ej hemma som nodnamn"}
-      ],
-      "merged": [
-        {"old": "jocke", "new": "Joakim Ekman", "reason": "Smeknamn till kanoniskt namn"}
+  # BATCH-PROMPT (v9.4) - Ersätter enskilda anrop
+  consolidate_batch: |
+    Du är systemets arkitekt (Dreamer). Din uppgift är att konsolidera en lista med entiteter.
+
+    GILTIGA MASTERNODER:
+    [{valid_nodes_str}]
+
+    KANDIDATER ATT BEDÖMA (Format: ID: "Namn" | Bevis):
+    {candidates_str}
+
+    UPPGIFT: För VARJE kandidat, avgör om det är en NOD (Sak/Egennamn) eller TEMA (Beskrivning).
+
+    REGLER FÖR NODER (is_atomic_node = true):
+    - Egennamn (Personer, Företag, Platser, Specifika System).
+    - Ex: "Joakim Ekman", "Digitalist", "Jira".
+
+    REGLER FÖR TEMAN (is_atomic_node = false):
+    - Abstrakta begrepp, aktiviteter, meningar.
+    - Ex: "Strategisk planering", "Vi måste öka vinsten", "Möte".
+    - ÅTGÄRD: Koppla till MASTERNODEN (t.ex. "Strategi").
+
+    RETURNERA JSON (Lista):
+    {{
+      "results": [
+        {{
+          "entity": "Originalnamnet",
+          "is_atomic_node": true/false,
+          "master_node": "En från GILTIGA MASTERNODER",
+          "suggested_node_id": "Om atomic: Rensa namnet (Title Case). Om tema: null.",
+          "canonical_summary": "Kort beskrivning (max 20 ord) baserat på kontexten.",
+          "aliases": ["Lista på alias om det är en nod"]
+        }}
       ]
-    }
-    
-    Nycklar i "categorized" MÅSTE vara exakta nodnamn från BEFINTLIGA MASTERNODER.
+    }}
+
+  # Legacy (kan ligga kvar som fallback)
+  entity_analysis_prompt: |
+    Du är systemets arkitekt (Dreamer). Din uppgift är att städa upp insamlad data.
+
+    KANDIDAT: "{entity_name}"
+
+    BEVIS:
+    {context_str}
+
+    GILTIGA MASTERNODER:
+    [{valid_nodes_str}]
+
+    UPPGIFT: Avgör om detta ska bli en NOD i grafen eller bara METADATA.
+
+    REGLER FÖR NODER (is_atomic_node = true):
+    - Måste vara ett EGENNAMN (Proper Noun) eller specifikt OBJEKT.
+    - Exempel: "Joakim Ekman", "Götgatan", "Adda PoC", "Python", "Jira".
+    - TEST: Kan du peka på det? Heter det så? (Stor bokstav).
+
+    REGLER FÖR TEMAN (is_atomic_node = false):
+    - Abstrakta koncept, meningar, beskrivningar eller handlingar.
+    - Exempel: "Strategisk planering", "Vi måste öka vinsten", "Möte om budget", "Förändringsledning".
+    - ÅTGÄRD: Då ska vi INTE skapa en nod med detta namn. Vi ska koppla till MASTERNODEN (t.ex. "Strategi") och spara texten som beskrivning.
+
+    OUTPUT JSON:
+    {{
+      "is_atomic_node": true/false,
+      "master_node": "Välj en från listan GILTIGA MASTERNODER",
+      "suggested_node_id": "Om atomic: Rensa namnet (t.ex. 'Jocke' -> 'Joakim Ekman'). Om tema: Lämna tomt.",
+      "canonical_summary": "En mening som beskriver vad detta är.",
+      "aliases": ["Lista på alias om det är en nod"]
+    }}
 
 # --- Similarity Review Service ---
 similarity_review:

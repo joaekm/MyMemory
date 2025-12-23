@@ -241,3 +241,4 @@ class FileManager:
             shutil.rmtree(self.staging_root)
             LOGGER.info("🧹 Staging-katalog borttagen")
 
+
