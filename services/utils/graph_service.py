@@ -207,6 +207,19 @@ class GraphStore:
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_entity ON evidence(entity_name)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_master ON evidence(master_node_candidate)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_source ON evidence(source_file)")
+            
+            # Pending Reviews-tabell (Kö för MCP-granskning)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS pending_reviews (
+                    entity_name TEXT PRIMARY KEY,
+                    master_node TEXT NOT NULL,
+                    similarity_score DOUBLE,
+                    reason TEXT,
+                    context JSON,
+                    created_at TEXT
+                )
+            """)
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_reviews_score ON pending_reviews(similarity_score)")
         
         # Validation rules-tabell (anropas utanför lock för att undvika deadlock)
         # _init_validation_table hanterar sin egen lock
@@ -856,4 +869,53 @@ class GraphStore:
                 "created_at": row[7],
                 "similarity_score": row[8]
             }
+
+    # --- PENDING REVIEWS (Shadowgraph Queue) ---
+
+    def add_pending_review(self, entity: str, master_node: str, score: float, reason: str, context: dict = None):
+        """Lägg till en entitet i granskningskön."""
+        if self.read_only:
+            raise RuntimeError("HARDFAIL: Försöker skriva i read_only mode")
+            
+        created_at = datetime.datetime.now().isoformat()
+        context_json = json.dumps(context or {}, ensure_ascii=False)
+        
+        with self._lock:
+            self.conn.execute("""
+                INSERT INTO pending_reviews (entity_name, master_node, similarity_score, reason, context, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (entity_name) DO UPDATE SET
+                    master_node = EXCLUDED.master_node,
+                    similarity_score = EXCLUDED.similarity_score,
+                    reason = EXCLUDED.reason,
+                    context = EXCLUDED.context,
+                    created_at = EXCLUDED.created_at
+            """, [entity, master_node, score, reason, context_json, created_at])
+
+    def get_pending_reviews(self, limit: int = 50) -> list[dict]:
+        """Hämta entiteter som väntar på granskning."""
+        with self._lock:
+            rows = self.conn.execute("""
+                SELECT entity_name, master_node, similarity_score, reason, context, created_at
+                FROM pending_reviews
+                ORDER BY similarity_score ASC, created_at DESC
+                LIMIT ?
+            """, [limit]).fetchall()
+            
+        return [{
+            "entity_name": r[0],
+            "master_node": r[1],
+            "similarity_score": r[2],
+            "reason": r[3],
+            "context": json.loads(r[4]) if r[4] else {},
+            "created_at": r[5]
+        } for r in rows]
+
+    def delete_pending_review(self, entity_name: str):
+        """Ta bort från kön (när beslut är fattat)."""
+        if self.read_only:
+            raise RuntimeError("HARDFAIL: Försöker skriva i read_only mode")
+            
+        with self._lock:
+            self.conn.execute("DELETE FROM pending_reviews WHERE entity_name = ?", [entity_name])
 

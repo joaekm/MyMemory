@@ -15,7 +15,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from tools.rebuild.file_manager import FileManager
 from tools.rebuild.process_manager import ServiceManager, CompletionWatcher
-from services.review.interactive_review import run_interactive_review, apply_review_decisions
 from services.utils.graph_service import GraphStore
 
 LOGGER = logging.getLogger('RebuildOrchestrator')
@@ -64,12 +63,11 @@ class RebuildOrchestrator:
             from services.processors.dreamer import consolidate
             result = consolidate()
             
-            # consolidate() returnerar en dict med stats inklusive review_list
-            review_list = result.get("review_list", [])
             status = result.get("status", "OK")
+            stats = result.get("stats", {})
             
             if status == "OK":
-                _log(f"  ✅ Dreamer klar: {len(review_list)} entiteter behöver granskning")
+                _log(f"  ✅ Dreamer klar. Auto: {stats.get('auto_nodes', 0)}, Pending: {stats.get('skipped_uncertain', 0)}")
             elif status == "NO_AI":
                 _log("  ⚠️ Dreamer klar men AI-klient saknas")
             else:
@@ -77,7 +75,6 @@ class RebuildOrchestrator:
             
             return {
                 "status": status,
-                "review_list": review_list,
                 "stats": result
             }
         except ImportError as e:
@@ -188,42 +185,7 @@ class RebuildOrchestrator:
                 
                 # Konsolidering
                 self._run_graph_builder()
-                dreamer_result = self._run_dreamer()
-                
-                # Interaktiv granskning om det finns entiteter att granska
-                review_list = dreamer_result.get("review_list", [])
-                LOGGER.info(f"DEBUG: Dreamer returnerade {len(review_list)} entiteter för granskning")
-                if review_list:
-                    _log("   🔍 Granskning av förslag...")
-                    # Läs taxonomy_path från config (Princip 8)
-                    taxonomy_path = os.path.expanduser(self.config['paths']['taxonomy_file'])
-                    
-                    # Ladda taxonomy
-                    if os.path.exists(taxonomy_path):
-                        with open(taxonomy_path, 'r', encoding='utf-8') as f:
-                            taxonomy = json.load(f)
-                    else:
-                        taxonomy = {}
-                    
-                    # Öppna GraphStore för att spara validation rules
-                    graph_path = os.path.expanduser(self.config['paths']['graph_db'])
-                    graph = GraphStore(graph_path, read_only=False)
-                    try:
-                        # Kör interaktiv granskning (skicka med taxonomy för automatisk godkännande)
-                        review_decisions = run_interactive_review(review_list, taxonomy)
-                        
-                        # Applicera beslut
-                        if review_decisions:
-                            apply_review_decisions(taxonomy, review_decisions, graph)
-                            
-                            # Spara uppdaterad taxonomy
-                            if taxonomy:
-                                with open(taxonomy_path, 'w', encoding='utf-8') as f:
-                                    json.dump(taxonomy, f, ensure_ascii=False, indent=2)
-                            
-                            _log(f"   ✅ {len(review_decisions)} beslut applicerade")
-                    finally:
-                        graph.close()
+                self._run_dreamer()
                 
                 _log(f"   ✅ Dag {date} klar!")
                 

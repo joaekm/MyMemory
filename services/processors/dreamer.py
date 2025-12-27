@@ -384,17 +384,19 @@ async def process_all_evidence_batch() -> Dict:
             should_commit = True
             stats["auto_nodes"] += 1
         else:
-            # Osäker Nod -> Skapa ReviewObject för manuell granskning
+            # Osäker Nod -> Skicka till Pending Reviews (DB)
             stats["skipped_uncertain"] += 1
-            review_obj = ReviewObject(
-                entity_name=res.get('suggested_node_id') or entity_name,
+            
+            # Hitta ett exempel på kontext för att hjälpa granskaren
+            example_context = evidence_list[0]['context'] if evidence_list else "Ingen kontext"
+            
+            dreamer.graph.add_pending_review(
+                entity=res.get('suggested_node_id') or entity_name,
                 master_node=res.get('master_node'),
-                similarity_score=agg_conf,
-                suggested_action="REVIEW",
+                score=agg_conf,
                 reason=f"Konfidens ({agg_conf:.2f}) < 0.9",
-                closest_match=None 
+                context={"snippet": example_context, "source": evidence_list[0]['source_file']}
             )
-            review_list.append(review_obj)
             
         if should_commit:
             source_files = [e['source_file'] for e in evidence_list]
@@ -415,12 +417,11 @@ async def process_all_evidence_batch() -> Dict:
         LOGGER.error(f"Auto Sync failed: {e}")
 
     print(f"{_ts()} ✨ Klar. {stats['auto_nodes']} noder, {stats['themes']} teman sparade.")
-    if review_list:
-        print(f"{_ts()} ⚠️  {len(review_list)} noder skickas till manuell granskning.")
+    if stats["skipped_uncertain"] > 0:
+        print(f"{_ts()} 📥 {stats['skipped_uncertain']} noder skickade till granskningskön (Shadowgraph).")
         
     return {
         "status": "OK",
-        "review_list": review_list, # Returnera listan!
         "stats": stats
     }
 

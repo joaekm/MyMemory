@@ -28,3 +28,7 @@ slack_sdk
 
 # Terminalformatering
 rich
+
+# MCP
+fastmcp
+uvicorn
