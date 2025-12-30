@@ -96,6 +96,12 @@ _console = logging.StreamHandler()
 _console.setLevel(logging.INFO)
 LOGGER.addHandler(_console)
 
+# Silence external loggers
+logging.getLogger("google").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # --- TIGHT LOGGING HELPERS ---
 def _ts():
     return datetime.datetime.now(SYSTEM_TZ).strftime("[%H:%M:%S]")

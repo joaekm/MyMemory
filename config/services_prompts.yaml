@@ -43,34 +43,6 @@ transcriber:
 
 # --- Doc Converter (Textfiler/Dokument) - OPTIMERAD ---
 doc_converter:
-  # Denna prompt hanterar nu en LISTA av kategorier
-  multipass_analysis: |
-    ANALYSERA TEXTEN OCH EXTRAHERA INFORMATION FÖR FÖLJANDE KATEGORIER:
-    {categories_list}
-
-    DOKUMENT: {doc_name}
-    TEXT (Utdrag):
-    {text_chunk}
-
-    INSTRUKTIONER:
-    1. Gå igenom texten och hitta entiteter/insikter som passar in i någon av kategorierna ovan.
-    2. Ignorera allt som inte passar i listan.
-    3. Var specifik. Citera meningen (context) som bevisar varför det passar.
-    4. Ange "confidence" (0.0 - 1.0).
-
-    RETURNERA JSON (Grupperat per kategori):
-    {{
-      "found_items": [
-        {{
-          "category": "Kategorinamn (t.ex. Person)",
-          "entity": "Namnet på entiteten",
-          "context": "Citat från texten...",
-          "confidence": 0.95
-        }},
-        ...
-      ]
-    }}
-
   generate_metadata: |
     Sammanfatta följande text på svenska.
     Fokusera på det viktigaste innehållet, beslut och entiteter.
@@ -98,110 +70,33 @@ doc_converter:
       "keywords": ["nyckelord1", "nyckelord2"]
     }}
 
-# --- Dreamer (Taxonomi-konsolidering) ---
-dreamer:
-  # BATCH-PROMPT (v9.4) - Ersätter enskilda anrop
-  consolidate_batch: |
-    Du är systemets arkitekt (Dreamer). Din uppgift är att konsolidera en lista med entiteter.
-
-    GILTIGA MASTERNODER:
-    [{valid_nodes_str}]
-
-    KANDIDATER ATT BEDÖMA (Format: ID: "Namn" | Bevis):
-    {candidates_str}
-
-    UPPGIFT: För VARJE kandidat, avgör om det är en NOD (Sak/Egennamn) eller TEMA (Beskrivning).
-
-    REGLER FÖR NODER (is_atomic_node = true):
-    - Egennamn (Personer, Företag, Platser, Specifika System).
-    - Ex: "Joakim Ekman", "Digitalist", "Jira".
-
-    REGLER FÖR TEMAN (is_atomic_node = false):
-    - Abstrakta begrepp, aktiviteter, meningar.
-    - Ex: "Strategisk planering", "Vi måste öka vinsten", "Möte".
-    - ÅTGÄRD: Koppla till MASTERNODEN (t.ex. "Strategi").
-
-    RETURNERA JSON (Lista):
-    {{
-      "results": [
-        {{
-          "entity": "Originalnamnet",
-          "is_atomic_node": true/false,
-          "master_node": "En från GILTIGA MASTERNODER",
-          "suggested_node_id": "Om atomic: Rensa namnet (Title Case). Om tema: null.",
-          "canonical_summary": "Kort beskrivning (max 20 ord) baserat på kontexten.",
-          "aliases": ["Lista på alias om det är en nod"]
-        }}
-      ]
-    }}
-
-  # Legacy (kan ligga kvar som fallback)
-  entity_analysis_prompt: |
-    Du är systemets arkitekt (Dreamer). Din uppgift är att städa upp insamlad data.
-
-    KANDIDAT: "{entity_name}"
-
-    BEVIS:
-    {context_str}
-
-    GILTIGA MASTERNODER:
-    [{valid_nodes_str}]
-
-    UPPGIFT: Avgör om detta ska bli en NOD i grafen eller bara METADATA.
-
-    REGLER FÖR NODER (is_atomic_node = true):
-    - Måste vara ett EGENNAMN (Proper Noun) eller specifikt OBJEKT.
-    - Exempel: "Joakim Ekman", "Götgatan", "Adda PoC", "Python", "Jira".
-    - TEST: Kan du peka på det? Heter det så? (Stor bokstav).
-
-    REGLER FÖR TEMAN (is_atomic_node = false):
-    - Abstrakta koncept, meningar, beskrivningar eller handlingar.
-    - Exempel: "Strategisk planering", "Vi måste öka vinsten", "Möte om budget", "Förändringsledning".
-    - ÅTGÄRD: Då ska vi INTE skapa en nod med detta namn. Vi ska koppla till MASTERNODEN (t.ex. "Strategi") och spara texten som beskrivning.
-
-    OUTPUT JSON:
-    {{
-      "is_atomic_node": true/false,
-      "master_node": "Välj en från listan GILTIGA MASTERNODER",
-      "suggested_node_id": "Om atomic: Rensa namnet (t.ex. 'Jocke' -> 'Joakim Ekman'). Om tema: Lämna tomt.",
-      "canonical_summary": "En mening som beskriver vad detta är.",
-      "aliases": ["Lista på alias om det är en nod"]
-    }}
-
-# --- Similarity Review Service ---
-similarity_review:
-  similarity_analysis_prompt: |
-    Du är en taxonomisk expert. Din uppgift är att bedöma om en ny entitet passar i kategorin "{master_node}" baserat på semantisk likhet mot godkända referenser.
-
-    NY ENTITET ATT BEDÖMA:
-    "{entity_name}"
-
-    GODKÄNDA REFERENSER (exempel på vad som passar i {master_node}):
-    {approved_references}
-
-    TIDIGARE AVFÄRDADE EXEMPEL (undvik dessa):
-    {rejected_examples}
-
+  strict_entity_extraction: |
+    Du är en strikt data-extraktor. Din enda uppgift är att identifiera potentiella entiteter och datum i texten.
+    
+    TEXT ATT ANALYSERA:
+    {text_chunk}
+    
     INSTRUKTIONER:
-    1. Jämför "{entity_name}" semantiskt mot GODKÄNDA REFERENSER. Är det en "katt bland hermeliner" (semantisk avvikelse) eller passar det mönstret?
-    2. Kolla om "{entity_name}" liknar något i TIDIGARE AVFÄRDADE EXEMPEL.
-    3. Bedöm similarity_score (0.0-1.0) där:
-       - 0.9-1.0: Mycket hög semantisk likhet, passar perfekt
-       - 0.7-0.89: Hög likhet, passar bra
-       - 0.5-0.69: Måttlig likhet, kan passa men behöver granskning
-       - 0.3-0.49: Låg likhet, osannolikt att passa
-       - 0.0-0.29: Mycket låg likhet eller semantisk avvikelse
-    4. Identifiera den närmaste matchningen från GODKÄNDA REFERENSER (om similarity >= 0.5).
-    5. Bestäm suggested_action:
-       - APPROVE: similarity_score >= 0.7 och liknar INTE avfärdade exempel
-       - REJECT: Liknar avfärdade exempel eller similarity_score < 0.3
-       - REVIEW: Annars (ambivalens eller behöver mänsklig bedömning)
-
-    Returnera ENDAST JSON:
+    1. Identifiera EGENNAMN (Proper Nouns) inom följande kategorier:
+       - "Person": För- och efternamn (t.ex. "Joakim Ekman", "Cenk"). Inkludera även tydliga alias/smeknamn om de används som namn.
+       - "Organization": Företag, Myndigheter, Föreningar (t.ex. "Digitalist", "Adda", "Skatteverket").
+       - "Project": Namngivna uppdrag, system eller initiativ (t.ex. "MyMemory", "Adda PoC", "Hjälplinjen").
+       
+    2. Identifiera DATUM:
+       - Extrahera explicita datum.
+       - Konvertera till ISO 8601 (YYYY-MM-DD) där det är entydigt.
+    
+    3. REGLER FÖR EXTRAKTION:
+       - Var "bokstavlig". Gissa inte. Står det "Jocke", extrahera "Jocke". 
+       - Normalisera INTE namnen mot extern kunskap (det gör systemet senare).
+       - Gör INGA bedömningar om relevans. Är det ett egennamn i texten? Ta med det.
+       - Hitta INTE på egna kategorier. Använd endast: "Person", "Organization", "Project".
+    
+    RETURNERA ENDAST JSON:
     {{
-        "similarity_score": 0.0-1.0,
-        "closest_match": {{"entity_name": "...", "similarity": 0.X}} eller null,
-        "matches_rejected": true/false,
-        "suggested_action": "APPROVE|REVIEW|REJECT",
-        "reason": "Kort motivering för suggested_action"
+      "candidates": [
+        {{ "text": "Det exakta namnet i texten", "type": "Person|Organization|Project", "context": "Kort citat där namnet nämns" }},
+        ...
+      ],
+      "dates": ["YYYY-MM-DD", ...]
     }}

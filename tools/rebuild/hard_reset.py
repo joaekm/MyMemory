@@ -45,7 +45,6 @@ LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 TRANSCRIPTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_transcripts'])
 CHROMA_PATH = os.path.expanduser(CONFIG['paths']['chroma_db'])
 GRAPH_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
-TAXONOMY_FILE = os.path.expanduser(CONFIG['paths']['taxonomy_file'])
 MANIFEST_FILE = os.path.join(os.path.expanduser(CONFIG['paths']['asset_store']), '.rebuild_manifest.json')
 
 # MyMemory root (parent of Lake, Index, Assets) - deriverat från lake_store
@@ -145,33 +144,6 @@ def create_backup():
         raise RuntimeError(f"HARDFAIL: Kunde inte skapa backup: {e}") from e
 
 
-def reset_taxonomy():
-    """Kopierar taxonomy_template.json till Index/my_mem_taxonomy.json."""
-    # Hitta template-filen
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(os.path.dirname(script_dir))
-    template_path = os.path.join(project_root, 'config', 'taxonomy_template.json')
-    template_path = os.path.normpath(template_path)
-    
-    if not os.path.exists(template_path):
-        raise RuntimeError(f"HARDFAIL: Template-fil saknas: {template_path}")
-    
-    # Se till att Index-mappen finns (parent till taxonomy_file)
-    taxonomy_dir = os.path.dirname(TAXONOMY_FILE)
-    os.makedirs(taxonomy_dir, exist_ok=True)
-    
-    # Kopiera template till taxonomy-fil
-    try:
-        with open(template_path, 'r', encoding='utf-8') as f:
-            template_data = json.load(f)
-        
-        with open(TAXONOMY_FILE, 'w', encoding='utf-8') as f:
-            json.dump(template_data, f, ensure_ascii=False, indent=2)
-        
-        print(f"  ✅ Taxonomi: Återställd från template ({len(template_data)} masternoder)")
-    except Exception as e:
-        raise RuntimeError(f"HARDFAIL: Kunde inte kopiera taxonomy template: {e}") from e
-
 def reset_manifest():
     """Raderar rebuild manifest filen."""
     if os.path.exists(MANIFEST_FILE):
@@ -198,7 +170,6 @@ def main():
 ║  • Alla filer i Assets/Transcripts/                          ║
 ║  • Hela ChromaDB (vektorer)                                  ║
 ║  • Hela DuckDB (graf)                                        ║
-║  • Taxonomi (återställs från template)                       ║
 ║  • Rebuild Manifest                                          ║
 ║                                                              ║
 ║  Recordings, Documents, Slack behålls!                       ║
@@ -234,10 +205,7 @@ Skippa backup: python tools/tool_hard_reset.py --confirm --no-backup
     # 4. DuckDB Graf (fil + WAL)
     clear_duckdb(GRAPH_PATH, "DuckDB Graf")
     
-    # 5. Taxonomi
-    reset_taxonomy()
-
-    # 6. Manifest
+    # 5. Manifest
     reset_manifest()
     
     print("=" * 50)

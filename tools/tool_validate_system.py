@@ -1,4 +1,6 @@
 import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import yaml
 import chromadb
 import re
@@ -59,13 +61,32 @@ def get_lake_ids():
 def validera_filer():
     print_header("1. FILSYSTEMS-AUDIT (Strict Mode)")
     
-    all_assets = [f for f in os.listdir(ASSET_STORE) if not f.startswith('.')]
-    doc_files = [f for f in all_assets if os.path.splitext(f)[1].lower() in DOC_EXTS]
+    all_assets = []
+    doc_files = []
+    
+    # Rekursiv insamling
+    for root, dirs, files in os.walk(ASSET_STORE):
+        # Ignorera dolda mappar
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        
+        for f in files:
+            if f.startswith('.'): continue
+            
+            # Spara relativ sökväg för rapportering om så önskas, men vi jobbar mest med filnamnet
+            full_path = os.path.join(root, f)
+            rel_path = os.path.relpath(full_path, ASSET_STORE)
+            
+            all_assets.append(f) # Vi validerar filnamnet oavsett var det ligger
+            
+            if os.path.splitext(f)[1].lower() in DOC_EXTS:
+                doc_files.append(f)
+
     lake_files = [f for f in os.listdir(LAKE_STORE) if f.endswith('.md') and not f.startswith('.')]
     
     # 1.1 KONTROLLERA UUID-NAMNSTANDARD I ASSETS
     invalid_names = []
     for f in all_assets:
+        # Nu när vi loopar filer (från os.walk) vet vi att det är filer, inte mappar.
         if not UUID_SUFFIX_PATTERN.search(f):
             invalid_names.append(f)
 
@@ -73,8 +94,10 @@ def validera_filer():
     
     if invalid_names:
         print(f"❌ [VARNING] Hittade {len(invalid_names)} filer i Assets som bryter mot namnstandarden!")
-        for bad in invalid_names:
+        for bad in invalid_names[:10]: # Visa max 10
             print(f"   - {bad}")
+        if len(invalid_names) > 10:
+            print(f"   ... och {len(invalid_names) - 10} till.")
     else:
         print("✅ Alla filer i Assets följer standarden [Namn]_[UUID].")
 
@@ -96,13 +119,15 @@ def validera_filer():
     else:
         if missing_in_lake:
             print(f"\n❌ SAKNAS I LAKE: {len(missing_in_lake)} dokument har inte konverterats!")
-            for m in sorted(missing_in_lake):
+            for m in sorted(list(missing_in_lake))[:10]:
                 print(f"   - {m}")
+            if len(missing_in_lake) > 10: print(f"   ... ({len(missing_in_lake)-10} till)")
         
         if zombies_in_lake:
             print(f"\n⚠️ ZOMBIES I LAKE: {len(zombies_in_lake)} filer i Sjön saknar källfil i Assets:")
-            for z in sorted(zombies_in_lake):
+            for z in sorted(list(zombies_in_lake))[:10]:
                 print(f"   - {z}")
+            if len(zombies_in_lake) > 10: print(f"   ... ({len(zombies_in_lake)-10} till)")
 
     return len(lake_files)
 

@@ -24,7 +24,7 @@
         "email": { 
           "required": true, 
           "type": "string", 
-          "regex": "^[\\w-\\.]+@([\\w-]+\\.)+[\\w-]{2,4}$",
+          "regex": "^[\\w\\-\\.]+@([\\w\\-]+\\.)+[\\w\\-]{2,4}$",
           "description": "Unik identifierare (används som ID)"
         },
         "name": { "required": true, "type": "string" },

@@ -115,13 +115,12 @@ class FileManager:
         files = []
         
         if phase == "foundation":
-            folders = [self.asset_documents, self.asset_slack, self.asset_calendar, self.asset_mail]
+            folders = [self.asset_slack, self.asset_calendar, self.asset_mail]
         elif phase == "enrichment":
-            folders = [self.asset_recordings]
+            folders = [self.asset_recordings, self.asset_documents]
         else:
-            # Default / Legacy behavior (allt utom recordings om ej specat, eller allt?)
-            # För säkerhets skull, om ingen fas, kör Foundation-mappar
-            folders = [self.asset_documents, self.asset_slack, self.asset_calendar, self.asset_mail]
+            # Default to foundation folders (Strict: No documents)
+            folders = [self.asset_slack, self.asset_calendar, self.asset_mail]
 
         for folder in folders:
             if not os.path.exists(folder):
@@ -211,7 +210,20 @@ class FileManager:
             original_path = os.path.join(original_folder, f['filename'])
             
             if os.path.exists(staging_path):
-                shutil.move(staging_path, original_path)
+                # VIKTIGT: Använd copy + remove istället för move
+                # Detta triggar on_created event som watchdog ser som en ny fil
+                # move() från staging triggar inte alltid on_moved eftersom källan är utanför bevakad mapp
+                shutil.copy2(staging_path, original_path)
+                os.remove(staging_path)
+                
+                # FORCE watchdog detection på macOS:
+                # 1. Uppdatera filens timestamp för att garantera FSEvents ser ändringen
+                os.utime(original_path, None)  # Touch filen
+                
+                # 2. Kort paus mellan filer så watchdog hinner reagera
+                import time
+                time.sleep(0.1)  # 100ms mellan varje fil
+                
                 restored_count += 1
                 LOGGER.info(f"DEBUG: Återställde fil: {f['filename']} -> {original_path}")
             else:
@@ -219,6 +231,7 @@ class FileManager:
                 
         if restored_count > 0:
             LOGGER.info(f"RESTORE: {restored_count} filer återställda för {date}")
+
     
     def restore_all_from_staging(self, staging_info: dict):
         """Återställ alla filer från staging."""

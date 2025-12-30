@@ -164,7 +164,7 @@ class GraphStore:
         if not connection_attempted:
             raise RuntimeError("HARDFAIL: GraphStore connection failed - no connection attempted")
         
-        LOGGER.info(f"GraphStore öppnad: {db_path} (read_only={read_only})")
+        LOGGER.debug(f"GraphStore öppnad: {db_path} (read_only={read_only})")
     
     def _init_schema(self):
         """Skapa tabeller om de inte finns."""
@@ -308,7 +308,7 @@ class GraphStore:
             if self.conn:
                 self.conn.close()
                 self.conn = None
-                LOGGER.info(f"GraphStore stängd: {self.db_path}")
+                LOGGER.debug(f"GraphStore stängd: {self.db_path}")
     
     def __enter__(self):
         return self

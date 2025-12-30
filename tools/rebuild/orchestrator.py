@@ -53,41 +53,6 @@ class RebuildOrchestrator:
             LOGGER.error(f"Graph Builder Error: {e}", exc_info=True)
             raise RuntimeError(f"Graf-byggning misslyckades: {e}") from e
     
-    def _run_dreamer(self):
-        """Kör dreamer för konsolidering direkt i samma process."""
-        _log("  💭 Kör Dreamer...")
-        
-        # Importera och kör consolidate() direkt istället för subprocess
-        # Detta ger oss tillgång till review_list i returvärdet
-        try:
-            from services.processors.dreamer import consolidate
-            result = consolidate()
-            
-            status = result.get("status", "OK")
-            stats = result.get("stats", {})
-            
-            if status == "OK":
-                _log(f"  ✅ Dreamer klar. Auto: {stats.get('auto_nodes', 0)}, Pending: {stats.get('skipped_uncertain', 0)}")
-            elif status == "NO_AI":
-                _log("  ⚠️ Dreamer klar men AI-klient saknas")
-            else:
-                _log(f"  ⚠️ Dreamer status: {status}")
-            
-            return {
-                "status": status,
-                "stats": result
-            }
-        except ImportError as e:
-            error_msg = f"Dreamer import fel: {e}"
-            _log(f"  ⚠️ {error_msg}")
-            LOGGER.error(f"HARDFAIL: {error_msg}")
-            return {"status": "ERROR", "error": str(e), "review_list": []}
-        except Exception as e:
-            error_msg = f"Dreaming misslyckades: {e}"
-            _log(f"  ⚠️ {error_msg}")
-            LOGGER.error(f"HARDFAIL: {error_msg}", exc_info=True)
-            return {"status": "ERROR", "error": str(e), "review_list": []}
-    
     def run(self, days_limit=None, use_multipass=False):
         """Kör rebuild-processen."""
         _log("═══════════════════════════════════════════════")
@@ -119,9 +84,24 @@ class RebuildOrchestrator:
         files_by_date = self.file_manager.group_files_by_date(all_files)  # Gruppera ALLA för att kunna återställa rätt
         sorted_dates = sorted(files_by_date.keys())
         
+        # Filtrera bort helt klara dagar INNAN vi applicerar days_limit
+        # Annars fastnar vi på samma dag om den redan är klar
+        pending_dates = []
+        completed_dates = []
+        for date in sorted_dates:
+            day_files = files_by_date[date]
+            day_pending = [f for f in day_files if not self.file_manager.manifest.is_complete(f['uuid'])]
+            if day_pending:
+                pending_dates.append(date)
+            else:
+                completed_dates.append(date)
+        
         if days_limit:
-            sorted_dates = sorted_dates[:days_limit]
-            _log(f"   Begränsat till {days_limit} dagar.")
+            # Begränsa till X PENDING dagar, men inkludera alla completed för återställning
+            dates_to_process = pending_dates[:days_limit]
+            sorted_dates = completed_dates + dates_to_process  # Först completed (för cleanup), sen pending
+            _log(f"   Begränsat till {days_limit} pending dagar ({len(pending_dates)} totalt).")
+
 
         # 4. Flytta ALLA filer till staging (för att tömma assets)
         _log("\n📦 Flyttar filer till staging...")
@@ -171,7 +151,33 @@ class RebuildOrchestrator:
                     else:
                         LOGGER.error(f"DEBUG: Fil saknas i Assets efter återställning: {f['path']}")
                 
-                LOGGER.info(f"DEBUG: Tjänster startade, väntar nu på filprocessering...")
+                # DIREKT PROCESSING: Bypaassa watchdog helt!
+                # macOS FSEvents är opålitligt, så vi anropar DocConverter direkt
+                _log(f"   🔧 Triggar DocConverter direkt för {len(day_pending)} filer...")
+                try:
+                    # VIKTIGT: Importera modulen FÖRST och initiera GATEKEEPER INNAN vi importerar funktioner
+                    # Annars får funktionerna en None-referens till GATEKEEPER
+                    import services.processors.doc_converter as dc_module
+                    
+                    # Initiera Gatekeeper om den inte redan är initierad
+                    if dc_module.GATEKEEPER is None:
+                        _log("      📦 Initierar Gatekeeper...")
+                        dc_module.GATEKEEPER = dc_module.EntityGatekeeper()
+                        _log(f"      ✓ Gatekeeper redo")
+                    
+                    for f in day_pending:
+                        if os.path.exists(f['path']):
+                            _log(f"      → {f['filename']}")
+                            dc_module.processa_dokument(f['path'], f['filename'])
+                except ImportError as e:
+                    LOGGER.warning(f"Kunde inte importera DocConverter direkt: {e}")
+                    # Fallback: vänta på watchdog
+                    _log("   ⏳ Fallback: Väntar på att watchdogs ska upptäcka filer...")
+                    time.sleep(5)
+
+                
+                LOGGER.info(f"DEBUG: Filer processade, väntar nu på att de ska dyka upp i Lake...")
+
                 
                 # Vänta på completion
                 try:
@@ -185,7 +191,6 @@ class RebuildOrchestrator:
                 
                 # Konsolidering
                 self._run_graph_builder()
-                self._run_dreamer()
                 
                 _log(f"   ✅ Dag {date} klar!")
                 

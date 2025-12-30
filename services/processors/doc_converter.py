@@ -102,6 +102,13 @@ MODEL_NAME = CONFIG.get('ai_engine', {}).get('models', {}).get('model_lite', 'mo
 # Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - DOCCONV - %(levelname)s - %(message)s')
 LOGGER = logging.getLogger('DocConverter')
+
+# Silence external loggers
+logging.getLogger("google").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 CLIENT = genai.Client(api_key=API_KEY)
 
 # Patterns
@@ -288,12 +295,12 @@ class EntityGatekeeper:
         
         # Om vi får "Source ... not allowed" i error, då är det kört.
         if error and "not allowed for" in error:
-            LOGGER.info(f"Gatekeeper: Denied creation of {type_str} from {source_system} ({value}). Error: {error}")
+            LOGGER.debug(f"Gatekeeper: Denied creation of {type_str} from {source_system} ({value}). Error: {error}")
             return None
             
         # Om det var annat valideringsfel (t.ex. missing required prop) så ska vi logga det men inte skapa
         if not is_valid:
-            LOGGER.warning(f"Gatekeeper: Validation failed for potential new {type_str} from {source_system}: {error}")
+            LOGGER.debug(f"Gatekeeper: Validation failed for potential new {type_str} from {source_system}: {error}")
             return None
             
         # 3. CREATE ALLOWED
@@ -627,10 +634,10 @@ def processa_dokument(filväg: str, filnamn: str):
     
     # IDEMPOTENS
     if os.path.exists(lake_file):
-        LOGGER.info(f"⏭️  Skippar (redan klar): {filnamn}")
+        LOGGER.debug(f"⏭️  Skippar (redan klar): {filnamn}")
         return
 
-    LOGGER.info(f"⚙️ Bearbetar: {filnamn}")
+    LOGGER.debug(f"⚙️ Bearbetar: {filnamn}")
     try:
         ext = os.path.splitext(filnamn)[1]
         raw_text = extract_text(filväg, ext)

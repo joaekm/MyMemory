@@ -7,10 +7,10 @@ Använder GraphStore (DuckDB) för all graflagring.
 import os
 import sys
 import yaml
-import json
 import logging
 import re
 import time
+import threading
 
 # Lägg till projektroten i sys.path för att hitta services-paketet
 # graph_builder.py ligger i services/indexers/, så vi behöver gå upp 3 nivåer för att nå projektroten
@@ -50,7 +50,6 @@ CONFIG = hitta_och_ladda_config()
 # --- SETUP ---
 LAKE_STORE = CONFIG['paths']['lake_store']
 GRAPH_PATH = CONFIG['paths']['graph_db']
-TAXONOMY_FILE = CONFIG['paths'].get('taxonomy_file', os.path.expanduser("~/MyMemory/Index/my_mem_taxonomy.json"))
 LOG_FILE = CONFIG['logging']['log_file_path']
 
 # Logging
@@ -62,7 +61,6 @@ LOGGER.addHandler(logging.StreamHandler())
 UUID_SUFFIX_PATTERN = re.compile(r'_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.md$')
 
 # --- SINGLETON GRAPH STORE (Thread-Safe) ---
-import threading
 _GRAPH_INSTANCE: GraphStore | None = None
 _GRAPH_LOCK = threading.Lock()
 
@@ -91,30 +89,10 @@ def close_db_connection():
             _GRAPH_INSTANCE = None
 
 
-def _entity_exists_in_taxonomy(entity_name: str, taxonomy: dict) -> bool:
-    """
-    Kolla om en entitet redan finns i någon masternod i taxonomin.
-    
-    Args:
-        entity_name: Entitetens namn att kolla
-        taxonomy: Taxonomi-dict
-        
-    Returns:
-        True om entiteten finns i någon masternod
-    """
-    if not taxonomy:
-        return False
-    
-    for master_node, data in taxonomy.items():
-        if entity_name in data.get("sub_nodes", []):
-            return True
-    return False
-
-
 # --- GRAPH ENGINE ---
 
 def process_lake_batch():
-    """Huvudloop för grafbyggande - Nu med GraphStore (DuckDB)."""
+    """Huvudloop för grafbyggande - Strict Schema."""
     
     # Retry-logik för att hantera DuckDB-lock-konflikter efter att tjänster stoppats
     # DuckDB kan ta tid att frigöra låset efter att processer dödats
@@ -151,17 +129,6 @@ def process_lake_batch():
                 files_processed = 0
                 relations_created = 0
                 
-                # Ladda taxonomi en gång för hela batch-processningen
-                taxonomy = {}
-                try:
-                    if os.path.exists(TAXONOMY_FILE):
-                        with open(TAXONOMY_FILE, 'r', encoding='utf-8') as f:
-                            taxonomy = json.load(f)
-                        LOGGER.debug(f"Taxonomi laddad: {len(taxonomy)} masternoder")
-                except Exception as e:
-                    LOGGER.warning(f"Kunde inte ladda taxonomi för entity-check: {e}")
-                    taxonomy = {}
-                
                 print(f"🔍 Scannar {LAKE_STORE}...")
 
                 for filename in os.listdir(LAKE_STORE):
@@ -187,77 +154,53 @@ def process_lake_batch():
                         timestamp = metadata.get('timestamp_created') or ""
                         source_type = metadata.get('source_type') or "unknown"
                         summary = (metadata.get('summary') or "").replace('"', "'")
+                        owner_id = metadata.get('owner_id')
                         
                         # 1. Skapa Dokument-noden (Unit)
+                        # Owner sparas nu endast som property, ingen kant skapas
                         graph.upsert_node(
                             id=unit_id,
                             type="Unit",
                             properties={
                                 "timestamp": timestamp,
                                 "source_type": source_type,
-                                "summary": summary[:500] if summary else ""  # Begränsa längd
+                                "summary": summary[:500] if summary else "",  # Begränsa längd
+                                "owner": owner_id
                             }
                         )
 
-                        # 2. Skapa Relationer baserat på EXPLICIT DATA
+                        # 2. Hantera Validated Mentions (Strict)
+                        # GraphBuilder är nu en "dumb executor" av instruktioner från DocConverter
+                        mentions = metadata.get('validated_mentions', [])
                         
-                        # A. GRAPH_NODES (Ny struktur med viktade koncept och typade entiteter)
-                        graph_nodes = metadata.get('graph_nodes', {})
-                        
-                        # Hantera legacy-format (graph_master_node/graph_sub_node)
-                        if not graph_nodes:
-                            master_node = metadata.get('graph_master_node')
-                            if master_node:
-                                graph_nodes[master_node] = 1.0
-                            sub_node = metadata.get('graph_sub_node')
-                            if sub_node:
-                                graph_nodes[sub_node] = 0.5
-                        
-                        for node_key, node_value in graph_nodes.items():
-                            # Abstrakt koncept (masternode) - värde är float
-                            if isinstance(node_value, (int, float)):
-                                graph.upsert_node(id=node_key, type="Concept")
-                                graph.upsert_edge(
-                                    source=unit_id, 
-                                    target=node_key, 
-                                    edge_type="DEALS_WITH",
-                                    properties={"weight": node_value}
+                        for mention in mentions:
+                            target_uuid = mention.get('target_uuid')
+                            if not target_uuid:
+                                continue
+                                
+                            # Steg A: Skapa Nod (Om instruerat)
+                            # Action 'CREATE' innebär att DocConverter har validerat att noden får skapas
+                            if mention.get('action') == 'CREATE':
+                                graph.upsert_node(
+                                    id=target_uuid,
+                                    type=mention.get('target_type', 'Unknown'),
+                                    properties=mention.get('properties', {})
                                 )
-                                relations_created += 1
+                                LOGGER.info(f"✨ Skapade nod: {mention.get('label', 'Unknown')}")
                             
-                            # Typad entitet - värde är dict med namn -> relevans
-                            elif isinstance(node_value, dict):
-                                entity_type = node_key  # Typ från taxonomin
-                                for entity_name, relevance in node_value.items():
-                                    # Kolla om entiteten redan finns i taxonomin
-                                    if _entity_exists_in_taxonomy(entity_name, taxonomy):
-                                        LOGGER.debug(f"Skippar '{entity_name}' - finns redan i taxonomin")
-                                        continue  # Hoppa över - entiteten är redan klar
-                                    
-                                    # Skapa Entity-nod
-                                    graph.upsert_node(
-                                        id=entity_name,
-                                        type="Entity",
-                                        properties={"entity_type": entity_type}
-                                    )
-                                    # Skapa relation Unit -> Entity
-                                    graph.upsert_edge(
-                                        source=unit_id,
-                                        target=entity_name,
-                                        edge_type="UNIT_MENTIONS",
-                                        properties={"relevance": relevance}
-                                    )
-                                    relations_created += 1
-
-                        # C. PERSON (Ägare)
-                        owner = metadata.get('owner_id')
-                        if owner:
-                            graph.upsert_node(id=owner, type="Person")
+                            # Steg B: Skapa Relation (Alltid)
+                            # Endast MENTIONS är tillåtet mellan Unit och Entity
                             graph.upsert_edge(
                                 source=unit_id,
-                                target=owner,
-                                edge_type="CREATED_BY"
+                                target=target_uuid,
+                                edge_type="MENTIONS",
+                                properties={
+                                    "confidence": mention.get('confidence', 1.0),
+                                    "snippet": mention.get('source_text', '')
+                                }
                             )
+                            relations_created += 1
+                            LOGGER.info(f"🔗 Länkade: {unit_id} -> {target_uuid}")
                         
                         files_processed += 1
 
@@ -448,7 +391,7 @@ def get_graph_context_for_search(keywords: list, entities: list) -> str:
                 if aliases:
                     match_info += f" [alias: {', '.join(aliases[:3])}]"
                 if related_units:
-                    match_info += f"\n    → Nämns i: {len(related_units)} dokument"
+                    match_info += f"\\n    → Nämns i: {len(related_units)} dokument"
                 match_lines.append(match_info)
             
             if match_lines:
@@ -458,7 +401,7 @@ def get_graph_context_for_search(keywords: list, entities: list) -> str:
         if not lines:
             return "(Inga grafkopplingar hittades för söktermerna)"
         
-        return "\n".join(lines)
+        return "\\n".join(lines)
     
     except Exception as e:
         LOGGER.error(f"get_graph_context_for_search error: {e}")
@@ -524,7 +467,7 @@ if __name__ == "__main__":
         process_lake_batch()
         sys.exit(0)
     except KeyboardInterrupt:
-        print("\n⚠️ Avbruten av användaren")
+        print("\\n⚠️ Avbruten av användaren")
         LOGGER.warning("Graph builder avbruten av användaren")
         sys.exit(130)  # Standard exit code för Ctrl+C
     except Exception as e:

@@ -129,27 +129,6 @@ def auto_repair(health_info):
     if repaired:
         print()
 
-def run_dreaming():
-    """Kör dreaming vid varje uppstart för att synka graf och taxonomi."""
-    try:
-        from services.processors.dreamer import consolidate
-        
-        print(f"{_ts()} 💭 Dreaming...")
-        result = consolidate()
-        if result.get("status") == "OK":
-            added = result.get("concepts_added", 0)
-            if added > 0:
-                print(f"{_ts()} ✅ Dreaming klar: {added} noder tillagda")
-            else:
-                print(f"{_ts()} ✅ Dreaming klar: taxonomi är synkad")
-        elif result.get("status") == "ERROR":
-            print(f"{_ts()} ⚠️ Dreaming misslyckades: {result.get('error', 'okänt fel')}")
-    except ImportError as e:
-        LOGGER.warning(f"Dreamer-modul kunde inte laddas: {e}")
-    except Exception as e:
-        LOGGER.warning(f"Dreaming misslyckades: {e}")
-        print(f"{_ts()} ⚠️ Dreaming misslyckades: {e}")
-
 
 def start_all():
     print(f"\n--- MyMem Services (v6.0) ---\n")
@@ -157,9 +136,6 @@ def start_all():
     # Kör validering (inkl. loggrensning) och auto-repair
     health_info = run_startup_checks()
     auto_repair(health_info)
-    
-    # Kör dreaming (konsolidering av taxonomi) om det behövs
-    run_dreaming()
     
     python_exec = sys.executable
 
