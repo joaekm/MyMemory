@@ -1,7 +1,7 @@
 {
   "meta": {
-    "version": "1.0",
-    "description": "Strikt schema för MyMemory. Definierar noder, relationer och valideringsregler.",
+    "version": "2.0",
+    "description": "Strikt schema för MyMemory med stöd för Self-Healing Graph (Provisional/Verified).",
     "strict_mode": true
   },
   "base_properties": {
@@ -10,21 +10,33 @@
       "id": { "type": "string", "required": true, "description": "Primary Key (UUID för dok, Email för person, etc)" },
       "created_at": { "type": "timestamp", "required": true },
       "last_synced_at": { "type": "timestamp", "required": true },
-      "source_system": { "type": "string", "required": false }
+      "source_system": { "type": "string", "required": false },
+      "status": {
+        "type": "enum",
+        "required": true,
+        "values": ["VERIFIED", "PROVISIONAL"],
+        "default": "PROVISIONAL",
+        "description": "Anger om entiteten är bekräftad sanning eller en gissning."
+      },
+      "distinguishing_context": {
+        "type": "list",
+        "required": false,
+        "description": "Lista med nyckelord/kontext för att skilja dubbletter åt (t.ex. ['IT', 'Chef'])."
+      }
     }
   },
   "nodes": {
     "Person": {
       "description": "En unik fysisk individ.",
       "primary_key_strategy": "NATURAL_KEY",
-      "lookup_key": "email",
+      "lookup_key": "name",
       "allowed_sources": ["Slack", "Mail", "Calendar", "AD", "Manual"],
       "creation_policy": "STRICT_LOOKUP",
       "properties": {
         "email": { 
-          "required": true, 
+          "required": false, 
           "type": "string", 
-          "regex": "^[\\w\\-\\.]+@([\\w\\-]+\\.)+[\\w\\-]{2,4}$",
+          "regex": "^[\\w.]+@([\\w-]+\\.)+[\\w-]{2,4}$",
           "description": "Unik identifierare (används som ID)"
         },
         "name": { "required": true, "type": "string" },

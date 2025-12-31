@@ -100,58 +100,75 @@ class SchemaValidator:
             raise RuntimeError(f"Schema load failed: {e}")
 
     def validate_node(self, node_type: str, properties: Dict[str, Any], source_system: str) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
-        """
-        Validera en nod mot schemat.
-        
-        Returns:
-            (is_valid, validated_data, error_message)
-        """
-        # Steg 1: Kontrollera nodtyp
-        node_def = self.schema.get('nodes', {}).get(node_type)
-        if not node_def:
-            return False, None, f"Unknown node type: {node_type}"
+            """
+            Validera en nod mot schemat.
+            
+            Returns:
+                (is_valid, validated_data, error_message)
+            """
+            # Steg 1: Kontrollera nodtyp
+            node_def = self.schema.get('nodes', {}).get(node_type)
+            if not node_def:
+                return False, None, f"Unknown node type: {node_type}"
 
-        # Steg 2: Kontrollera källa
-        allowed_sources = node_def.get('allowed_sources', [])
-        # 'Manual' och 'System' är ofta implicita/godkända, men vi följer schemat strikt
-        if source_system not in allowed_sources:
-             # Fallback för system-interna sources om de inte är explicit listade men kanske borde vara?
-             # Nej, schemat är strikt.
-             return False, None, f"Source '{source_system}' not allowed for {node_type}. Allowed: {allowed_sources}"
+            # Förbered scheman
+            schema_props = node_def.get('properties', {})
+            base_props = self.schema.get('base_properties', {}).get('properties', {})
+            all_allowed_props = {**base_props, **schema_props}
+            
+            # Extrahera status tidigt för att styra käll-validering
+            # Default till PROVISIONAL om det saknas (enligt schema-default, men här är vi explicita)
+            node_status = properties.get('status', 'PROVISIONAL')
+            
+            # Steg 2: Kontrollera källa med "Self-Healing Logic"
+            allowed_sources = node_def.get('allowed_sources', [])
+            is_trusted_source = source_system in allowed_sources
+            
+            if not is_trusted_source:
+                # UNTRUSTED SOURCE (t.ex. DocConverter)
+                if node_status == 'VERIFIED':
+                    return False, None, f"Source '{source_system}' is NOT allowed to create VERIFIED nodes of type {node_type}. Must be PROVISIONAL."
+                elif node_status == 'PROVISIONAL':
+                    # Tillåt untrusted source att skapa PROVISIONAL noder
+                    pass
+                else:
+                    return False, None, f"Invalid status '{node_status}' for untrusted source."
+            else:
+                # TRUSTED SOURCE (t.ex. Slack, AD)
+                # Får skapa både VERIFIED och PROVISIONAL
+                pass
 
-        # Steg 3: Validera properties
-        schema_props = node_def.get('properties', {})
-        base_props = self.schema.get('base_properties', {}).get('properties', {})
-        
-        # Mergea schema props med base props för fullständig validering
-        all_allowed_props = {**base_props, **schema_props}
-        
-        validated_data = {}
-        
-        # Loopa igenom INPUT properties (för att STRIPPA okända)
-        for key, value in properties.items():
-            if key not in all_allowed_props:
-                # STRIP unknown
-                continue
+            # Steg 3: Validera properties
+            validated_data = {}
+            
+            # Loopa igenom INPUT properties (för att STRIPPA okända)
+            for key, value in properties.items():
+                if key not in all_allowed_props:
+                    # STRIP unknown
+                    continue
+                    
+                prop_def = all_allowed_props[key]
                 
-            prop_def = all_allowed_props[key]
-            
-            # Validera Typ & Värde
-            is_valid_prop, safe_val, err = self._validate_property(key, value, prop_def)
-            if not is_valid_prop:
-                return False, None, f"Property '{key}' invalid: {err}"
-            
-            validated_data[key] = safe_val
+                # Validera Typ & Värde
+                is_valid_prop, safe_val, err = self._validate_property(key, value, prop_def)
+                if not is_valid_prop:
+                    return False, None, f"Property '{key}' invalid: {err}"
+                
+                validated_data[key] = safe_val
 
-        # Kontrollera REQUIRED fields (från schemat)
-        for key, prop_def in all_allowed_props.items():
-            if prop_def.get('required', False):
-                if key not in validated_data or validated_data[key] in (None, ""):
-                    # Det saknas i input eller blev None/tomt
-                    # (OBS: Vi accepterar inte tomma strängar för required fields)
-                    return False, None, f"Missing required property: {key}"
+            # Kontrollera REQUIRED fields (från schemat)
+            for key, prop_def in all_allowed_props.items():
+                if prop_def.get('required', False):
+                    # Specialfall: status har en default i vår logik ovan, men om den saknas i input
+                    # och vi inte lagt till den i validated_data än:
+                    if key == 'status' and key not in validated_data:
+                        validated_data['status'] = 'PROVISIONAL'
+                        continue
 
-        return True, validated_data, None
+                    if key not in validated_data or validated_data[key] in (None, ""):
+                        return False, None, f"Missing required property: {key}"
+
+            return True, validated_data, None
 
     def validate_edge(self, edge_type: str, source_type: str, target_type: str) -> Tuple[bool, Optional[str]]:
         """
@@ -245,6 +262,7 @@ class SchemaValidator:
                   return False, None, f"Invalid UUID format: '{value}'"
 
         return True, value, None
+
 
 
 

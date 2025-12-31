@@ -103,6 +103,15 @@ MODEL_NAME = CONFIG.get('ai_engine', {}).get('models', {}).get('model_lite', 'mo
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - DOCCONV - %(levelname)s - %(message)s')
 LOGGER = logging.getLogger('DocConverter')
 
+# --- NYTT: Filtrera bort AFC-spam ---
+class SuppressAFC(logging.Filter):
+    def filter(self, record):
+        return "AFC is enabled" not in record.getMessage()
+
+for handler in logging.root.handlers:
+    handler.addFilter(SuppressAFC())
+# ------------------------------------
+
 # Silence external loggers
 logging.getLogger("google").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -284,8 +293,13 @@ class EntityGatekeeper:
         # Kontrollera om denna source får skapa denna typ
         # Vi använder validate_node för att kolla allowed_sources
         # Vi skickar in dummy props för att validera källan
-        dummy_props = context_props or {}
+        dummy_props = context_props.copy() if context_props else {}
         if "name" not in dummy_props: dummy_props["name"] = value # Minsta krav oftast
+        
+        # MOCKA SYSTEM-PROPERTIES för validering (dessa skapas automatiskt senare)
+        dummy_props["id"] = str(uuid.uuid4())
+        dummy_props["created_at"] = datetime.datetime.now().isoformat()
+        dummy_props["last_synced_at"] = datetime.datetime.now().isoformat()
         
         is_valid, _, error = self.schema_validator.validate_node(type_str, dummy_props, source_system)
         
@@ -304,7 +318,7 @@ class EntityGatekeeper:
             return None
             
         # 3. CREATE ALLOWED
-        new_uuid = str(uuid.uuid4())
+        new_uuid = value.strip().lower()
         
         # Förbered properties för skapande
         creation_props = context_props.copy() if context_props else {}
@@ -598,6 +612,10 @@ def handle_unstructured_file(text: str, filename: str) -> List[Dict]:
     data = strict_entity_extraction(text)
     candidates = data.get('candidates', [])
     
+    # --- DEBUG: Visa vad AI hittade totalt ---
+    print(f"   🤖 AI identifierade {len(candidates)} kandidater:")
+    # -----------------------------------------
+    
     seen_candidates = set()
     
     for cand in candidates:
@@ -611,11 +629,19 @@ def handle_unstructured_file(text: str, filename: str) -> List[Dict]:
         seen_candidates.add(key)
         
         # Anropa Gatekeeper (Untrusted Source = DocConverter)
-        # Kontext props spelar ingen roll då DocConverter inte får skapa
         result = GATEKEEPER.resolve_entity(type_str, name, "DocConverter")
         
+        # --- DEBUG: Visa Gatekeeperns beslut per entitet ---
         if result:
+            # Godkänd (hittades i grafen eller fick skapas)
+            action = result.get('action', 'LINK')
+            uuid_trunc = result.get('target_uuid', '')[:8]
+            print(f"      ✅ {type_str}: '{name}' -> {action} ({uuid_trunc}...)")
             mentions.append(result)
+        else:
+            # Nekad (fanns ej i grafen och DocConverter får ej skapa denna typ)
+            print(f"      ⛔ {type_str}: '{name}' -> BLOCKED (Schema/Gatekeeper)")
+        # ---------------------------------------------------
             
     return mentions
 
@@ -691,6 +717,15 @@ def processa_dokument(filväg: str, filnamn: str):
             f.write(content)
             
         LOGGER.info(f"✅ Klar: {filnamn} (Hittade {len(validated_mentions)} mentions)")
+
+        # --- DEBUG: Skriv ut hittade entiteter ---
+        if validated_mentions:
+            for mention in validated_mentions:
+                kategori = mention.get('target_type', 'Okänd')
+                namn = mention.get('source_text', 'Inget namn')
+                # Använd print() för direkt terminalutskrift eller LOGGER.info() för loggformat
+                print(f"   🔍 {kategori}: {namn}")
+        # -----------------------------------------
 
     except Exception as e:
         LOGGER.error(f"HARDFAIL {filnamn}: {e}", exc_info=True)

@@ -186,7 +186,7 @@ def process_lake_batch():
                                     type=mention.get('target_type', 'Unknown'),
                                     properties=mention.get('properties', {})
                                 )
-                                LOGGER.info(f"✨ Skapade nod: {mention.get('label', 'Unknown')}")
+                                LOGGER.info(f"✨ Skapade nod: {mention.get('label') or mention.get('source_text', 'Unknown')}")
                             
                             # Steg B: Skapa Relation (Alltid)
                             # Endast MENTIONS är tillåtet mellan Unit och Entity
