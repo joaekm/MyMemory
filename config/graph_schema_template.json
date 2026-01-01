@@ -1,8 +1,18 @@
 {
   "meta": {
-    "version": "2.0",
-    "description": "Strikt schema för MyMemory med stöd för Self-Healing Graph (Provisional/Verified).",
+    "version": "2.1",
+    "description": "Strikt schema för MyMemory med stöd för Self-Healing Graph (Provisional/Verified) samt Declarative Healing.",
     "strict_mode": true
+  },
+  "processing_policy": {
+    "description": "Globala regler för hur osäker data hanteras.",
+    "min_confidence_threshold": 0.3,
+    "trusted_source_confidence_floor": 0.8,
+    "source_mappings": {
+      "slack": "Slack Log",
+      "mail": "Email Thread",
+      "calendar": "Calendar Event"
+    }
   },
   "base_properties": {
     "description": "Egenskaper som alla noder automatiskt får (system-nivå).",
@@ -10,6 +20,11 @@
       "id": { "type": "string", "required": true, "description": "Primary Key (UUID för dok, Email för person, etc)" },
       "created_at": { "type": "timestamp", "required": true },
       "last_synced_at": { "type": "timestamp", "required": true },
+      "last_seen_at": { 
+        "type": "timestamp", 
+        "required": true, 
+        "description": "Tidpunkt då noden senast observerades/bearbetades av systemet." 
+      },
       "source_system": { "type": "string", "required": false },
       "status": {
         "type": "enum",
@@ -17,6 +32,14 @@
         "values": ["VERIFIED", "PROVISIONAL"],
         "default": "PROVISIONAL",
         "description": "Anger om entiteten är bekräftad sanning eller en gissning."
+      },
+      "confidence": {
+        "type": "float",
+        "required": true,
+        "min": 0.0,
+        "max": 1.0,
+        "default": 0.5,
+        "description": "Schema-Fit Score. 1.0 = Trusted/Verified, <0.3 = Brus."
       },
       "distinguishing_context": {
         "type": "list",
@@ -28,9 +51,14 @@
   "nodes": {
     "Person": {
       "description": "En unik fysisk individ.",
+      "healing_policy": {
+        "max_days_as_provisional": 90,
+        "min_connections_to_survive": 2,
+        "required_properties": ["email"]
+      },
       "primary_key_strategy": "NATURAL_KEY",
       "lookup_key": "name",
-      "allowed_sources": ["Slack", "Mail", "Calendar", "AD", "Manual"],
+      "allowed_sources": ["Slack", "Mail", "Calendar"],
       "creation_policy": "STRICT_LOOKUP",
       "properties": {
         "email": { 
@@ -53,10 +81,14 @@
     },
     "Organization": {
       "description": "Den organisatoriska entiteten (Bolag, Myndighet, etc).",
+      "healing_policy": {
+        "max_days_as_provisional": 90,
+        "min_connections_to_survive": 2
+      },
       "primary_key_strategy": "NATURAL_KEY",
       "lookup_key": "org_number",
       "fallback_key": "name",
-      "allowed_sources": ["CRM", "ERP", "Manual", "System"],
+      "allowed_sources": ["Mail", "Calendar"],
       "creation_policy": "STRICT_LOOKUP",
       "properties": {
         "name": { "required": true, "type": "string" },
@@ -72,10 +104,14 @@
       }
     },
     "Group": {
-      "description": "Organisatoriska enheter (Team, Avdelningar).",
+      "description": "Organisatoriska enheter (Team, Enheter, Avdelningar).",
+      "healing_policy": {
+        "max_days_as_provisional": 90,
+        "min_connections_to_survive": 2
+      },
       "primary_key_strategy": "COMPOSITE_KEY",
       "lookup_key": "name",
-      "allowed_sources": ["AD", "Slack", "Manual"],
+      "allowed_sources": ["Slack", "Mail", "Calendar"],
       "creation_policy": "STRICT_LOOKUP",
       "properties": {
         "name": { "required": true, "type": "string" },
@@ -90,6 +126,10 @@
     },
     "Project": {
       "description": "Ett initiativ med start, slut och mål.",
+      "healing_policy": {
+        "max_days_as_provisional": 90,
+        "min_connections_to_survive": 2
+      },
       "primary_key_strategy": "NATURAL_KEY",
       "lookup_key": "source_id",
       "fallback_key": "name",
@@ -108,9 +148,13 @@
     },
     "Event": {
       "description": "Tidsbestämd aktivitet (Möte, Workshop).",
+      "healing_policy": {
+        "max_days_as_provisional": 30,
+        "min_connections_to_survive": 1
+      },
       "primary_key_strategy": "SOURCE_ID",
       "lookup_key": "source_id",
-      "allowed_sources": ["GoogleCalendar"],
+      "allowed_sources": ["Slack", "Mail", "Calendar"],
       "creation_policy": "ALWAYS_CREATE",
       "properties": {
         "subject": { "required": true, "type": "string", "default": "No Title" },
@@ -124,9 +168,13 @@
     },
     "Business_relation": {
       "description": "Klassificering av relation (Leverantör, Kund).",
+      "healing_policy": {
+        "max_days_as_provisional": 90,
+        "min_connections_to_survive": 1
+      },
       "primary_key_strategy": "NATURAL_KEY",
       "lookup_key": "name",
-      "allowed_sources": ["System"],
+      "allowed_sources": ["Mail"],
       "creation_policy": "STRICT_LOOKUP",
       "properties": {
         "name": { 
@@ -138,9 +186,13 @@
     },
     "Roles": {
       "description": "Funktionell kompetens eller titel.",
+      "healing_policy": {
+        "max_days_as_provisional": 90,
+        "min_connections_to_survive": 2
+      },
       "primary_key_strategy": "NATURAL_KEY",
       "lookup_key": "name",
-      "allowed_sources": ["System", "AD"],
+      "allowed_sources": ["Slack", "Mail", "Calendar"],
       "creation_policy": "STRICT_LOOKUP",
       "properties": {
         "name": { "required": true, "type": "string" },
@@ -150,6 +202,10 @@
     },
     "Document": {
       "description": "Ett ostrukturerat objekt som bär information.",
+      "healing_policy": {
+        "max_days_as_provisional": 365,
+        "min_connections_to_survive": 0
+      },
       "primary_key_strategy": "UUID",
       "lookup_key": "uuid",
       "allowed_sources": ["FileRetriever", "DocConverter", "Transcriber"],
@@ -179,7 +235,7 @@
       "description": "Dokumentet nämner en entitet.",
       "validation_rule": "TARGET_MUST_EXIST",
       "properties": {
-        "confidence_score": { "required": true, "type": "float", "min": 0.0, "max": 1.0 },
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0 },
         "snippet": { "required": false, "type": "string" }
       }
     },
@@ -188,6 +244,7 @@
       "target_type": ["Event"],
       "validation_rule": "TARGET_MUST_EXIST",
       "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
         "response_status": { 
           "required": true, 
           "type": "enum", 
@@ -201,6 +258,7 @@
       "target_type": ["Organization", "Group"],
       "validation_rule": "TARGET_MUST_EXIST",
       "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
         "start_date": { "required": false, "type": "date" },
         "end_date": { "required": false, "type": "date" },
         "job_title": { "required": false, "type": "string" },
@@ -212,6 +270,7 @@
       "target_type": ["Business_relation"],
       "validation_rule": "TARGET_MUST_EXIST",
       "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
         "status": { "required": true, "type": "enum", "values": ["Active", "Inactive"] },
         "contract_id": { "required": false, "type": "string" }
       }
@@ -221,6 +280,7 @@
       "target_type": ["Roles"],
       "validation_rule": "TARGET_MUST_EXIST",
       "properties": {
+        "confidence": { "required": true, "type": "float", "min": 0.0, "max": 1.0, "default": 1.0 },
         "context": { "required": false, "type": "string" }
       }
     }

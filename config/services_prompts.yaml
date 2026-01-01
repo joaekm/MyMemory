@@ -71,32 +71,61 @@ doc_converter:
     }}
 
   strict_entity_extraction: |
-    Du är en strikt data-extraktor. Din enda uppgift är att identifiera potentiella entiteter och datum i texten.
-    
-    TEXT ATT ANALYSERA:
-    {text_chunk}
-    
-    INSTRUKTIONER:
-    1. Identifiera EGENNAMN (Proper Nouns) inom följande kategorier:
-       - "Person": För- och efternamn (t.ex. "Joakim Ekman", "Cenk"). Inkludera även tydliga alias/smeknamn om de används som namn.
-       - "Organization": Företag, Myndigheter, Föreningar (t.ex. "Digitalist", "Adda", "Skatteverket").
-       - "Project": Namngivna uppdrag, system eller initiativ (t.ex. "MyMemory", "Adda PoC", "Hjälplinjen").
-       
-    2. Identifiera DATUM:
-       - Extrahera explicita datum.
-       - Konvertera till ISO 8601 (YYYY-MM-DD) där det är entydigt.
-    
-    3. REGLER FÖR EXTRAKTION:
-       - Var "bokstavlig". Gissa inte. Står det "Jocke", extrahera "Jocke". 
-       - Normalisera INTE namnen mot extern kunskap (det gör systemet senare).
-       - Gör INGA bedömningar om relevans. Är det ett egennamn i texten? Ta med det.
-       - Hitta INTE på egna kategorier. Använd endast: "Person", "Organization", "Project".
-    
-    RETURNERA ENDAST JSON:
-    {{
-      "candidates": [
-        {{ "text": "Det exakta namnet i texten", "type": "Person|Organization|Project", "context": "Kort citat där namnet nämns" }},
-        ...
-      ],
-      "dates": ["YYYY-MM-DD", ...]
-    }}
+      Du är en expert på Knowledge Graph Extraction. Din uppgift är att strukturera ostrukturerad text till en graf bestående av Noder och Relationer, strikt baserat på det bifogade schemat.
+      
+      TEXT ATT ANALYSERA:
+      "{text_chunk}"
+      
+      === DITT SCHEMA (Detta är din lag) ===
+      Här är de enda nodtyper och relationer du får skapa. Använd definitionerna för att avgöra "Schema-Fit" (hur väl datan matchar kraven).
+      
+      TILLÅTNA NODTYPER:
+      {node_types_context}
+      
+      TILLÅTNA RELATIONSTYPER:
+      {edge_types_context}
+      
+      === KÄNDA ENTITETER (ANKARE) ===
+      Här är entiteter som vi REDAN VET existerar i systemet.
+      Om du hittar namn som matchar nedan, MÅSTE du återanvända deras UUID exakt som det står här:
+      {known_entities_context}
+      
+      === INSTRUKTIONER ===
+      1. EXTRAHERA NODER:
+        - Identifiera entiteter som matchar schemat.
+        - "confidence": Sätts baserat på "Schema-Fit" (0.0 - 1.0).
+          * 0.8-1.0 (Hög): Entiteten uppfyller definitionen tydligt och har unika attribut (t.ex. Projekt med namn + deadline + ägare).
+          * <0.3 (Låg/Brus): Entiteten är generisk eller trivial (t.ex. "Mötet", "Fikat", "Teamet" utan namn) eller saknar särskiljande drag.
+        - "context_keywords": Lista 2-4 nyckelord som beskriver entitetens roll/kontext (för deduplicering).
+        - "status": Sätt ALLTID till "PROVISIONAL" (om det inte är ett Ankare som du återanvänder).
+      
+      2. SKAPA RELATIONER:
+        - Identifiera kopplingar mellan noderna.
+        - "confidence": Sätts baserat på hur explicit kopplingen är i texten.
+        - Använd endast relationstyper från schemat.
+      
+      3. ANKARE (Prioritet 1):
+        - Kontrollera alltid listan "KÄNDA ENTITETER" först.
+        - Om texten nämner "Jocke" och listan innehåller en "Jocke" med UUID "123-abc", använd "123-abc" i uuid-fältet.
+      
+      4. NEGATIVA REGLER:
+        - Ignorera generella substantiv ("kaffe", "rum", "idé") som inte är namngivna entiteter.
+        - Skapa ALDRIG noder av typen 'Document' eller 'Source'.
+        - Hitta inte på egna relationstyper.
+      
+      RETURNERA JSON (Exakt format):
+      {{
+        "nodes": [
+          {{ 
+            "name": "Namn", 
+            "uuid": "uuid-från-ankare-eller-null", 
+            "type": "Nodtyp", 
+            "context_keywords": ["ord1", "ord2"], 
+            "status": "PROVISIONAL",
+            "confidence": 0.85
+          }}
+        ],
+        "edges": [
+          {{ "source": "NamnEllerUUID", "target": "NamnEllerUUID", "type": "RELATIONSTYP", "confidence": 0.9 }}
+        ]
+      }}
