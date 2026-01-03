@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-MyMem DocConverter (v10.0 - Unified Architecture)
+MyMem DocConverter (v10.3 - Area C & Semantic Metadata)
 
 Changes:
-- REMOVED specific handlers (Slack/Mail/Doc).
-- IMPLEMENTED 'Unified Pipeline': All data goes through Schema-Driven LLM extraction.
-- Source Type is injected as context to the LLM, not handled by Python logic.
-- Drastically reduced code complexity.
+- ADDED 'generate_semantic_metadata' for Summary/Keywords/AI-Model tracking.
+- REMOVED legacy 'strict_entity_extraction' (non-MCP).
+- UPDATED 'unified_processing_strategy' to return full metadata structure.
+- UPDATED 'processa_dokument' to write Area C compliant frontmatter.
 """
 
 import os
@@ -20,9 +20,13 @@ import re
 import zoneinfo
 import shutil
 import uuid
+import difflib
 import pandas as pd
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Optional
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 # Imports Dependencies
 try:
@@ -119,6 +123,76 @@ def _get_schema_validator():
             raise
     return _SCHEMA_VALIDATOR
 
+# MCP Server Configuration
+VALIDATOR_PARAMS = StdioServerParameters(
+    command=sys.executable,  # Använder samma python-tolk som kör doc_converter
+    args=[os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "agents", "validator_mcp.py"))]
+)
+
+# --- HELPER FUNCTIONS ---
+
+def extract_text(filepath: str, ext: str = None) -> str:
+    """
+    Extraherar råtext från en fil.
+    Exposed för validatorer.
+    """
+    if not ext:
+        ext = os.path.splitext(filepath)[1].lower()
+    else:
+        ext = ext.lower()
+        
+    raw_text = ""
+    try:
+        if ext == '.pdf':
+            with fitz.open(filepath) as doc:
+                for page in doc: raw_text += page.get_text() + "\n"
+        elif ext in ['.txt', '.md', '.json', '.csv']:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f: 
+                raw_text = f.read()
+        elif ext == '.docx':
+            doc = docx.Document(filepath)
+            raw_text = "\n".join([p.text for p in doc.paragraphs])
+    except Exception as e:
+        LOGGER.error(f"Text extraction failed for {filepath}: {e}")
+        return ""
+        
+    return raw_text
+
+# --- 1. SEMANTIC METADATA GENERATOR (NEW) ---
+def generate_semantic_metadata(text: str) -> Dict[str, Any]:
+    """
+    Genererar sammanfattning och nyckelord med en lättviktig modell.
+    Används för vektor-indexering och sökbarhet.
+    """
+    prompt_template = get_prompt('doc_converter', 'doc_summary_prompt')
+    if not prompt_template:
+        LOGGER.warning("Summary prompt saknas i config, returnerar tom metadata")
+        return {"summary": "", "keywords": []}
+    
+    # Klipp texten om den är för lång för summary-modellen
+    safe_text = text[:30000]
+    final_prompt = prompt_template.format(text=safe_text)
+    
+    try:
+        # Använd explicit 'model_lite' från config eller fallback
+        lite_model = CONFIG.get('ai_engine', {}).get('models', {}).get('model_lite', 'gemini-2.0-flash-lite-preview')
+        
+        response = CLIENT.models.generate_content(
+            model=lite_model,
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=final_prompt)])],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        
+        data = parse_llm_json(response.text)
+        return {
+            "summary": data.get("summary", ""),
+            "keywords": data.get("keywords", []),
+            "ai_model": lite_model
+        }
+    except Exception as e:
+        LOGGER.error(f"Semantic Metadata generation failed: {e}")
+        return {"summary": "", "keywords": [], "ai_model": "UNKNOWN_ERROR"}
+
 # --- ENTITY GATEKEEPER ---
 class EntityGatekeeper:
     """Hanterar validering av entiteter mot grafen."""
@@ -151,23 +225,48 @@ class EntityGatekeeper:
                     name = props['name'].strip().lower()
                     if name not in self.indices["Person"]["name"]: self.indices["Person"]["name"][name] = []
                     self.indices["Person"]["name"][name].append(uuid_str)
-            # (Laddar övriga typer här - kortat för tydlighet då logiken är identisk med v9.5)
+            # (Laddar övriga typer här - kortat för tydlighet)
+
+    def _fuzzy_match(self, type_str: str, value: str) -> Optional[str]:
+        """
+        Lättviktig dubblettkontroll med difflib.
+        Returnerar UUID om en stark matchning hittas.
+        """
+        if type_str not in self.indices or "name" not in self.indices[type_str]:
+            return None
+            
+        value_lower = value.lower()
+        candidates = self.indices[type_str]["name"].keys()
+        
+        # Hitta närmaste matchningar (cutoff=0.85 betyder >85% likhet)
+        matches = difflib.get_close_matches(value_lower, candidates, n=1, cutoff=0.85)
+        
+        if matches:
+            matched_name = matches[0]
+            uuids = self.indices[type_str]["name"][matched_name]
+            LOGGER.info(f"Gatekeeper: Fuzzy hit '{value}' ~= '{matched_name}' -> {uuids[0]}")
+            return uuids[0]
+            
+        return None
 
     def resolve_entity(self, type_str: str, value: str, source_system: str, context_props: Dict = None) -> Optional[Dict]:
-        # 1. LINK Check (Cache lookup)
+        # 1. LINK Check (Cache lookup - Exact)
         lookup_key = "name"
         if "@" in value and type_str == "Person": lookup_key = "email"
         
-        # Enkel lookup logik (kortad)
         uuid_hit = None
         if type_str in self.indices and lookup_key in self.indices[type_str]:
             hits = self.indices[type_str][lookup_key].get(value.strip().lower())
             if hits and isinstance(hits, list) and len(hits) == 1: uuid_hit = hits[0]
         
+        # 2. LINK Check (Fuzzy - om ingen exakt träff)
+        if not uuid_hit and lookup_key == "name":
+            uuid_hit = self._fuzzy_match(type_str, value)
+        
         if uuid_hit:
             return {"target_uuid": uuid_hit, "target_type": type_str, "action": "LINK", "confidence": 1.0, "source_text": value}
         
-        # 2. CREATE (Provisional) Logic
+        # 3. CREATE (Provisional) Logic
         # Validera mot schema först
         dummy_props = context_props.copy() if context_props else {}
         dummy_props['status'] = 'PROVISIONAL'
@@ -195,24 +294,98 @@ GATEKEEPER = None
 
 # --- CORE PROCESSING ---
 
-def strict_entity_extraction(text, source_hint="", known_entities_context=""):
+async def _call_mcp_validator(initial_prompt: str, reference_timestamp: str, anchors: dict = None):
+    """Intern asynkron hjälpare för att prata med MCP-servern."""
+    async with stdio_client(VALIDATOR_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            
+            # Vi anropar det nya verktyget i din uppdaterade validator_mcp.py
+            result = await session.call_tool(
+                "extract_and_validate_doc", 
+                arguments={
+                    "initial_prompt": initial_prompt,
+                    "reference_timestamp": reference_timestamp,
+                    "anchors": anchors or {}
+                }
+            )
+            return result.content[0].text if result.content else "{}"
+
+def strict_entity_extraction_mcp(text: str, source_hint: str = ""):
     """
-    Unified Schema-Driven Extraction.
-    Inputs:
-        text: Innehållet som ska analyseras.
-        source_hint: Kontext till LLM (t.ex. "Slack Log", "Email Thread").
+    Ny version som delegerar allt ansvar till MCP-servern.
+    DocConverter bygger prompten (beställningen), MCP utför och validerar.
     """
+    LOGGER.info(f"Förbereder MCP-prompt för {source_hint}...")
+    
+    # 1. Bygg prompten (Återanvänd logik)
     raw_prompt = get_prompt('doc_converter', 'strict_entity_extraction')
     if not raw_prompt: return {"nodes": [], "edges": []}
 
     validator = _get_schema_validator()
     schema = validator.schema
     
-    # 1. Bygg Schema Context
-    node_types_str = "\n".join([f"- {k}: {v.get('description')}" for k, v in schema.get('nodes', {}).items()])
-    edge_types_str = "\n".join([f"- {k}: {v.get('description')}" for k, v in schema.get('edges', {}).items()])
+    # --- SCHEMA CONTEXT ---
+    all_node_types = set(schema.get('nodes', {}).keys())
+    valid_graph_nodes = all_node_types - {'Document', 'Source', 'File'}
+    
+    filtered_nodes = {k: v for k, v in schema.get('nodes', {}).items() if k not in {'Document'}}
+    node_lines = []
+    for k, v in filtered_nodes.items():
+        desc = v.get('description', '')
+        props = v.get('properties', {})
+        
+        # 1. Samla info om egenskaper och enums
+        prop_info = []
+        for prop_name, prop_def in props.items():
+            # Hoppa över systemfält
+            if prop_name in ['id', 'created_at', 'last_synced_at', 'last_seen_at', 'confidence', 'status', 'source_system', 'distinguishing_context', 'uuid', 'version']:
+                continue
+            
+            req_marker = "*" if prop_def.get('required') else ""
+            
+            if 'values' in prop_def:
+                enums = ", ".join(prop_def['values'])
+                prop_info.append(f"{prop_name}{req_marker} [{enums}]")
+            else:
+                p_type = prop_def.get('type', 'string')
+                prop_info.append(f"{prop_name}{req_marker} ({p_type})")
 
-    # 2. Anpassa prompt baserat på Source Hint
+        # 2. Namnregler
+        constraints = []
+        if 'name' in props and props['name'].get('description'):
+             constraints.append(f"Namnregler: {props['name']['description']}")
+        
+        info = f"- {k}: {desc}"
+        if prop_info:
+            info += f" | Egenskaper: {', '.join(prop_info)}"
+        if constraints: 
+            info += f" ({'; '.join(constraints)})"
+            
+        node_lines.append(info)
+    node_types_str = "\n".join(node_lines)
+
+    filtered_edges = {k: v for k, v in schema.get('edges', {}).items() if k != 'MENTIONS'}
+    edge_names = list(filtered_edges.keys())
+    whitelist, blacklist = [], []
+
+    for k, v in filtered_edges.items():
+        desc = v.get('description', '')
+        sources = set(v.get('source_type', []))
+        targets = set(v.get('target_type', []))
+        whitelist.append(f"- {k}: [{', '.join(sources)}] -> [{', '.join(targets)}]  // {desc}")
+        
+        forbidden_sources = valid_graph_nodes - sources
+        forbidden_targets = valid_graph_nodes - targets
+        if forbidden_sources: blacklist.append(f"- {k}: Får ALDRIG starta från [{', '.join(forbidden_sources)}]")
+        if forbidden_targets: blacklist.append(f"- {k}: Får ALDRIG peka på [{', '.join(forbidden_targets)}]")
+
+    edge_types_str = (
+        f"TILLÅTNA RELATIONSNAMN:\n[{', '.join(edge_names)}]\n\n"
+        f"TILLÅTNA KOPPLINGAR (WHITELIST):\n" + "\n".join(whitelist) + "\n\n"
+        f"FÖRBJUDNA KOPPLINGAR (BLACKLIST - AUTO-GENERERAD):\n" + "\n".join(blacklist)
+    )
+
     source_context_instruction = ""
     if "Slack" in source_hint:
         source_context_instruction = "KONTEXT: Detta är en Slack-chatt. Formatet är ofta 'Namn: Meddelande'. Behandla avsändare som starka Person-kandidater. Extrahera relationer baserat på vad de diskuterar."
@@ -220,42 +393,38 @@ def strict_entity_extraction(text, source_hint="", known_entities_context=""):
         source_context_instruction = "KONTEXT: Detta är ett email. Avsändare (From) och mottagare (To) är mycket viktiga Person-noder."
     
     final_prompt = raw_prompt.format(
-        text_chunk=text[:25000], # Chunk size
+        text_chunk=text[:25000], 
         node_types_context=node_types_str,
         edge_types_context=edge_types_str,
-        known_entities_context=source_context_instruction + "\n" + known_entities_context
+        known_entities_context=source_context_instruction
     )
 
     try:
-        response = CLIENT.models.generate_content(
-            model=MODEL_NAME,
-            contents=[types.Content(role="user", parts=[types.Part.from_text(text=final_prompt)])],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-        return parse_llm_json(response.text)
+        reference_timestamp = datetime.datetime.now().isoformat()
+        # TODO: Hämta anchors från Gatekeeper eller known_entities argument
+        anchors = {}
+        response_json = asyncio.run(_call_mcp_validator(final_prompt, reference_timestamp, anchors))
+        return parse_llm_json(response_json)
     except Exception as e:
-        LOGGER.error(f"LLM Extraction failed: {e}")
+        LOGGER.error(f"MCP Extraction failed: {e}")
         return {"nodes": [], "edges": []}
 
-def unified_processing_strategy(text: str, filename: str, source_type: str) -> List[Dict]:
-    # Hämta regler direkt från Schemat (via validatorn)
-    policy = _get_schema_validator().schema.get('processing_policy', {})
+def unified_processing_strategy(text: str, filename: str, source_type: str) -> Dict[str, Any]:
+    # 1. Semantic Metadata (Summary + Keywords + AI Model)
+    semantic_data = generate_semantic_metadata(text)
     
-    # Använd värdena från schemat
-    NOISE_THRESHOLD = policy.get('min_confidence_threshold', 0.3)
-    TRUSTED_FLOOR = policy.get('trusted_source_confidence_floor', 0.8)
-
-    mentions = []
-    
-    # 1. Anropa LLM med käll-kontext
-    data = strict_entity_extraction(text, source_hint=source_type)
-    
+    # 2. Graph Data (MCP Extraction)
+    #data = strict_entity_extraction(text, source_hint=source_type)
+    data = strict_entity_extraction_mcp(text, source_hint=source_type)
     nodes = data.get('nodes', [])
-    edges = data.get('edges', []) # Sparas för senare bruk (Område C)
+    edges = data.get('edges', []) 
     
-    if edges: LOGGER.info(f"Hittade {len(edges)} relationer i {filename}")
+    mentions = []
 
-    # 2. Loopa genom noder och validera mot Gatekeeper
+    # Mappa: Namn -> UUID (för att kunna bygga kanter senare)
+    name_to_uuid = {}
+
+    # 3. Loopa genom noder och validera mot Gatekeeper
     seen_candidates = set()
     for node in nodes:
         name = node.get('name')
@@ -275,20 +444,55 @@ def unified_processing_strategy(text: str, filename: str, source_type: str) -> L
         # Bygg kontext-objekt
         context = {
             "name": name,
-            "status": "PROVISIONAL", # Allt via LLM är provisional tills Dreamer verifierar
+            "status": "PROVISIONAL", 
             "confidence": confidence,
             "distinguishing_context": ctx_keywords
         }
 
-        # Om källan är "Trusted" (t.ex. Slack/Mail), kan vi *höja* confidence, 
-        # men vi låter status vara PROVISIONAL för säkerhets skull så Dreamer får avgöra merge.
+        # Om källan är "Trusted" (t.ex. Slack/Mail), kan vi *höja* confidence
         if source_type in ["Slack Log", "Email Thread"]:
             context['confidence'] = max(confidence, 0.8)
 
+        # GATEKEEPER RESOLUTION (Inklusive Fuzzy)
         result = GATEKEEPER.resolve_entity(type_str, name, "DocConverter", context)
-        if result: mentions.append(result)
+        
+        if result:
+            target_uuid = result.get('target_uuid')
+            if target_uuid:
+                name_to_uuid[name] = target_uuid # Spara mapping för edges
+                
+                # Lägg till label för tydlighet i loggar/graf
+                result['label'] = name
+                mentions.append(result)
 
-    return mentions
+    # 4. Hantera RELATIONER (Area C Requirement)
+    # Vi kan bara skapa relationer om BÅDA noderna blev resolveade (fick ett UUID)
+    for edge in edges:
+        source_name = edge.get('source')
+        target_name = edge.get('target')
+        rel_type = edge.get('type')
+        rel_conf = edge.get('confidence', 0.5)
+        
+        if source_name in name_to_uuid and target_name in name_to_uuid:
+            source_uuid = name_to_uuid[source_name]
+            target_uuid = name_to_uuid[target_name]
+            
+            # Lägg till relationen som en "mention" av typen RELATION
+            # Detta signalerar till GraphBuilder att skapa en kant
+            mentions.append({
+                "action": "CREATE_EDGE",
+                "source_uuid": source_uuid,
+                "target_uuid": target_uuid,
+                "edge_type": rel_type,
+                "confidence": rel_conf,
+                "source_text": f"{source_name} -> {target_name}"
+            })
+
+    # Returnera BÅDE mentions och semantic data
+    return {
+        "validated_mentions": mentions, 
+        "semantic_metadata": semantic_data
+    }
 
 # --- MAIN PROCESS ---
 
@@ -307,38 +511,41 @@ def processa_dokument(filväg: str, filnamn: str):
 
     LOGGER.debug(f"⚙️ Bearbetar: {filnamn}")
     try:
-        raw_text = ""
-        # Enkel text-extraktion (kunde ligga i helper, men kort här)
-        try:
-            ext = os.path.splitext(filnamn)[1].lower()
-            if ext == '.pdf':
-                with fitz.open(filväg) as doc:
-                    for page in doc: raw_text += page.get_text() + "\n"
-            elif ext in ['.txt', '.md', '.json', '.csv']:
-                with open(filväg, 'r', encoding='utf-8', errors='ignore') as f: raw_text = f.read()
-            # ... (Fler format vid behov)
-        except Exception: raw_text = ""
+        # Använd den utbrutna funktionen extract_text
+        raw_text = extract_text(filväg)
 
-        if not raw_text or len(raw_text) < 10: return
+        # --- FIX: Kontrollera och släpp låset OMEDELBART ---
+        if not raw_text or len(raw_text) < 10: 
+            # VIKTIGT: Om filen är tom (under skrivning), släpp låset så vi kan försöka igen vid on_modified
+            LOGGER.debug(f"Filen {filnamn} verkar ofullständig ({len(raw_text) if raw_text else 0} tecken). Väntar på on_modified.")
+            with PROCESS_LOCK:
+                PROCESSED_FILES.discard(filnamn)
+            return
+        # ----------------------------------------------------
 
         # --- UNIFIED PIPELINE SWITCH ---
-        # Här bestämmer vi bara VAD det är, inte HUR det processas.
         source_type = "Document"
         if "slack" in filväg.lower(): source_type = "Slack Log"
         elif "mail" in filväg.lower(): source_type = "Email Thread"
         elif "calendar" in filväg.lower(): source_type = "Calendar Event"
 
         # Ett enda anrop!
-        validated_mentions = unified_processing_strategy(raw_text, filnamn, source_type)
+        full_result = unified_processing_strategy(raw_text, filnamn, source_type)
+        
+        validated_mentions = full_result.get("validated_mentions", [])
+        semantic_metadata = full_result.get("semantic_metadata", {})
 
-        # Spara
+        # Spara (Area C compliant structure)
         frontmatter = {
             "unit_id": unit_id,
             "source_ref": lake_file,
             "original_filename": filnamn,
             "timestamp_created": datetime.datetime.now().isoformat(),
+            "summary": semantic_metadata.get("summary", ""),
+            "keywords": semantic_metadata.get("keywords", []),
             "graph_context_status": "pending_validation",
             "source_type": source_type,
+            "ai_model": semantic_metadata.get("ai_model", "unknown"),
             "validated_mentions": validated_mentions
         }
         
@@ -350,16 +557,31 @@ def processa_dokument(filväg: str, filnamn: str):
 
     except Exception as e:
         LOGGER.error(f"FAIL {filnamn}: {e}")
+        # Säkerhetsåtgärd: Släpp låset även vid krasch så vi inte fastnar för alltid
+        with PROCESS_LOCK:
+            PROCESSED_FILES.discard(filnamn)
 
 # --- INIT & WATCHDOG (Kortad för översikt, samma som förr) ---
 if __name__ == "__main__":
     GATEKEEPER = EntityGatekeeper()
     os.makedirs(LAKE_STORE, exist_ok=True)
-    print(f"DocConverter (v10.0 - Unified) online.")
+    print(f"DocConverter (v10.3 - Area C & Semantic) online.")
     
-    # Kör initial scan + watchdog som vanligt...
-    # (Koden här är identisk med boilerplate för watchdog)
-    folders = [CONFIG['paths']['asset_documents'], CONFIG['paths']['asset_slack'], CONFIG.get('paths', {}).get('asset_mail')]
+    # ... (Resten av main-blocket är oförändrat) ...
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+
+    class DocHandler(FileSystemEventHandler):
+        def on_created(self, event):
+            if event.is_directory: return
+            processa_dokument(event.src_path, os.path.basename(event.src_path))
+
+    folders = [
+        CONFIG['paths']['asset_documents'], 
+        CONFIG['paths']['asset_slack'], 
+        CONFIG.get('paths', {}).get('asset_mail'),
+        CONFIG['paths']['asset_transcripts']
+    ]
     
     with ThreadPoolExecutor(max_workers=5) as executor:
         for folder in folders:

@@ -19,7 +19,7 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
 
 * **LÖST-1 till LÖST-10:** (Se tidigare koncept-dokumentation).
 * **LÖST-11:** Implementera **Centraliserad Loggning**.
-* **LÖST-12:** Implementera **Robust Transformator** (Pivot till `pymupdf`/`python-docx`).
+* **LÖST-12:** Implementera **Robust Transformator** (Pivot till `pypdf`/`python-docx`).
 * **LÖST-13:** Funktionellt verifiera **Desktop-agentens** Insamlar-flöde (fil-dump).
 * **LÖST-14:** Implementera **Konfigurationsdrivna Sökvägar**.
 * **LÖST-15:** Implementera **Metadata-berikning ("Enricher")** i Desktop-agenten med Google GenAI.
@@ -39,9 +39,8 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
 
 * **LÖST-28:** Implementera **Chat Refresh** (Realtime Memory).
     * *Lösning:* Chatten initierar nu nya DB-anslutningar vid varje sökning för att se nydata direkt.
-* **LÖST-31:** Integrera **Graf** i Chatten (Hybrid Search).
+* **LÖST-31:** Integrera **Kùzu (Graf)** i Chatten (Hybrid Search).
     * *Lösning:* Chatten använder `taxonomy.json` för att identifiera Masternoder och hämtar exakta relationer.
-    * *Not:* Ursprungligen med KuzuDB, migrerat till DuckDB i LÖST-54.
 * **LÖST-4:** Implementera **Konsoliderings-modulen** (Taxonomi).
     * *Lösning:* En separat `Graph Builder`-agent (konsolidering) städar inkommande data mot en strikt OTS-modell.
 * **LÖST-34:** Implementera **Split Indexing**.
@@ -56,124 +55,144 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
 * **LÖST-39:** Implementera **YAML-baserade Prompter**.
     * *Lösning:* `chat_prompts.yaml` skapad och integrerad.
 
-* **LÖST-54:** The DuckDB Pivot.
-    * *Problem:* KuzuDB (C++ inbäddad grafdatabas) kraschade vid parametriserade queries i komplexa WHERE-satser (`KU_UNREACHABLE` assertion failures).
-    * *Lösning:* Migrerade från KuzuDB till DuckDB med relationell graf-modell (`nodes`/`edges`-tabeller).
-    * *Ny arkitektur:* `services/graph_service.py` med `GraphStore`-klass som hanterar all graf-logik via SQL.
-    * *Bonus:* Entity Resolution (OBJEKT-44) och Entitet-separation (OBJEKT-51) löses naturligt genom den nya strukturen med `aliases`-kolumn i `nodes`-tabellen.
-
-* **LÖST-55:** Pipeline v8.2 "Pivot or Persevere".
-    * *Ursprung:* OBJEKT-46 (Pipeline v6.0 Refaktorering).
-    * *Implementation:* Gick längre än v6.0 - implementerade v8.2 med:
-        - **IntentRouter** (v7.0): Skapar Mission Goal, parsar tid, extraherar keywords/entities
-        - **ContextBuilder** (v7.5): Time-Aware Reranking, parallel Lake+Vektor-sökning
-        - **Planner** (v8.2): ReAct-loop med "Tornet" (rolling hypothesis) + "Bevisen" (facts)
-        - **SessionEngine** (NY): Orchestrator som hanterar session state + Pivot or Persevere
-        - **Synthesizer**: Genererar svar från Planner-rapport
-    * *Nyckelkoncept:*
-        - "Tornet": Iterativt byggd arbetshypotes (current_synthesis)
-        - "Bevisen": Append-only faktalista (facts)
-        - "Pivot or Persevere": SessionEngine skickar befintligt Torn+Facts till ny fråga
-        - "Librarian Loop": Two-stage retrieval med scan + deep read
-    * *Filer:* `session_engine.py`, `planner.py`, `context_builder.py`, `intent_router.py`
-
-* **LÖST-56:** DateService (Central Datumhantering).
-    * *Ursprung:* OBJEKT-50.
-    * *Lösning:* `services/utils/date_service.py` med prioriterad extraktionskedja:
-        1. Frontmatter (timestamp_created) - mest pålitligt
-        2. Slack-filnamn (Slack_kanal_2025-12-11_uuid.txt)
-        3. PDF-metadata (CreationDate)
-        4. Filsystem (birthtime → mtime fallback)
-    * *HARDFAIL:* Om inget datum kan extraheras.
-
-* **LÖST-57:** Summary-First Search.
-    * *Ursprung:* OBJEKT-43 (Prestanda).
-    * *Lösning:* Implementerat i ContextBuilder v7.5:
-        - `TOP_N_FULLTEXT = 3`: Endast topp 3 dokument får fulltext
-        - Time-Aware Reranking: `hybrid_score = original_score * (1 + time_boost)`
-        - Relevance Gate: Dokument under threshold får ingen boost
-    * *Effekt:* Dramatiskt minskad kontextbelastning till LLM.
-
-* **STÄNGD-58:** Canonical Entity-kvalitet.
-    * *Ursprung:* OBJEKT-52.
-    * *Anledning:* Löst via GraphStore (LÖST-54) med:
-        - `aliases`-kolumn i nodes-tabellen
-        - `upgrade_canonical()` för att byta canonical
-        - `find_nodes_by_alias()` för uppslagning
-    * *Kvarstående:* Inlärning från sessioner (del av OBJEKT-44).
-
-* **STÄNGD-59:** Kurerad Entity-session.
-    * *Ursprung:* OBJEKT-53.
-    * *Anledning:* Kan implementeras ovanpå SessionEngine. Slås ihop med OBJEKT-44/48.
-
-* **LÖST-60:** JSON-parser robusthet (2025-12-16).
-    * *Problem:* Greedy regex `(\{[\s\S]*\})` matchade från första `{` till sista `}`, vilket inkluderade text före JSON.
-    * *Lösning:* Ersatt med `json.JSONDecoder().raw_decode()` som hittar sista giltiga JSON-objekt.
-    * *Fil:* `services/utils/json_parser.py`
-
-* **LÖST-61:** Librarian ID-matchning (2025-12-16).
-    * *Problem:* `_format_candidate_for_scan()` trunkerade ID:n till 12 tecken, men matchning gjordes mot fulla ID:n → alltid 0 behållna.
-    * *Lösning:* Tog bort `[:12]` trunkering.
-    * *Fil:* `services/planner.py`
-
-* **LÖST-62:** Keyword-splittning (2025-12-16).
-    * *Problem:* IntentRouter returnerade ibland sammansatta keywords (`"Adda PoC"` som ett ord) som Lake-sökning inte hittade.
-    * *Lösning:* `_search_lake()` splittar nu keywords på mellanslag innan sökning.
-    * *Fil:* `services/context_builder.py`
-
-* **LÖST-63:** Chattkommandon /show och /export (2025-12-16).
-    * *Funktion:* `/show` visar filnamn (utan UUID) från senaste sökningen. `/export` skapar symlinks för top 10 (på score) till hotfolder.
-    * *Filer:* `services/my_mem_chat.py`, `services/utils/export_search.py`
-
 ## Öppna Objekt (Nästa Fas)
 
-* **OBJEKT-41 (Prio 1 - UTVÄRDERA):** Verifiera **"Aggregerad Insikt"** i Pipeline v8.2.
-    * *Ursprungligt problem:* Chatten fungerar som arkiv (returnerar data) istället för minne (ger insikt).
-    * *Status:* Planner v8.2 bygger nu "Tornet" (rolling hypothesis) iterativt.
-    * *Fråga:* Ger detta faktiskt "insikt" eller bara bättre sammanfattning?
-    * *Nästa steg:* Kör simulering och utvärdera om Tornet ger mervärde.
-    * *Framgångskriterium:* Svaret ska innehålla minst EN insikt som användaren INTE kunde få genom att läsa källdokumentet direkt.
+* **OBJEKT-46 (Prio 0 - ARKITEKTUR):** Implementera **Pipeline v6.0** (Refaktorering).
+    * *Beslut:* 2025-12-03 – Överenskommelse om ny sök-pipeline.
+    * *Nuvarande (v5.2):* Planering → Jägaren + Vektorn → Domaren → Syntes (3 AI-anrop, otydlig SOC)
+    * *Ny pipeline (v6.0):*
+        ```
+        Input → IntentRouter → ContextBuilder → Planner → Synthesizer → Output
+                    (AI)           (Kod)         (AI)        (AI)
+                Klassificera     Hämta data   Bygg rapport   Svara
+        ```
+    * *Komponenter:*
+        1. **IntentRouter** (`services/intent_router.py`) - AI (Flash Lite)
+            - Klassificera intent: `FACT` (specifik data) vs `INSPIRATION` (idéer)
+            - Bestäm strategi: `STRICT` (bara Jägaren) vs `RELAXED` (båda parallellt)
+            - Parsa tidsreferenser ("igår" → absolut datum)
+            - Upplös kontext från historik ("det projektet" → "Adda PoC")
+        2. **ContextBuilder** (`services/context_builder.py`) - **Kod (Python)**
+            - Deterministisk informationshämtning
+            - `STRICT`: Endast `search_lake` (nyckelord)
+            - `RELAXED`: `search_lake` + `vector_db` parallellt
+            - Ingen AI – snabbt, förutsägbart, debuggbart
+        3. **Planner** (`services/planner.py`) - AI (Flash Lite)
+            - Tar kandidater från ContextBuilder
+            - Skapar en kurerad **rapport** (kondenserad, relevant information)
+            - Synthesizer får rapporten – INTE råa dokument
+        4. **Synthesizer** (befintlig) - AI (Pro)
+            - Genererar svar baserat på rapporten
+            - Framtid: Kan begära ny rapport om resultatet är svagt
+    * *Principer:*
+        - **Tydlig SOC:** Varje komponent har ETT ansvar
+        - **HARDFAIL:** Varje steg rapporterar explicit om det misslyckas
+        - **Rapport > Dokument:** Synthesizer får aldrig rådata
+    * *Framgångskriterium:* Samma eller bättre kvalitet på svar, men tydligare flöde och debuggbarhet.
+    * *Implementationsordning:*
+        1. IntentRouter (med temporal parsing)
+        2. ContextBuilder (ersätter nuvarande sök-logik)
+        3. Planner (ersätter Domaren, skapar rapport)
+        4. Integration i `my_mem_chat.py`
+    * *Framtid (v7.0):* Agentic loop där Planner kan iterera vid svagt resultat.
 
-* **OBJEKT-42 (Prio 0.5 - DELVIS LÖST):** Komplettera **"Temporal Intelligence"**.
-    * *Ursprungligt problem:* Systemet förstår inte relativa tidsreferenser ("igår", "förra veckan").
-    * *Vad som är löst:*
-        - ✅ IntentRouter (v7.0) parsar tidsreferenser och returnerar `time_filter`
-        - ✅ DateService (LÖST-56) ger pålitlig datumextraktion
-        - ✅ Time-Aware Reranking boostar nyare dokument (LÖST-57)
-    * *Vad som saknas:*
-        - ❌ ContextBuilder använder inte `time_filter` för filtrering
-        - ❌ Strikt filtrering på tidsintervall
-    * *Nästa steg:* Implementera `time_filter` i `build_context()` för att filtrera kandidater.
+* **OBJEKT-41 (Prio 0 - KRITISK):** Implementera **"Aggregerad Insikt"** ("The Inverted T").
+    * *Problem:* Chatten fungerar som arkiv (returnerar data) istället för minne (ger insikt).
+    * *Mål:* Synthesizern ska ge **mervärde** genom att koppla ihop information från olika kontexter.
+    * *Krav:*
+        1. Ny synthesizer-prompt: "Användaren VAR DÄR. Ge inte data – ge insikt."
+        2. Aktivt leta efter *relaterad* information som förstärker/kontrasterar frågan.
+        3. Temporal koppling: "Du sa X innan Y, vilket indikerar Z."
+        4. Graf-integration: Utnyttja relationer mellan entiteter för att hitta kopplingar.
+    * *Framgångskriterium:* Svaret ska innehålla minst EN insikt som användaren INTE kunde få genom att läsa källdokumentet direkt.
+    * *Se:* Konflikt 41 i `my_mem_koncept_logg.md`
+
+* **OBJEKT-42 (Prio 0 - KRITISK):** Implementera **"Temporal Intelligence"**.
+    * *Problem:* Systemet förstår inte relativa tidsreferenser ("igår", "förra veckan", "nyligen"). Det tolkar dem bokstavligt eller ignorerar dem helt.
+    * *Bevis (Simulering 2025-12-03):*
+        - "Inköpslänken Scoping": Användaren sa "igår" men systemet svarade om möte från 25 november.
+        - "Beläggning Q1 2026": Systemet motsade sig själv om tidsperioder mellan frågor.
+        - Flera uppgifter fick kommentaren "det var ju förra veckan!"
+    * *Mål:* Chatten ska konvertera relativa tidsuttryck till absoluta datum och prioritera dokument nära den tidsperioden.
+    * *Implementation:*
+        1. **Query Enrichment:** Planerings-steget extraherar tidsreferenser och beräknar absoluta datum.
+        2. **Temporal Filter:** Jägaren/Vektorn prioriterar dokument med `timestamp_created` inom relevant intervall.
+        3. **Context Injection:** Syntesen får explicit kontext om "frågedatum" och "relevant tidsperiod".
     * *Framgångskriterium:* "Vad hände igår?" returnerar BARA dokument från gårdagen.
 
-* **OBJEKT-44 (Prio 1 - DELVIS LÖST):** Komplettera **"Entity Resolution & Alias Learning"**.
-    * *Ursprungligt problem:* Transkribering skapar felstavade namn ("Sänk" istället för "Cenk Bisgen").
-    * *Vad som är löst:*
-        - ✅ GraphStore har `aliases`-kolumn i nodes-tabellen
-        - ✅ `find_nodes_by_alias()` för uppslagning
-        - ✅ `find_nodes_fuzzy()` för fuzzy-matchning
-        - ✅ `upgrade_canonical()` för att byta canonical
-        - ✅ ContextBuilder använder `get_graph_context_for_search()` för alias-kontext
-    * *Vad som saknas:*
-        - ❌ Automatisk inlärning från sessioner (OBJEKT-48)
-        - ❌ LLM-baserad alias-bedömning vid dokumentprocessning
-    * *Princip:* Assets orörda, Lake stabil, **Graf lär sig över tid**.
-    * *Koppling:* Del av OBJEKT-48 – lärdomar extraheras från sessioner som dokument.
-
-* **OBJEKT-45 (Prio 1 - DELVIS LÖST):** Komplettera **"Levande Metadata vid Insamling"**.
-    * *Ursprungligt problem:* DocConverter och Transcriber "jobbar i mörkret" – ingen kännedom om entiteter.
-    * *Vad som är löst:*
-        - ✅ ContextBuilder hämtar graf-kontext via `get_graph_context_for_search()`
-        - ✅ GraphStore har API för att hämta kända entiteter och aliases
-    * *Vad som saknas:*
-        - ❌ Context Injection i DocConverter-prompts
-        - ❌ Context Injection i Transcriber-prompts
-        - ❌ Rikare extraktion (dates_mentioned, actions, deadlines)
+* **OBJEKT-43 (Prio 0.5 - Prestanda):** Implementera **"Summary-First Search"**.
+    * *Problem:* Systemet skickar hela dokument till Domaren och Syntesen, vilket skapar lång svarstid.
+    * *Bevis (Simulering 2025-12-03):*
+        - Snitttid per runda: **50.6 sekunder**
+        - Max tid: **130 sekunder** (en enda fråga!)
+        - Syntesen (MODEL_PRO + 100k tecken) står för **~70% av tiden**
+        - `MAX_CHARS = 100000` i `my_mem_chat.py` rad 366
+    * *Insikt:* Varje Lake-dokument har redan en AI-genererad `summary` i YAML-headern (~200 tecken).
+    * *Mål:* Minska kontextbelastning genom att använda sammanfattningar strategiskt.
     * *Implementation:*
-        1. Lägg till `get_known_entities()` i GraphStore
-        2. Injicera kända entiteter i DocConverter/Transcriber-prompts
-        3. Uppdatera prompts för rikare extraktion
-    * *Koppling:* Del av OBJEKT-48 ("Dreaming").
+        1. **Jägaren**: Sök i `keywords` + `entities` (redan metadata).
+        2. **Domaren**: Bedöm relevans baserat på `summary` istället för fulltext.
+        3. **Syntesen**: Läs fulltext BARA för de 2-3 dokument som faktiskt behövs.
+        4. **Sänk MAX_CHARS** från 100k till 30k som första steg.
+    * *Förväntad effekt:* ~70% mindre kontext till AI, ~60% snabbare svar.
+
+* **OBJEKT-44 (Prio 1 - Lärande):** Implementera **"Entity Resolution & Alias Learning"**.
+    * *Problem:* Transkribering skapar felstavade namn ("Sänk" istället för "Cenk Bisgen"). Systemet kan inte koppla ihop varianter.
+    * *Insikt:* Med aggregerad data från flera dokument kan systemet lära sig att "Sänk" = "Cenk Bisgen".
+    * *Princip:* Assets orörda, Lake stabil, **Graf lär sig över tid**.
+    * *Nyckelkoncept – Flytande Canonical:*
+        - **Canonical är inte statisk** – den är "bästa kunskapen just nu"
+        - Systemet kan börja med "Jocke" → lära sig "Joakim" → uppgradera till "Joakim Ekman"
+        - **Swap-mekanism:** Nya canonical blir `id`, gamla `id` flyttas till `aliases[]`
+        - Inget extra internt ID behövs – canonical *är* id, men kan bytas
+    * *Implementation:*
+        1. **Entity-tabell i Graf:** `id` (canonical), `type`, `aliases[]`
+        2. **Sök-tid:** Slå upp aliases och sök efter ALLA varianter
+        3. **Lärdom via sessioner:** Se OBJEKT-48 – sessioner extraherar alias-kopplingar
+        4. **LLM bedömer trovärdighet:** Ingen hårdkodad källranking – LLM resonerar i lärdomsögonblicket
+    * *Exempel (swap):*
+        ```
+        Före:  id="Jocke", aliases=["Joakim"]
+        Efter: id="Joakim Ekman", aliases=["Jocke", "Joakim"]
+        ```
+    * *Koppling:* Del av OBJEKT-48 – lärdomar extraheras från sessioner som dokument.
+    * *Se:* Konflikt 42 i `my_mem_koncept_logg.md`
+
+* **OBJEKT-45 (Prio 1 - Insamling):** Implementera **"Levande Metadata vid Insamling"**.
+    * *Problem:* DocConverter och Transcriber "jobbar i mörkret" – de har ingen kännedom om existerande entiteter.
+    * *Bevis (Kodanalys 2025-12-03):*
+        - DocConverter laddar taxonomin men använder den BARA för validering av `graph_master_node`.
+        - Transcriber har INGEN kontakt med taxonomi eller graf.
+        - Båda gissar entiteter fritt → skapar inkonsekvent metadata ("Sänk" vs "Cenk Bisgen").
+        - Summary/keywords saknar specifik fakta (datum, deadlines, aktiviteter).
+    * *Mål:* Ge insamlingsagenterna kontext OCH extrahera rikare metadata.
+    * *Implementation (två delar):*
+        **A. Context Injection:**
+        1. Graf-lookup vid start: Hämta kända personer, projekt och aliases från KùzuDB.
+        2. Context Injection i prompts: Ge AI-modellen en lista på kända entiteter.
+        3. Namn-normalisering: Om transkribering gissar "Sänk", matcha mot känd alias.
+        **B. Rikare Extraktion:**
+        4. Uppdatera prompts för att extrahera: `dates_mentioned`, `actions`, `deadlines`.
+        5. Spara dessa i YAML front matter för Lake-dokument.
+    * *Exempel (Context Injection):*
+        ```python
+        context = {
+            "known_persons": ["Joakim Ekman", "Cenk Bisgen"],
+            "known_aliases": {"Sänk": "Cenk Bisgen"},
+            "active_projects": ["Adda PoC", "MyMemory"]
+        }
+        ```
+    * *Exempel (Rikare Extraktion):*
+        ```yaml
+        dates_mentioned: ["2025-12-10", "2026-01-15"]
+        actions: ["Användartester med kunder"]
+        deadlines:
+          - what: "Användartester"
+            when: "2025-12-10"
+        ```
+    * *Förväntad effekt:* Planner hittar relevant fakta via summaries. Mindre missad information.
+    * *Koppling:* Del av OBJEKT-48 ("Dreaming") – "Drömmen" förbättrar vad som extraheras.
+    * *Se:* Konflikt 44 i `my_mem_koncept_logg.md`
 
 * **OBJEKT-47 (Prio 1.5 - DEADLINE):** Migrera till **gemini-embedding-001**.
     * *Notifiering:* Google meddelade 2025-12-03 att `text-embedding-004` fasas ut.
@@ -222,70 +241,74 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
     * *Framgångskriterium:* Systemet lär sig alias-kopplingar från sessioner utan manuell input.
     * *Se:* Konflikt 46 i `my_mem_koncept_logg.md`
 
-* **OBJEKT-49 (Prio 2 - DELVIS LÖST):** Komplettera **"MyMemory Engine"** (API-separation).
-    * *Ursprungligt problem:* `my_mem_chat.py` blandar CLI med logik.
-    * *Vad som är löst:*
-        - ✅ SessionEngine finns som orchestrator (`session_engine.py`)
-        - ✅ `run_query()` hanterar hela pipelinen
-        - ✅ Session state (chat_history, planner_state) hanteras centralt
-    * *Vad som saknas:*
-        - ❌ `my_mem_chat.py` är fortfarande inte refaktorerad till tunn klient
-        - ❌ HTTP/WebSocket-API för mobilapp/web
-    * *Nästa steg:*
-        1. Refaktorera `my_mem_chat.py` att endast använda SessionEngine
-        2. (Framtid) Exponera via FastAPI
-
-* **OBJEKT-51 (Prio 1.5 - DELVIS LÖST):** Separera **Entiteter från Taxonomi**.
-    * *Ursprungligt problem:* Taxonomin innehåller 259 individer som borde vara i Grafen.
-    * *Vad som är löst:*
-        - ✅ GraphStore har Entity-noder med aliases
-        - ✅ Infrastruktur för entitet-lagring i Graf finns
-    * *Vad som saknas:*
-        - ❌ Taxonomin är inte städad (259 individer kvar)
-        - ❌ Dreamer/GraphBuilder konsoliderar fortfarande delvis till taxonomi
-    * *Princip:* Taxonomin ska ENDAST innehålla kategorier, INTE individnamn.
-    * *Nästa steg:*
-        1. Migrera Person/Aktör/Projekt `sub_nodes` till Graf
-        2. Rensa taxonomin
-        3. Uppdatera Dreamer att konsolidera entiteter till Graf
-    * *Framgångskriterium:* Taxonomin har 0 individnamn.
-
-* **OBJEKT-54 (Prio 1 - VISION):** Implementera **K som Portabel Kontext**.
-    * *Insikt (2025-12-16):* MyMem är ett "Context Assembly Tool" – det bygger K, inte bara svarar.
-    * *K innehåller:*
-        - Tornet (current_synthesis): Arbetshypotes
-        - Bevisen (facts): Extraherade fakta
-        - Kandidater: Pekare till dokument
-    * *Mål:*
-        1. `/export-context` – Exportera K som Markdown-artefakt
-        2. K kan tas till valfritt AI-verktyg (Gemini, Claude, ChatGPT...)
-    * *Format:*
-        ```markdown
-        # Kontext: [Intent]
-        ## Tornet (Arbetshypotes)
-        ## Bevisen (Fakta)
-        ## Källor
+* **OBJEKT-49 (Prio 1 - ARKITEKTUR):** Implementera **"MyMemory Engine"** (API-separation).
+    * *Problem:* `my_mem_chat.py` blandar CLI (presentation) med logik (orchestration) och session-hantering.
+    * *Konsekvens:* Omöjligt att återanvända logiken för mobilapp eller web-klient.
+    * *Nuvarande:*
         ```
-    * *Se:* Konflikt 48-49 i `my_mem_koncept_logg.md`
+        my_mem_chat.py
+        ├── CLI (print, input, rich)
+        ├── Orchestration (process_query, execute_pipeline_v6)
+        └── Session-hantering (start_session, end_session)
+        ```
+    * *Mål:* Skiktad arkitektur där klienter (CLI, Mobile, Web) pratar med en central Engine.
+    * *Ny arkitektur:*
+        ```
+        ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+        │   CLI        │    │  Mobile App  │    │  Web App     │
+        └──────┬───────┘    └──────┬───────┘    └──────┬───────┘
+               └───────────────────┼───────────────────┘
+                                   │ HTTP/WebSocket
+                                   ▼
+                      ┌────────────────────────┐
+                      │   MyMemory Engine      │  ← services/engine.py
+                      │   - query(input)       │
+                      │   - save_session()     │
+                      │   - dream()            │
+                      └────────────────────────┘
+        ```
+    * *Princip:* **Session-sparning sker på servern**, inte i klienten.
+    * *Implementation:*
+        1. Skapa `services/engine.py` med `MyMemEngine`-klass
+        2. Flytta `process_query()`, `execute_pipeline_v6()` till Engine
+        3. Refaktorera `my_mem_chat.py` till tunn CLI-klient
+        4. Exponera Engine via HTTP (FastAPI) för mobilapp/web
+    * *Koppling:*
+        - OBJEKT-48: Dreaming körs i Engine, inte klient
+        - OBJEKT-44: Entity Resolution sker server-side
+    * *Framgångskriterium:* CLI-klienten importerar endast `MyMemEngine` och gör `engine.query()`.
 
-* **OBJEKT-55 (Prio 2 - VISION):** Implementera **Multi-Agent Planner**.
-    * *Insikt (2025-12-16):* Domän-specialiserade agenter är överlägsen plats-specialisering.
-    * *Agenter:*
-        | Agent | Domän | Extraherar |
-        |-------|-------|------------|
-        | Kronologen | Tid & Händelser | Timeline |
-        | Projektledaren | Actions & Beslut | Tasks + owners |
-        | Ekonomen | Siffror & Budget | Numeriska fakta |
-        | Relationisten | Personer & Org | Entiteter |
-        | Strategen | Varför & Vart | Övergripande kontext |
-    * *Arkitektur:*
-        - Planner analyserar I → Aktiverar relevanta agenter
-        - Agenter gräver parallellt i MD
-        - Koordinerar bitar till K
-        - Bygger våning av Tornet
-        - Analyserar gaps → Ny iteration
-    * *Status:* Vision – nuvarande Planner är single-agent.
-    * *Se:* Konflikt 50 i `my_mem_koncept_logg.md`
+* **OBJEKT-50 (Prio 1 - INFRASTRUKTUR):** Implementera **"DateService"** (Central Datumhantering).
+    * *Problem:* Datumlogik är spridd och inkonsekvent över systemet.
+    * *Bevis (2025-12-11):*
+        - `tool_staged_rebuild.py` använder `birthtime` → `mtime` fallback
+        - `my_mem_transcriber.py` har egen datumlogik
+        - Slack-filer har datum i filnamn men det används inte
+        - Filer kopierade via retriever får korrupt `birthtime` (1984-01-24)
+        - `mtime` kan också vara missvisande (reflekterar synk, inte skapelse)
+    * *Konsekvens:* Rebuild-kronologi blir fel, tidsbaserad sökning opålitlig.
+    * *Mål:* En central tjänst som alla agenter använder för datumextraktion.
+    * *Implementation:*
+        ```python
+        class DateService:
+            def get_date(filepath: str) -> str:
+                """
+                Prioritet:
+                1. Frontmatter (document_date) - mest pålitligt
+                2. Filnamn (Slack_*_2025-12-05_*.txt) - pålitligt för Slack
+                3. Filsystem (mtime med validering) - fallback
+                4. HARDFAIL om inget fungerar
+                """
+        ```
+    * *Utökningsmöjligheter:*
+        - PDF-metadata (CreationDate)
+        - EXIF för bilder
+        - Office-dokument (Properties)
+    * *Princip:* Explicit loggning av vilken källa som användes.
+    * *Framgångskriterium:* Alla agenter anropar `DateService.get_date()` istället för egen logik.
+    * *Koppling:*
+        - OBJEKT-42: Temporal Intelligence bygger på korrekta datum
+        - OBJEKT-46: Pipeline v6 behöver pålitlig kronologi
 
 * **OBJEKT-32 (Prio 2):** Implementera **"Quick Save"** (Read/Write) i Chatten.
     * *Mål:* Möjlighet att spara text/tankar direkt till `Assets` inifrån chatten ("Kom ihåg att...").

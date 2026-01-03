@@ -15,6 +15,9 @@ pandas              # För att läsa CSV/Excel strukturerat
 openpyxl            # Motor för att läsa .xlsx-filer
 tabulate            # Krävs för df.to_markdown()
 
+# Validering & Schema
+pydantic>=2.0       # Datavalidering och scheman (v2 för prestanda)
+
 # AI & API
 google-genai
 

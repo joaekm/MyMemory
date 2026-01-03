@@ -9,7 +9,7 @@ import shutil
 import threading
 import re
 import zoneinfo
-import glob # NYTT: För att hitta kalenderfiler
+import glob
 
 # Lägg till projektroten i sys.path för att hitta services-paketet
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -26,11 +26,7 @@ except ImportError:
     exit(1)
 
 from services.utils.date_service import get_timestamp
-from services.indexers.graph_builder import (
-    get_all_entities as get_known_entities,
-    get_canonical_from_graph as get_canonical,
-    add_entity_alias,
-)
+from services.utils.graph_service import GraphStore
 
 # --- CONFIG LOADER ---
 def ladda_yaml(filnamn, strict=True):
@@ -64,8 +60,8 @@ try:
     RECORDINGS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_recordings'])
     TRANSCRIPTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_transcripts'])
     FAILED_FOLDER = os.path.expanduser(CONFIG['paths']['asset_failed'])
-    # NYTT: Behöver veta var kalendern ligger
     CALENDAR_FOLDER = os.path.expanduser(CONFIG['paths'].get('asset_calendar', '~/MyMemory/Assets/Calendar'))
+    GRAPH_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
     LOG_FILE = os.path.expanduser(CONFIG['logging']['log_file_path'])
 except KeyError as e:
     print(f"[CRITICAL] Konfigurationsfel: {e}")
@@ -79,7 +75,6 @@ os.makedirs(FAILED_FOLDER, exist_ok=True)
 API_KEY = CONFIG.get('ai_engine', {}).get('api_key', '')
 MEDIA_EXTENSIONS = CONFIG.get('processing', {}).get('audio_extensions', []) 
 MODELS = CONFIG.get('ai_engine', {}).get('models', {})
-TARGET_MODEL = MODELS.get(CONFIG.get('ai_engine', {}).get('tasks', {}).get('transcription'))
 
 MAX_WORKERS = 5 
 EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
@@ -99,8 +94,6 @@ LOGGER.addHandler(_console)
 # Silence external loggers
 logging.getLogger("google").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # --- TIGHT LOGGING HELPERS ---
 def _ts():
@@ -120,37 +113,61 @@ if not API_KEY:
     exit(1)
 AI_CLIENT = genai.Client(api_key=API_KEY)
 
-# --- HELPER: KALENDER-UPPSLAG (NY FUNKTION) ---
-def _get_calendar_context(file_timestamp):
+# --- CONTEXT BUILDERS ---
+
+def _build_graph_context() -> str:
     """
-    Försöker hitta ett kalendermöte som matchar filens tidpunkt.
-    Returnerar en kontext-sträng att injicera i prompten.
+    Hämtar kända talare och alias direkt från DuckDB.
+    """
+    if not os.path.exists(GRAPH_PATH):
+        return ""
+
+    try:
+        gs = GraphStore(GRAPH_PATH, read_only=True)
+        persons = gs.find_nodes_by_type("Person")
+        
+        lines = ["KÄNDA TALARE (från Grafen):"]
+        aliases = []
+        
+        for p in persons:
+            name = p.get('properties', {}).get('name', p['id'])
+            lines.append(f"- {name}")
+            
+            node_aliases = p.get('aliases', [])
+            for alias in node_aliases:
+                aliases.append(f"{alias} = {name}")
+        
+        if aliases:
+            lines.append("\nKÄNDA ALIAS (Normalisera till namnet efter likamed-tecknet):")
+            for a in aliases:
+                lines.append(f"- {a}")
+                
+        gs.close()
+        return "\n".join(lines)
+        
+    except Exception as e:
+        LOGGER.warning(f"Kunde inte läsa grafen: {e}")
+        return ""
+
+def _get_calendar_context(file_timestamp: datetime.datetime) -> str:
+    """
+    Hämtar möteskontext från kalender-digests.
+    Matchar tidsstämpel +/- 20 minuter.
     """
     try:
         if not os.path.exists(CALENDAR_FOLDER):
             return ""
 
         file_date_str = file_timestamp.strftime('%Y-%m-%d')
-        # Sök efter digest-fil för rätt datum
         pattern = os.path.join(CALENDAR_FOLDER, f"Calendar_{file_date_str}_*.md")
         files = glob.glob(pattern)
         
         if not files:
-            LOGGER.debug(f"Ingen kalenderfil hittades för {file_date_str}")
             return ""
         
-        # Använd den första matchande filen (borde bara finnas en per dag)
-        calendar_file = files[0]
-        
-        with open(calendar_file, 'r', encoding='utf-8') as f:
+        with open(files[0], 'r', encoding='utf-8') as f:
             content = f.read()
             
-        # Enkel parsing av Markdown-eventen från CalendarCollector
-        # Format: ## HH:MM-HH:MM: Titel
-        # Eller: ## HH:MM: Titel
-        events = []
-        
-        # Regex för att hitta event-rubriker
         event_matches = re.finditer(r'^##\s+(\d{2}:\d{2})(?:-(\d{2}:\d{2}))?:\s+(.+)$', content, re.MULTILINE)
         
         for match in event_matches:
@@ -158,121 +175,52 @@ def _get_calendar_context(file_timestamp):
             end_str = match.group(2)
             title = match.group(3).strip()
             
-            # Hämta beskrivning (texten fram till nästa ## eller slut)
             start_pos = match.end()
             next_match = re.search(r'^##\s', content[start_pos:], re.MULTILINE)
             end_pos = start_pos + next_match.start() if next_match else len(content)
             details = content[start_pos:end_pos].strip()
             
-            # Konvertera tider till datetime för jämförelse
             try:
                 event_start = datetime.datetime.strptime(f"{file_date_str} {start_str}", "%Y-%m-%d %H:%M").replace(tzinfo=SYSTEM_TZ)
                 
-                # Om inspelningen startade inom +/- 20 minuter från mötets start
-                # ELLER om inspelningen startade under mötets gång (om sluttid finns)
+                diff = abs((file_timestamp - event_start).total_seconds())
                 is_match = False
                 
-                # Check 1: Start proximity (+/- 20 min)
-                diff = abs((file_timestamp - event_start).total_seconds())
-                if diff <= 1200: # 20 min
+                if diff <= 1200:
                     is_match = True
                 
-                # Check 2: Inside meeting
                 if not is_match and end_str:
                     event_end = datetime.datetime.strptime(f"{file_date_str} {end_str}", "%Y-%m-%d %H:%M").replace(tzinfo=SYSTEM_TZ)
                     if event_start <= file_timestamp <= event_end:
                         is_match = True
                 
                 if is_match:
-                    _log("📅", f"Hittade kalendermatch: '{title}'")
+                    _log("📅", f"Kalendermatch: '{title}'")
                     return f"""
-MÖTESKONTEXT (Hittad i kalendern):
+MÖTESKONTEXT (Från Kalender):
 Titel: {title}
 Tid: {start_str} - {end_str if end_str else '?'}
-Detaljer:
+Deltagare/Info:
 {details}
 
-INSTRUKTION: Använd ovanstående information för att:
-1. Identifiera talare (se deltagare i Detaljer).
-2. Förstå syftet med mötet.
-3. Rätta eventuella felhörda namn eller termer.
+INSTRUKTION: Använd deltagarlistan ovan för att identifiera "Talare X" och förstå syftningar.
 """
-            except Exception as e:
-                LOGGER.debug(f"Kunde inte parsa event-tid: {e}")
-                continue
+            except Exception:
+                continue 
                 
     except Exception as e:
-        LOGGER.warning(f"Fel vid kalenderuppslag: {e}")
+        LOGGER.warning(f"Kalenderfel: {e}")
     
     return ""
 
-
-def _build_speaker_context(max_people: int = 40, max_aliases: int = 40) -> str:
-    """
-    Hämtar kända talare (Person-entities) + alias från grafen för prompt injection.
-    """
-    try:
-        entities = get_known_entities()
-    except Exception as exc:
-        LOGGER.debug(f"Kunde inte hämta kända entiteter: {exc}")
-        return ""
-
-    persons = [e for e in entities if e.get("type") == "Person"]
-    if not persons:
-        return ""
-
-    canonical_names = sorted({p["id"] for p in persons if p.get("id")})[:max_people]
-    alias_pairs = []
-    for person in persons:
-        canonical = person.get("id")
-        for alias in person.get("aliases") or []:
-            alias_pairs.append(f"{alias} = {canonical}")
-    alias_pairs = alias_pairs[:max_aliases]
-
-    lines = []
-    lines.append("KÄNDA TALARE (canonical namn):")
-    for name in canonical_names:
-        lines.append(f"- {name}")
-
-    if alias_pairs:
-        lines.append("")
-        lines.append("ALIAS SOM SKA NORMALISERAS (alias = canonical):")
-        for pair in alias_pairs:
-            lines.append(f"- {pair}")
-
-    lines.append("")
-    lines.append("INSTRUKTIONER:")
-    lines.append("- Använd canonical namnen ovan när du identifierar talare.")
-    lines.append("- Om ett alias förekommer i transkripten, skriv canonical namnet i svaret.")
-
-    return "\n".join(lines)
+# --- PROCESSING HELPERS ---
 
 def clean_ghost_artifacts():
-    """Städar bort gamla artefakter från tidigare versioner."""
     base_mem = os.path.dirname(ASSET_STORE)
     ghost_drop = os.path.join(base_mem, "DropZone")
-    ghost_log = os.path.join(base_mem, "Logs", "dfm_system.log")
     if os.path.exists(ghost_drop):
-        try: 
-            shutil.rmtree(ghost_drop)
-        except Exception as e:
-            LOGGER.debug(f"Kunde inte radera ghost drop-folder {ghost_drop}: {e}")
-    if os.path.exists(ghost_log) and ghost_log != LOG_FILE:
-        try: 
-            os.remove(ghost_log)
-        except Exception as e:
-            LOGGER.debug(f"Kunde inte radera ghost log-fil {ghost_log}: {e}")
-
-def fa_fil_skapad_datum(filväg):
-    """Hämta filens skapelsedatum via central DateService."""
-    try:
-        ts = get_timestamp(filväg)
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=SYSTEM_TZ)
-        return ts
-    except RuntimeError as e:
-        LOGGER.error(f"HARDFAIL: {e}")
-        raise
+        try: shutil.rmtree(ghost_drop)
+        except: pass
 
 def safe_upload(filväg, original_namn):
     safe_path = None
@@ -294,309 +242,246 @@ def safe_upload(filväg, original_namn):
 def stada_och_parsa_json(text_response):
     try:
         match = re.search(r'\{.*\}', text_response, re.DOTALL)
-        if match:
-            text = match.group(0)
-            return json.loads(text)
+        if match: return json.loads(match.group(0))
         return json.loads(text_response)
     except Exception as e:
-        LOGGER.error(f"HARDFAIL: Kunde inte parsa JSON: {e}")
-        raise ValueError(f"HARDFAIL: Kunde inte parsa JSON-svar") from e
+        LOGGER.error(f"JSON Parse Fail: {text_response[:100]}...")
+        raise ValueError(f"Kunde inte parsa JSON: {e}")
 
-def skapa_rich_header(filnamn, skapelsedatum, model, data, unit_id=None):
-    now = datetime.datetime.now(SYSTEM_TZ).isoformat()
-    speakers = "\n- ".join(data.get('speakers', [])) or "- Inga identifierade"
-    entities = "\n- ".join(data.get('entities', [])) or "- Inga identifierade"
+def skapa_rich_header(filnamn, skapelsedatum, audio_duration_sec, model, data, unit_id=None):
+    """
+    Skapar den nya, utökade headern för transkriberingsfiler.
+    """
+    date_str = skapelsedatum.strftime('%Y-%m-%d')
+    start_str = skapelsedatum.strftime('%H:%M')
+    
+    # Beräkna sluttid
+    if audio_duration_sec:
+        end_dt = skapelsedatum + datetime.timedelta(seconds=audio_duration_sec)
+        end_str = end_dt.strftime('%H:%M')
+    else:
+        end_str = "??"
+
+    # Data från LLM-analysen
+    title = data.get('title', 'Okänt Möte')
+    location = data.get('location', 'Okänd')
     summary = data.get('summary', 'Ingen sammanfattning tillgänglig.')
+    
+    # Formatera detaljerad deltagarlista
+    participants_list = []
+    raw_speakers = data.get('speakers_detailed', [])
+    
+    # Fallback om detailed saknas men simple finns
+    if not raw_speakers and data.get('speakers'):
+        for s in data.get('speakers'):
+            participants_list.append(str(s))
+    else:
+        for p in raw_speakers:
+            if isinstance(p, dict):
+                p_str = p.get('name', 'Okänd')
+                extras = []
+                if p.get('role'): extras.append(p.get('role'))
+                if p.get('org'): extras.append(p.get('org'))
+                
+                if extras:
+                    p_str += f" ({', '.join(extras)})"
+                participants_list.append(p_str)
+            else:
+                participants_list.append(str(p))
+    
+    participants_str = "\n- ".join(participants_list) if participants_list else "- Inga identifierade"
     unit_id_line = f"UNIT_ID:       {unit_id}\n" if unit_id else ""
     
     header = f"""================================================================================
 METADATA FRÅN TRANSKRIBERING (MyMem)
 ================================================================================
+TITEL:         {title}
+DATUM:         {date_str}
+START:         {start_str}
+SLUT:          {end_str}
+PLATS:         {location}
 FILNAMN:       {filnamn}
-{unit_id_line}DATUM_TID:     {skapelsedatum.isoformat()}
-TRANSKRIBERAT: {now}
-MODELL:        {model}
+{unit_id_line}MODELL:        {model} (Berikad)
 --------------------------------------------------------------------------------
-IDENTIFIERADE TALARE:
-- {speakers}
-
-IDENTIFIERADE PLATSER/ENTITETER:
-- {entities}
-
-SAMMANFATTNING (Preliminär):
+SAMMANFATTNING:
 {summary}
+--------------------------------------------------------------------------------
+DELTAGARE:
+- {participants_str}
 ================================================================================
 
 """
     return header
 
-def _move_to_failed(filväg, filnamn, reason):
-    try:
-        base, ext = os.path.splitext(filnamn)
-        clean_name = UUID_SUFFIX_PATTERN.sub('', base) + ext
-        dest = os.path.join(FAILED_FOLDER, clean_name)
-        shutil.move(filväg, dest)
-        LOGGER.warning(f"Flyttade till failed: {clean_name} - {reason}")
-        return True
-    except Exception as e:
-        LOGGER.error(f"Kunde inte flytta till failed: {filnamn} - {e}")
-        return False
-
-
-def _normalize_speakers(result: dict):
-    """
-    Mappa identifierade talare till canonical namn och registrera alias i grafen.
-    """
-    speakers = result.get("speakers") or []
-    if not speakers:
-        return
-
-    normalized = []
-    alias_records = []
-
-    for raw_name in speakers:
-        if not raw_name:
-            continue
-        name = raw_name.strip()
-        canonical = get_canonical(name)
-        if canonical:
-            normalized.append(canonical)
-            if canonical != name:
-                alias_records.append({"alias": name, "canonical": canonical})
-                try:
-                    add_entity_alias(canonical, name, "Person")
-                except Exception as exc:
-                    LOGGER.debug(f"Kunde inte lägga till alias {name}->{canonical}: {exc}")
-        else:
-            normalized.append(name)
-
-    if normalized:
-        # Behåll ordning men ta bort dubbletter
-        seen = set()
-        ordered = []
-        for name in normalized:
-            if name not in seen:
-                ordered.append(name)
-                seen.add(name)
-        result["speakers"] = ordered
-
-    if alias_records:
-        result["speaker_aliases"] = alias_records
-
-def _do_transcription(upload_file, model, kort_namn, filnamn, safety_settings):
-    transcribe_prompt = "Transkribera ljudfilen ordagrant på svenska. Markera talare (Talare 1 osv) om du kan urskilja dem. Svara ENBART med transkriberad text."
+def _do_transcription(upload_file, model, kort_namn, safety_settings):
+    """Pass 1: Rå transkribering (Flash)."""
+    # Hämta prompt från config
+    prompt = PROMPTS.get('transcriber', {}).get('pass1_raw', '')
+    if not prompt:
+        raise ValueError("HARDFAIL: 'pass1_raw' prompt saknas i services_prompts.yaml")
+        
     start = time.time()
-    transcript = ""
-    
     for attempt in range(5):
         try:
             response = AI_CLIENT.models.generate_content(
                 model=model,
                 contents=[types.Content(role="user", parts=[
                     types.Part.from_uri(file_uri=upload_file.uri, mime_type=upload_file.mime_type),
-                    types.Part.from_text(text=transcribe_prompt)])],
+                    types.Part.from_text(text=prompt)])],
                 config=types.GenerateContentConfig(response_mime_type="text/plain", safety_settings=safety_settings)
             )
-            try:
-                transcript = response.text
-            except Exception:
-                finish_reason = "Unknown"
-                if response.candidates:
-                    finish_reason = response.candidates[0].finish_reason
-                raise Exception(f"Inget text-svar. Finish Reason: {finish_reason}")
-            break
+            return response.text, int(time.time() - start)
         except Exception as e:
-            error_str = str(e)
-            if "503" in error_str or "429" in error_str or "overloaded" in error_str.lower():
-                wait_time = 5 * (2 ** attempt)
-                _log("⚠️", f"{kort_namn} → Retry {attempt+1}/5 ({wait_time}s)")
-                time.sleep(wait_time)
+            if "503" in str(e) or "429" in str(e):
+                time.sleep(5 * (2 ** attempt))
             else:
                 raise e
-    
-    if not transcript:
-        raise Exception(f"Transkribering genererade ingen text efter 5 försök.")
-    
-    return transcript, int(time.time() - start)
+    raise Exception("Transkribering misslyckades efter retries.")
 
-def _do_analysis(transcript, model, kort_namn, filnamn, safety_settings, context_string=""):
+def _do_analysis(transcript, model, kort_namn, safety_settings, context_string=""):
     """
-    Steg 2: Analys och Metadata.
-    Nu med stöd för context_string (från kalender).
+    Pass 2: Analys & Berikning med RAG-kontext (Pro).
     """
-    analysis_context = transcript[:2000000]
-    raw_prompt = PROMPTS['transcriber']['analysis_prompt']
+    raw_prompt = PROMPTS.get('transcriber', {}).get('pass2_enriched', '')
+    if not raw_prompt:
+        raise ValueError("HARDFAIL: 'pass2_enriched' prompt saknas i services_prompts.yaml")
     
     context_payload = context_string.strip() or "Ingen extra kontext tillgänglig."
-    analysis_prompt = raw_prompt.replace("{context_injection}", context_payload)
+    final_prompt = raw_prompt.replace("{context_injection}", context_payload)
     
-    result = None
-    
+    # Klipp transkript om det är gigantiskt
+    analysis_context = transcript[:1500000] 
+
     for attempt in range(5):
         try:
             response = AI_CLIENT.models.generate_content(
                 model=model,
                 contents=[types.Content(role="user", parts=[
-                    types.Part.from_text(text=f"{analysis_prompt}\n\nTRANSCRIPT TO ANALYZE:\n{analysis_context}")])],
+                    types.Part.from_text(text=f"{final_prompt}\n\nTRANSCRIPT TO ENRICH:\n{analysis_context}")])],
                 config=types.GenerateContentConfig(response_mime_type="application/json", safety_settings=safety_settings)
             )
-            result = stada_och_parsa_json(response.text)
-            break
-        except ValueError as e:
-            LOGGER.error(f"HARDFAIL: JSON-parsing misslyckades för {filnamn}: {e}")
-            raise
+            return stada_och_parsa_json(response.text)
         except Exception as e:
-            error_str = str(e)
-            if "503" in error_str or "429" in error_str or "overloaded" in error_str.lower():
-                wait_time = 5 * (2 ** attempt)
-                _log("⚠️", f"{kort_namn} → Analysis Retry {attempt+1}/5 ({wait_time}s)")
-                time.sleep(wait_time)
+            if "503" in str(e) or "429" in str(e):
+                time.sleep(5 * (2 ** attempt))
             else:
-                LOGGER.error(f"HARDFAIL: Metadata-analys misslyckades för {filnamn}: {e}")
-                raise RuntimeError(f"HARDFAIL: Metadata-analys misslyckades") from e
-    
-    if not result:
-        raise Exception("Analys genererade inget resultat efter 5 försök.")
-    
-    return result
+                LOGGER.error(f"Analys misslyckades: {e}")
+                raise RuntimeError(f"Analys misslyckades: {e}")
+    raise Exception("Analys misslyckades efter retries.")
+
+# --- MAIN WORKER ---
 
 def processa_mediafil(filväg, filnamn):
     MODEL_FAST = MODELS.get('model_fast')
     MODEL_SMART = MODELS.get('model_pro')
-
-    SAFETY_SETTINGS = [
-        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-    ]
+    
+    SAFETY = [types.SafetySetting(category=cat, threshold="BLOCK_NONE") for cat in 
+              ["HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_DANGEROUS_CONTENT", 
+               "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_HARASSMENT"]]
 
     with PROCESS_LOCK:
-        if filnamn in PROCESSED_FILES: return
-        if filnamn.startswith("temp_upload_"): return
+        if filnamn in PROCESSED_FILES or filnamn.startswith("temp_upload_"): return
         PROCESSED_FILES.add(filnamn)
 
     base_name = os.path.splitext(filnamn)[0]
     kort_namn = _kort(filnamn)
     
-    uuid_match = UUID_SUFFIX_PATTERN.search(base_name)
-    if not uuid_match:
+    match = UUID_SUFFIX_PATTERN.search(base_name)
+    if not match:
         LOGGER.warning(f"Skippar fil utan UUID: {filnamn}")
         with PROCESS_LOCK: PROCESSED_FILES.discard(filnamn)
         return
+    unit_id = match.group(1)
     
-    unit_id = uuid_match.group(1)
     txt_fil = os.path.join(TRANSCRIPTS_FOLDER, f"{base_name}.txt")
-    if os.path.exists(txt_fil): return
+    if os.path.exists(txt_fil): 
+        with PROCESS_LOCK: PROCESSED_FILES.discard(filnamn)
+        return
 
-    _log("📥", f"{kort_namn} → Upload")
+    _log("📥", f"{kort_namn} → Startar")
     upload_file = None
     start_time = time.time()
 
     try:
-        # 1. Hämta skapelsedatum
-        try:
-            timestamp = fa_fil_skapad_datum(filväg)
-        except RuntimeError as e:
-            # HARDFAIL: Logga och använd fallback (detta är intentional - datum saknas)
-            LOGGER.warning(f"Datum saknas för {kort_namn}, använder nuvarande tid: {e}")
-            _log("⚠️", f"{kort_namn} → Datum saknas, hoppar över kalender: {e}")
-            timestamp = datetime.datetime.now(SYSTEM_TZ)
+        # 1. Tidsbestämning
+        try: timestamp = get_timestamp(filväg)
+        except: timestamp = datetime.datetime.now(SYSTEM_TZ)
 
-        # 2. Hämta graf-/kalenderkontext
-        speaker_context = _build_speaker_context()
-        calendar_context = _get_calendar_context(timestamp)
-        context_sections = [section for section in (speaker_context, calendar_context) if section]
-        combined_context = "\n\n".join(context_sections)
+        # 2. Bygg Kontext
+        graph_ctx = _build_graph_context()
+        cal_ctx = _get_calendar_context(timestamp)
+        combined_context = f"{graph_ctx}\n\n{cal_ctx}"
 
-        # 3. Ladda upp
+        # 3. Ladda upp fil
         upload_file = safe_upload(filväg, filnamn)
-        if not upload_file: raise Exception("Upload misslyckades.")
-
-        waits = 0
-        while upload_file.state.name == "PROCESSING":
+        if not upload_file: raise Exception("Upload failed")
+        
+        for _ in range(30):
+            if upload_file.state.name == "ACTIVE": break
+            if upload_file.state.name == "FAILED": raise Exception("File processing FAILED")
             time.sleep(2)
             upload_file = AI_CLIENT.files.get(name=upload_file.name)
-            waits += 1
-            if waits > 30: raise Exception("Timeout processing.")
-
-        if upload_file.state.name == "FAILED": raise Exception("File state FAILED.")
-
-        # 4. Transkribering (Step 1 - Flash)
-        raw_transcript, trans_time = _do_transcription(upload_file, MODEL_FAST, kort_namn, filnamn, SAFETY_SETTINGS)
-        _log("⚡", f"{kort_namn} → Flash OK ({trans_time}s)")
         
-        # 5. Analys med Context Injection (Step 2 - Pro)
-        result = _do_analysis(raw_transcript, MODEL_SMART, kort_namn, filnamn, SAFETY_SETTINGS, context_string=combined_context)
-        _log("🧠", f"{kort_namn} → Pro OK (Context Aware)")
-        _normalize_speakers(result)
+        # 4. PASS 1: Rå Transkribering
+        raw_transcript, dur = _do_transcription(upload_file, MODEL_FAST, kort_namn, SAFETY)
+        _log("⚡", f"{kort_namn} → Flash OK ({dur}s)")
+
+        # 5. PASS 2: Analys & Berikning
+        result = _do_analysis(raw_transcript, MODEL_SMART, kort_namn, SAFETY, context_string=combined_context)
+        _log("🧠", f"{kort_namn} → Pro OK (Berikad)")
         
-        # Kvalitetskontroll & Retry (samma som förut)
-        quality_status = result.get('quality_status', 'OK')
-        if quality_status == 'FAILED':
-            failure_reason = result.get('failure_reason', 'Okänd anledning')
-            _log("⚠️", f"{kort_namn} → Flash kvalitetsfel: {failure_reason}")
-            _log("🔄", f"{kort_namn} → Retry med Pro+Pro...")
-            
-            raw_transcript, trans_time = _do_transcription(upload_file, MODEL_SMART, kort_namn, filnamn, SAFETY_SETTINGS)
-            _log("🧠", f"{kort_namn} → Pro transkribering OK ({trans_time}s)")
-            
-            result = _do_analysis(raw_transcript, MODEL_SMART, kort_namn, filnamn, SAFETY_SETTINGS, context_string=combined_context)
-            _log("🧠", f"{kort_namn} → Pro analys OK")
-            _normalize_speakers(result)
-            
-            if result.get('quality_status', 'OK') == 'FAILED':
-                failure_reason = result.get('failure_reason', 'Okänd anledning')
-                _log("🚫", f"{kort_namn} → FAILED: {failure_reason}")
-                _move_to_failed(filväg, filnamn, failure_reason)
-                with PROCESS_LOCK: PROCESSED_FILES.discard(filnamn)
-                return
+        # Kvalitetskontroll
+        if result.get('quality_status') == 'FAILED':
+            _log("🚫", f"{kort_namn} → Kvalitet underkänd: {result.get('failure_reason')}")
+            dest = os.path.join(FAILED_FOLDER, filnamn)
+            shutil.move(filväg, dest)
+            return
 
-        # 6. Spara
-        final_transcript = result.get('transcript', raw_transcript)
-        header = skapa_rich_header(filnamn, timestamp, MODEL_SMART, result, unit_id)
-
+        # 6. Spara Resultat
+        final_text = result.get('transcript', raw_transcript)
+        header = skapa_rich_header(filnamn, timestamp, dur, MODEL_SMART, result, unit_id)
+        
         with open(txt_fil, 'w', encoding='utf-8') as f:
-            f.write(header + final_transcript)
-
+            f.write(header + final_text)
+            
         total_time = int(time.time() - start_time)
         _log("✅", f"{kort_namn} → Klar ({total_time}s)")
 
     except Exception as e:
-        LOGGER.error(f"FEL vid transkribering av {filnamn}: {e}")
-        print(f"{_ts()} ❌ TRANS: {kort_namn} → FAILED (se logg)")
+        LOGGER.error(f"FEL {filnamn}: {e}")
+        print(f"{_ts()} ❌ TRANS: {kort_namn} → FAILED")
+    finally:
         with PROCESS_LOCK: PROCESSED_FILES.discard(filnamn)
 
 class AudioHandler(FileSystemEventHandler):
     def on_created(self, event):
         if event.is_directory: return
-        filnamn = os.path.basename(event.src_path)
-        if filnamn.startswith("temp_upload_"): return
-        if os.path.splitext(event.src_path)[1].lower() in MEDIA_EXTENSIONS:
-            if UUID_SUFFIX_PATTERN.search(os.path.splitext(filnamn)[0]):
-                EXECUTOR.submit(processa_mediafil, event.src_path, filnamn)
+        fname = os.path.basename(event.src_path)
+        if os.path.splitext(fname)[1].lower() in MEDIA_EXTENSIONS:
+            if UUID_SUFFIX_PATTERN.search(os.path.splitext(fname)[0]):
+                EXECUTOR.submit(processa_mediafil, event.src_path, fname)
 
 if __name__ == "__main__":
     clean_ghost_artifacts()
+    
     pending = 0
     if os.path.exists(RECORDINGS_FOLDER):
         for f in os.listdir(RECORDINGS_FOLDER):
             if os.path.splitext(f)[1].lower() in MEDIA_EXTENSIONS:
-                if not f.startswith("temp_upload_") and UUID_SUFFIX_PATTERN.search(os.path.splitext(f)[0]):
+                if not f.startswith("temp_") and UUID_SUFFIX_PATTERN.search(os.path.splitext(f)[0]):
                     base = os.path.splitext(f)[0]
                     if not os.path.exists(os.path.join(TRANSCRIPTS_FOLDER, f"{base}.txt")):
                         pending += 1
                         EXECUTOR.submit(processa_mediafil, os.path.join(RECORDINGS_FOLDER, f), f)
     
-    status_msg = f"({pending} väntande)" if pending > 0 else ""
-    print(f"{_ts()} ✓ Transcriber online {status_msg}")
-
+    print(f"{_ts()} ✓ Transcriber v10 (Berikad+Header) online ({pending} pending)")
+    
     observer = Observer()
     observer.schedule(AudioHandler(), RECORDINGS_FOLDER, recursive=False)
     observer.start()
     try:
         while True: time.sleep(1)
-    except KeyboardInterrupt: 
+    except KeyboardInterrupt:
         EXECUTOR.shutdown(wait=False)
         observer.stop()
     observer.join()

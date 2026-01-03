@@ -7,26 +7,22 @@ Använder GraphStore (DuckDB) för all graflagring.
 import os
 import sys
 import yaml
+import json
 import logging
 import re
-import time
-import threading
 
 # Lägg till projektroten i sys.path för att hitta services-paketet
-# graph_builder.py ligger i services/indexers/, så vi behöver gå upp 3 nivåer för att nå projektroten
-script_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(script_dir)))
-sys.path.insert(0, project_root)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.utils.graph_service import GraphStore
+from services.graph_service import GraphStore
 
 # --- CONFIG LOADER ---
 def hitta_och_ladda_config():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths_to_check = [
-        os.path.join(script_dir, '..', '..', 'config', 'my_mem_config.yaml'),
-        os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
+        os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
+        os.path.join(script_dir, '..', 'my_mem_config.yaml')
     ]
     config_path = None
     for p in paths_to_check:
@@ -50,6 +46,7 @@ CONFIG = hitta_och_ladda_config()
 # --- SETUP ---
 LAKE_STORE = CONFIG['paths']['lake_store']
 GRAPH_PATH = CONFIG['paths']['graph_db']
+TAXONOMY_FILE = CONFIG['paths'].get('taxonomy_file', os.path.expanduser("~/MyMemory/Index/my_mem_taxonomy.json"))
 LOG_FILE = CONFIG['logging']['log_file_path']
 
 # Logging
@@ -61,6 +58,7 @@ LOGGER.addHandler(logging.StreamHandler())
 UUID_SUFFIX_PATTERN = re.compile(r'_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.md$')
 
 # --- SINGLETON GRAPH STORE (Thread-Safe) ---
+import threading
 _GRAPH_INSTANCE: GraphStore | None = None
 _GRAPH_LOCK = threading.Lock()
 
@@ -73,9 +71,7 @@ def _get_graph() -> GraphStore:
         with _GRAPH_LOCK:
             # Double-checked locking
             if _GRAPH_INSTANCE is None:
-                # Använd read_write (default) för att undvika konflikter med read_only-anslutningar
-                # read_write kan användas för både läsning och skrivning
-                _GRAPH_INSTANCE = GraphStore(GRAPH_PATH, read_only=False)
+                _GRAPH_INSTANCE = GraphStore(GRAPH_PATH)
     
     return _GRAPH_INSTANCE
 
@@ -92,138 +88,122 @@ def close_db_connection():
 # --- GRAPH ENGINE ---
 
 def process_lake_batch():
-    """Huvudloop för grafbyggande - Strict Schema."""
+    """Huvudloop för grafbyggande - Nu med GraphStore (DuckDB)."""
     
-    # Retry-logik för att hantera DuckDB-lock-konflikter efter att tjänster stoppats
-    # DuckDB kan ta tid att frigöra låset efter att processer dödats
-    max_retries = 10
-    retry_delay = 1.0
     graph = None
     
-    for attempt in range(max_retries):
-        try:
-            graph = GraphStore(GRAPH_PATH, read_only=False)
-            break
-        except Exception as e:
-            error_str = str(e).lower()
-            if ("lock" in error_str or "conflicting" in error_str or "different configuration" in error_str) and attempt < max_retries - 1:
-                LOGGER.warning(f"Kunde inte öppna GraphStore (försök {attempt + 1}/{max_retries}), väntar {retry_delay:.1f}s: {e}")
-                time.sleep(retry_delay)
-                retry_delay = min(retry_delay * 1.5, 5.0)  # Exponential backoff, max 5s
-            else:
-                LOGGER.error(f"HARDFAIL: Kunde inte öppna GraphStore efter {attempt + 1} försök: {e}", exc_info=True)
-                raise
-    
-    if graph is None:
-        raise RuntimeError("HARDFAIL: Kunde inte öppna GraphStore efter alla försök")
-    
-    # Använd context manager för att säkerställa korrekt stängning
     try:
-        with graph:
-            # Starta en enda transaktion för hela batch-processningen
-            # Detta förhindrar write-write conflicts när flera filer skriver samma noder
-            with graph._lock:
-                graph.conn.execute("BEGIN TRANSACTION")
+        graph = GraphStore(GRAPH_PATH)
+        
+        files_processed = 0
+        relations_created = 0
+        
+        print(f"🔍 Scannar {LAKE_STORE}...")
+
+        for filename in os.listdir(LAKE_STORE):
+            if not filename.endswith(".md"):
+                continue
+            
+            match = UUID_SUFFIX_PATTERN.search(filename)
+            unit_id = match.group(1) if match else None
+            if not unit_id:
+                continue
+            
+            filepath = os.path.join(LAKE_STORE, filename)
             
             try:
-                files_processed = 0
-                relations_created = 0
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                if "---" not in content:
+                    continue
+                parts = content.split("---", 2)
+                metadata = yaml.safe_load(parts[1])
                 
-                print(f"🔍 Scannar {LAKE_STORE}...")
+                # Metadata Extraction
+                timestamp = metadata.get('timestamp_created') or ""
+                source_type = metadata.get('source_type') or "unknown"
+                summary = (metadata.get('summary') or "").replace('"', "'")
+                
+                # 1. Skapa Dokument-noden (Unit)
+                graph.upsert_node(
+                    id=unit_id,
+                    type="Unit",
+                    properties={
+                        "timestamp": timestamp,
+                        "source_type": source_type,
+                        "summary": summary[:500] if summary else ""  # Begränsa längd
+                    }
+                )
 
-                for filename in os.listdir(LAKE_STORE):
-                    if not filename.endswith(".md"):
-                        continue
-                    
-                    match = UUID_SUFFIX_PATTERN.search(filename)
-                    unit_id = match.group(1) if match else None
-                    if not unit_id:
-                        continue
-                    
-                    filepath = os.path.join(LAKE_STORE, filename)
-                    
-                    try:
-                        with open(filepath, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                        if "---" not in content:
-                            continue
-                        parts = content.split("---", 2)
-                        metadata = yaml.safe_load(parts[1])
-                        
-                        # Metadata Extraction
-                        timestamp = metadata.get('timestamp_created') or ""
-                        source_type = metadata.get('source_type') or "unknown"
-                        summary = (metadata.get('summary') or "").replace('"', "'")
-                        owner_id = metadata.get('owner_id')
-                        
-                        # 1. Skapa Dokument-noden (Unit)
-                        # Owner sparas nu endast som property, ingen kant skapas
-                        graph.upsert_node(
-                            id=unit_id,
-                            type="Unit",
-                            properties={
-                                "timestamp": timestamp,
-                                "source_type": source_type,
-                                "summary": summary[:500] if summary else "",  # Begränsa längd
-                                "owner": owner_id
-                            }
+                # 2. Skapa Relationer baserat på EXPLICIT DATA
+                
+                # A. GRAPH_NODES (Ny struktur med viktade koncept och typade entiteter)
+                graph_nodes = metadata.get('graph_nodes', {})
+                
+                # Hantera legacy-format (graph_master_node/graph_sub_node)
+                if not graph_nodes:
+                    master_node = metadata.get('graph_master_node')
+                    if master_node:
+                        graph_nodes[master_node] = 1.0
+                    sub_node = metadata.get('graph_sub_node')
+                    if sub_node:
+                        graph_nodes[sub_node] = 0.5
+                
+                for node_key, node_value in graph_nodes.items():
+                    # Abstrakt koncept (masternode) - värde är float
+                    if isinstance(node_value, (int, float)):
+                        graph.upsert_node(id=node_key, type="Concept")
+                        graph.upsert_edge(
+                            source=unit_id, 
+                            target=node_key, 
+                            edge_type="DEALS_WITH",
+                            properties={"weight": node_value}
                         )
-
-                        # 2. Hantera Validated Mentions (Strict)
-                        # GraphBuilder är nu en "dumb executor" av instruktioner från DocConverter
-                        mentions = metadata.get('validated_mentions', [])
-                        
-                        for mention in mentions:
-                            target_uuid = mention.get('target_uuid')
-                            if not target_uuid:
-                                continue
-                                
-                            # Steg A: Skapa Nod (Om instruerat)
-                            # Action 'CREATE' innebär att DocConverter har validerat att noden får skapas
-                            if mention.get('action') == 'CREATE':
-                                graph.upsert_node(
-                                    id=target_uuid,
-                                    type=mention.get('target_type', 'Unknown'),
-                                    properties=mention.get('properties', {})
-                                )
-                                LOGGER.info(f"✨ Skapade nod: {mention.get('label') or mention.get('source_text', 'Unknown')}")
-                            
-                            # Steg B: Skapa Relation (Alltid)
-                            # Endast MENTIONS är tillåtet mellan Unit och Entity
+                        relations_created += 1
+                    
+                    # Typad entitet - värde är dict med namn -> relevans
+                    elif isinstance(node_value, dict):
+                        entity_type = node_key  # Typ från taxonomin
+                        for entity_name, relevance in node_value.items():
+                            # Skapa Entity-nod
+                            graph.upsert_node(
+                                id=entity_name,
+                                type="Entity",
+                                properties={"entity_type": entity_type}
+                            )
+                            # Skapa relation Unit -> Entity
                             graph.upsert_edge(
                                 source=unit_id,
-                                target=target_uuid,
-                                edge_type="MENTIONS",
-                                properties={
-                                    "confidence": mention.get('confidence', 1.0),
-                                    "snippet": mention.get('source_text', '')
-                                }
+                                target=entity_name,
+                                edge_type="UNIT_MENTIONS",
+                                properties={"relevance": relevance}
                             )
                             relations_created += 1
-                            LOGGER.info(f"🔗 Länkade: {unit_id} -> {target_uuid}")
-                        
-                        files_processed += 1
 
-                    except Exception as e:
-                        LOGGER.error(f"Fel vid graf-processning av {filename}: {e}")
-                        # Fortsätt med nästa fil även om denna misslyckades
-                        continue
+                # C. PERSON (Ägare)
+                owner = metadata.get('owner_id')
+                if owner:
+                    graph.upsert_node(id=owner, type="Person")
+                    graph.upsert_edge(
+                        source=unit_id,
+                        target=owner,
+                        edge_type="CREATED_BY"
+                    )
                 
-                # Commit transaktionen när alla filer är processade
-                with graph._lock:
-                    graph.conn.execute("COMMIT")
-                print(f"✅ Klar. {files_processed} filer bearbetade. {relations_created} relationer skapade.")
-            
+                files_processed += 1
+
             except Exception as e:
-                # Rollback vid fel
-                with graph._lock:
-                    graph.conn.execute("ROLLBACK")
-                LOGGER.error(f"Fel i batch-transaktion: {e}", exc_info=True)
-                raise
-    
+                LOGGER.error(f"Fel vid graf-processning av {filename}: {e}")
+
+        print(f"✅ Klar. {files_processed} filer bearbetade. {relations_created} relationer skapade.")
+
     except Exception as main_e:
         LOGGER.error(f"Kritiskt fel i Graf-loopen: {main_e}")
         raise
+
+    finally:
+        if graph:
+            graph.close()
 
 
 # === ENTITY FUNCTIONS ===
@@ -391,7 +371,7 @@ def get_graph_context_for_search(keywords: list, entities: list) -> str:
                 if aliases:
                     match_info += f" [alias: {', '.join(aliases[:3])}]"
                 if related_units:
-                    match_info += f"\\n    → Nämns i: {len(related_units)} dokument"
+                    match_info += f"\n    → Nämns i: {len(related_units)} dokument"
                 match_lines.append(match_info)
             
             if match_lines:
@@ -401,7 +381,7 @@ def get_graph_context_for_search(keywords: list, entities: list) -> str:
         if not lines:
             return "(Inga grafkopplingar hittades för söktermerna)"
         
-        return "\\n".join(lines)
+        return "\n".join(lines)
     
     except Exception as e:
         LOGGER.error(f"get_graph_context_for_search error: {e}")
@@ -463,17 +443,4 @@ def upgrade_canonical(old_canonical: str, new_canonical: str) -> bool:
 
 if __name__ == "__main__":
     print("--- MyMem Graph Builder (v5.0 - DuckDB) ---")
-    try:
-        process_lake_batch()
-        sys.exit(0)
-    except KeyboardInterrupt:
-        print("\\n⚠️ Avbruten av användaren")
-        LOGGER.warning("Graph builder avbruten av användaren")
-        sys.exit(130)  # Standard exit code för Ctrl+C
-    except Exception as e:
-        error_msg = f"KRITISKT FEL i Graph Builder: {e}"
-        print(f"❌ {error_msg}")
-        LOGGER.error(error_msg, exc_info=True)
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    process_lake_batch()
