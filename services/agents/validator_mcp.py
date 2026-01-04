@@ -1,11 +1,12 @@
 import os
 import sys
 import yaml
+import json
+import uuid
 from pathlib import Path
 
 import logging
 # 1. Konfigurera loggning till stderr OMEDELBART
-# Detta måste ske innan SchemaValidator instansieras
 logging.basicConfig(
     level=logging.INFO,
     stream=sys.stderr,
@@ -18,16 +19,15 @@ for handler in logging.root.handlers[:]:
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 
 # Add the project root to sys.path so 'services' can be found
-# This assumes validator_mcp.py is in services/agents/
 project_root = str(Path(__file__).parent.parent.parent)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from mcp.server.fastmcp import FastMCP
 from services.utils.schema_validator import SchemaValidator
+from services.utils.json_parser import parse_llm_json
 from google import genai
-
-
+from google.genai import types
 
 mcp = FastMCP("DigitalistValidator")
 validator = SchemaValidator()
@@ -44,6 +44,14 @@ def get_api_key():
     except Exception as e:
         print(f"Kunde inte ladda API-nyckel från config: {e}")
         return None
+
+# --- INITIERA KLIENT ---
+api_key = get_api_key()
+if not api_key:
+    logging.error("HARDFAIL: API-nyckel saknas i config! MCP kommer inte kunna köra LLM-anrop.")
+    client = None
+else:
+    client = genai.Client(api_key=api_key)
 
 # --- LADDA PROMPTAR ---
 def load_prompts():
@@ -73,92 +81,113 @@ def validate_extraction(data: dict) -> str:
     return "VALIDATION_ERROR:\n" + "\n".join(errors)
 
 @mcp.tool()
-def extract_and_validate_doc(raw_text: str, source_hint: str = "Document") -> dict:
+def extract_and_validate_doc(initial_prompt: str, reference_timestamp: str = None, anchors: dict = None) -> dict:
     """
-    Huvudverktyg som bygger kontext från schema, extraherar data via LLM 
-    och loopar internt tills SchemaValidator ger grönt ljus.
+    Huvudverktyg som exekverar en färdig prompt, validerar svaret mot schemat,
+    och loopar internt tills validering lyckas.
+    
+    anchors: Dict[str, str] = Mappning { "Namn": "UUID" } för kända entiteter som SKA återanvändas.
     """
-    # 1. Hämta grundprompt och schema-regler
-    prompts = load_prompts()
-    raw_prompt = prompts['doc_converter']['strict_entity_extraction']
-    schema = validator.schema
-    
-    # --- DYNAMISK SCHEMA-KONTEXT (Flyttat från DocConverter) ---
-    all_node_types = set(schema.get('nodes', {}).keys())
-    valid_graph_nodes = all_node_types - {'Document', 'Source', 'File'}
-    
-    # Bygg nod-beskrivningar
-    node_lines = []
-    for k, v in schema.get('nodes', {}).items():
-        if k == 'Document': continue
-        desc = v.get('description', '')
-        props = v.get('properties', {})
-        constraints = [f"Namnregler: {props['name']['description']}"] if 'name' in props else []
-        node_lines.append(f"- {k}: {desc} ({'; '.join(constraints)})")
-    
-    node_types_str = "\n".join(node_lines)
+    if not client:
+        return {"error": "Server configuration error: No API Key available"}
 
-    # Bygg Relationer (White/Blacklists)
-    filtered_edges = {k: v for k, v in schema.get('edges', {}).items() if k != 'MENTIONS'}
-    whitelist, blacklist = [], []
+    # Fallback för timestamp om den inte skickas
+    if not reference_timestamp:
+        import datetime
+        reference_timestamp = datetime.datetime.now().isoformat()
 
-    for k, v in filtered_edges.items():
-        sources = set(v.get('source_type', []))
-        targets = set(v.get('target_type', []))
-        whitelist.append(f"- {k}: [{', '.join(sources)}] -> [{', '.join(targets)}] // {v.get('description', '')}")
-        
-        forbidden_src = valid_graph_nodes - sources
-        forbidden_trg = valid_graph_nodes - targets
-        if forbidden_src: blacklist.append(f"- {k}: ALDRIG från [{', '.join(forbidden_src)}]")
-        if forbidden_trg: blacklist.append(f"- {k}: ALDRIG till [{', '.join(forbidden_trg)}]")
-
-    edge_types_str = "WHITELIST:\n" + "\n".join(whitelist) + "\n\nBLACKLIST:\n" + "\n".join(blacklist)
-
-    # 2. Anpassa efter Source Hint
-    source_context = ""
-    if "Slack" in source_hint:
-        source_context = "KONTEXT: Slack-chatt. Extrahera deltagare som Person-noder."
-    elif "Email" in source_hint or "Mail" in source_hint:
-        source_context = "KONTEXT: E-post. Fokusera på avsändare/mottagare."
-
-    # 3. Preparera loopen
-    final_prompt = raw_prompt.format(
-        text_chunk=raw_text[:25000], 
-        node_types_context=node_types_str,
-        edge_types_context=edge_types_str,
-        known_entities_context=source_context
-    )
+    # Normalisera anchors
+    anchor_map = anchors or {}
 
     max_attempts = 10
-    current_messages = [{"role": "user", "content": final_prompt}]
+    current_messages = [
+        types.Content(role="user", parts=[types.Part.from_text(text=initial_prompt)])
+    ]
 
     for attempt in range(max_attempts):
-        response = client.models.generate_content(
-            model="gemini-2.0-flash-lite-preview",
-            contents=current_messages,
-            config={'response_mime_type': 'application/json'}
-        )
-        
         try:
-            extracted_data = json.loads(response.text)
+            response = client.models.generate_content(
+                model="gemini-2.0-flash-lite-preview",
+                contents=current_messages,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            
+            # ANVÄND ROBUST PARSER
+            extracted_data = parse_llm_json(response.text, context="validator_mcp")
             errors = []
             
+            # --- AUTO-FIX: Inject System Fields & Anchors ---
+            # Vi hjälper LLM med fält den inte kan veta eller ofta glömmer
+            for node in extracted_data.get('nodes', []):
+                # 1. System fields
+                if reference_timestamp:
+                    if 'last_seen_at' not in node: node['last_seen_at'] = reference_timestamp
+                    if 'created_at' not in node: node['created_at'] = reference_timestamp
+                    if 'last_synced_at' not in node: node['last_synced_at'] = reference_timestamp
+                
+                if 'status' not in node:
+                    node['status'] = 'PROVISIONAL'
+                if 'confidence' not in node:
+                    node['confidence'] = 0.5
+                
+                # 2. Fixa ID (UUID) om det saknas (Krävs av schemat)
+                if 'id' not in node:
+                    if 'uuid' in node:
+                        node['id'] = node['uuid']
+                    else:
+                        new_id = str(uuid.uuid4())
+                        node['id'] = new_id
+                        # Sätt även uuid-fältet om det saknas, för konsekvens
+                        node['uuid'] = new_id
+
+                # 3. Anchors (Kända entiteter)
+                name = node.get('name')
+                if name and name in anchor_map:
+                    known_uuid = anchor_map[name]
+                    current_uuid = node.get('id') # Använd 'id' som primärnyckel
+                    
+                    # Om id/uuid genererades nyss, skriv över med anchor
+                    if current_uuid != known_uuid:
+                         # Här kan vi antingen tvinga (auto-fix) eller klaga.
+                         # Givet att vi nyss genererade ett random ID, bör vi skriva över det med anchor.
+                         node['id'] = known_uuid
+                         node['uuid'] = known_uuid # Legacy support
+                    
             # Validera noder via SchemaValidator 
             for i, node in enumerate(extracted_data.get('nodes', [])):
                 is_valid, msg = validator.validate_node(node)
                 if not is_valid:
                     errors.append(f"Node {i} ('{node.get('name')}'): {msg}")
             
+            # Validera kanter via SchemaValidator (NYTT)
+            nodes_map = {n.get('name'): n.get('type') for n in extracted_data.get('nodes', [])}
+            for i, edge in enumerate(extracted_data.get('edges', [])):
+                is_valid, msg = validator.validate_edge(edge, nodes_map)
+                if not is_valid:
+                    errors.append(f"Edge {i} ('{edge.get('source')} -> {edge.get('target')}'): {msg}")
+
             if not errors:
                 return extracted_data 
             
             # Feedback-loop
-            current_messages.append({"role": "model", "content": response.text})
-            current_messages.append({
-                "role": "user", 
-                "content": f"VALIDERING MISSLYCKADES:\n{chr(10).join(errors)}\n\nKorrigera JSON och försök igen."
-            })
+            logging.info(f"Attempt {attempt+1} failed validation. Errors:\n{chr(10).join(errors)}")
+            current_messages.append(types.Content(role="model", parts=[types.Part.from_text(text=response.text)]))
+            current_messages.append(types.Content(
+                role="user", 
+                parts=[types.Part.from_text(text=f"VALIDERING MISSLYCKADES:\n{chr(10).join(errors)}\n\nKorrigera JSON och försök igen.")]
+            ))
             
         except Exception as e:
-            current_messages.append({"role": "user", "content": f"Ogiltig JSON: {str(e)}. Försök igen."})
-    return {"error": "Max retries reached", "partial": extracted_data}
+            logging.error(f"Error in LLM loop: {e}")
+            current_messages.append(types.Content(role="user", parts=[types.Part.from_text(text=f"Ogiltig JSON eller systemfel: {str(e)}. Försök igen.")]))
+
+    return {"error": "Max retries reached", "partial": extracted_data if 'extracted_data' in locals() else {}}
+
+if __name__ == "__main__":
+    try:
+        mcp.run()
+    except Exception as e:
+        logging.critical(f"MCP Server CRASHED: {e}")
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)

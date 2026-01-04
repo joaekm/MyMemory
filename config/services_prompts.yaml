@@ -2,137 +2,137 @@
 
 # --- Transformations-agenten (Ljud/Video) ---
 transcriber:
-  analysis_prompt: |
-    Du får en rå transkription från en ljudfil. Utför följande tre steg:
+
+# PASS 1: Rådatat (Ljud -> Text)
+  pass1_raw: |
+    Din uppgift är att transkribera ljudfilen ordagrant till svenska.
     
+    INSTRUKTIONER:
+    1. Skriv exakt vad som sägs, ord för ord.
+    2. Använd generiska etiketter för talare: "Talare 1:", "Talare 2:", etc.
+    3. Försök INTE gissa vem som är vem baserat på rösten.
+    4. Gör INGA sammanfattningar.
+    
+
+  # PASS 2: Berikning & Analys (Text + Kontext -> Insikt)
+  pass2_enriched: |
+    {context_injection}
+
+    Du har fått en rå transkription av ett möte eller en inspelning. Din uppgift är att tvätta, identifiera och berika texten med hjälp av kontexten ovan (om tillgänglig) eller innehållet.
+
+    UTFÖR FÖLJANDE STEG:
+
     STEG 1: KVALITETSKONTROLL
-    Bedöm om transkriberingen är ANVÄNDBAR.
-    Returnera quality_status "FAILED" om NÅGOT av följande stämmer:
-    - Mindre än 50 meningsfulla ord (exkludera talarmarkeringar)
-    - Bara talarmarkeringar utan faktiskt innehåll ("Talare 1: Talare 2: Talare 3:")
-    - Samma ord eller fras upprepas mer än 10 gånger i rad
-    - Innehållet är oförståeligt, korrupt eller nonsens
-    - Bara tystnad, ljud-markeringar eller bakgrundsljud
-    Om FAILED: Ange failure_reason och hoppa över steg 2-3.
+    Analysera om råtexten är användbar.
+    Returnera quality_status "FAILED" om texten är mestadels gibberish, upprepningar eller tekniska fel.
     
-    STEG 2: KORRIGERAD TRANSKRIPTION (endast om quality_status är "OK")
-    - Identifiera talarna från innehållet (de presenterar sig ofta i början)
-    - Skriv ut HELA transkriptionen med riktiga namn där det är möjligt
-    - Format: "Namn: text" (kolon, mellanslag, en rad per replik)
-    - Om ett namn är okänt, behåll "Talare N"
-    - Standardisera formatet (ta bort hakparenteser, fixa radbrytningar)
-    - Behåll allt innehåll - korta inte ner
+    STEG 2: BERIKAD TRANSKRIPTION (Om quality_status är "OK")
+    Skriv om transkriptionen för maximal läsbarhet och tydlighet.
     
-    STEG 3: METADATA
-    Extrahera strukturerad information från innehållet.
+    A. TALARIDENTIFIERING:
+       Använd "MÖTESKONTEXT" och "KÄNDA TALARE" för att ersätta "Talare 1" med riktiga namn.
+       
+    B. KONTEXTUELLA ANNOTERINGAR:
+       När talare använder vaga ord ("det", "den", "projektet") och du vet vad som avses, skjut in en förklaring.
+       Format: (Anm: förklaring)
+       Exempel: "Vi måste fixa buggen i det (Anm: Inköpslänken) innan releasen."
+
+    C. FORMATERING:
+       Behåll dialogformatet "Namn: Text".
+
+    STEG 3: METADATA EXTRAKTION
+    Sammanfatta innehållet och extrahera metadata.
     
+    - Titel: Om kontext finns (t.ex. "Budgetmöte"), använd den. Annars, skapa en kort, beskrivande titel baserat på innehållet.
+    - Plats: Om kontext/innehåll nämner plats (t.ex. "Teams", "Konferensrummet"), ange det. Annars "Okänd".
+    - Talare: Lista namn, och om möjligt Roll/Titel och Arbetsgivare baserat på kontexten/grafen.
+
     RETURNERA EXAKT DENNA JSON-STRUKTUR:
     {
       "quality_status": "OK" eller "FAILED",
-      "failure_reason": "Endast vid FAILED - kortfattad förklaring",
-      "transcript": "Den korrigerade transkriptionen med riktiga namn och enhetligt format",
-      "speakers": ["Lista med identifierade talare"],
-      "summary": "Sammanfattning på svenska av vad som diskuteras",
-      "keywords": ["Relevanta sökord"],
-      "entities": ["Personer", "Organisationer", "Projekt som nämns"]
+      "failure_reason": "Endast vid FAILED",
+      "title": "Kort beskrivande titel",
+      "location": "Plats eller Okänd",
+      "transcript": "Den berikade dialogen...",
+      "summary": "Kortfattad sammanfattning av mötet",
+      "speakers_detailed": [
+        {"name": "Namn Efternamn", "role": "Titel/Roll", "org": "Organisation"}
+      ],
+      "keywords": ["tag1", "tag2"],
+      "entities": ["Personer", "System", "Projekt"]
     }
 
 # --- Doc Converter (Textfiler/Dokument) ---
 doc_converter:
-  # Denna prompt används för att injicera OTS-taxonomin
-  ots_injection_prompt: |
-    Din uppgift är att strukturera ostrukturerad text enligt en strikt taxonomi.
+  doc_summary_prompt: |
+    Sammanfatta detta dokument kortfattat och informativt på svenska.
+    Fokusera på VAD det är, VEM det berör och VILKA beslut/händelser som nämns.
 
-    GILTIGA MASTER NODER:
-    {valid_nodes}
+    TEXT:
+    {text}
 
-    DEFINITIONER AV NODER:
-    - Vision: Framtidsbilder, syfte, långsiktiga mål (2-5 år), "Varför vi finns".
-    - Strategi: Vägval, roadmaps, affärsplaner, målarkitektur, styrkor/utmaningar.
-    - Förändring: Transformation, digitalisering, organisationsförändring, kulturresor.
-    - Marknad: Positionering, konkurrenter, omvärldsanalys, leads, varumärke.
-    - Affär: Affärsmodeller, lönsamhet, kalkyl, prissättning, säljaktiviteter.
-    - Kultur: Värderingar, "The Digitalist Way", psykologisk trygghet, samarbetsklimat.
-    - Projekt: Konkreta uppdrag, PoC (t.ex. Vulkan), backlogs, projektledning.
-    - Metodik: Hur vi arbetar. Agile, Service Design, WoW, HIIT, principer.
-    - Erbjudande: Våra produkter och tjänster (MyMem, P-Bot, Konsulting).
-    - Avtal: Offerter, ramavtal, licenser, upphandlingar (FKU).
-    - Organisation: Rekrytering, team, roller, onboarding, personalfrågor.
-    - Händelser: Möten, workshops, konferenser, daglig status, incidenter.
-    - Administration: Tidrapportering, sjukanmälan, resursplanering, loggar.
-    - Arbetsverktyg: Mjukvara vi använder (Slack, Jira, Fortnox), hårdvara.
-    - Teknologier: Kodspråk (Python), ramverk, AI-modeller, databaser, "Tech".
-    - Aktör: Externa organisationer, kunder, partners, myndigheter.
-    - Person: Specifika individer, medarbetare, kontaktpersoner.
-    - Plats: Kontor, orter, fysiska/digitala rum.
-    - Process: Arbetsflöden, leveransprocesser, datahantering, "Operating".
-    - Juridik: Lagkrav, GDPR, compliance, affärsjuridik.
-    - Kvalitet: Prestanda, tester, tillgänglighet, spårbarhet.
-    - Säkerhet: Informationssäkerhet, lösenordshantering, sårbarheter.
-    - Standard: ISO-certifieringar, WCAG, öppna standarder.
-    - Arkitektur: Systemdesign, MACH, lösningar, integrationer.
-    - Data: Testdata, entiteter, metadata-strukturer.
-    - Resultat: Utfall, succéer, måluppfyllnad.
+    RETURNERA JSON:
+    {{
+      "summary": "Din sammanfattning här...",
+      "keywords": ["nyckelord1", "nyckelord2"]
+    }}
 
-    INSTRUKTION:
-    Analysera texten och placera den i exakt EN av ovanstående kategorier.
+  strict_entity_extraction: |
+    Du är en expert på Knowledge Graph Extraction. Din uppgift är att strukturera ostrukturerad text till en graf bestående av Noder och Relationer, strikt baserat på det bifogade schemat.
 
-    VIKTIG INSTRUKTION FÖR ENTITETER:
-    Om texten nämner en person eller ett projekt som finns i listan KÄNDA PERSONER/PROJEKT,
-    använd EXAKT det namnet. Gissa INTE egna varianter.
+    === DINA INSTRUKTIONER ===
+    1. EXTRAHERA NODER:
     
-    ENTITETSNAMN REGLER:
-    - IGNORERA filnamn som entiteter (*.py, *.js, *.md, *.txt etc) - de är INTE projekt
-    - KORTA namn till max 40 tecken. "Abelsson eller annan funktionell..." → "Abelsson"
-    - Om ett namn har förkortning i parentes, t.ex. "Carbon Copy Machine (CCM)", 
-      använd BARA huvudnamnet "Carbon Copy Machine" och lägg förkortningen som alias
-    - Entiteter ska vara NAMN på personer/organisationer/projekt, inte beskrivningar
+    TILLÅTNA NODTYPER (OCH EGENSKAPER):
+    Här är de enda nodtyper du får skapa. Observera särskilt vilka egenskaper och enum-värden som är tillåtna.
+    {node_types_context}
+
+      - Identifiera entiteter som matchar schemat.
+      - Fyll i så många egenskaper som möjligt om informationen finns i texten.
+      - Om en egenskap har en lista med tillåtna värden [Val1, Val2...], MÅSTE du använda ett av dessa exakt. Hitta inte på egna.
+      - "confidence": Sätts baserat på "Schema-Fit" (0.0 - 1.0).
+        * 0.8-1.0 (Hög): Entiteten uppfyller definitionen tydligt och har unika attribut.
+        * <0.3 (Låg/Brus): Entiteten är generisk eller trivial.
+      - "context_keywords": Lista 2-4 nyckelord som beskriver entitetens roll/kontext (för deduplicering). Detta fält är OBLIGATORISKT.
+      - "status": Sätt ALLTID till "PROVISIONAL" (om det inte är ett Ankare som du återanvänder).
+      
     
-    ALIAS-DETEKTION:
-    Om texten innehåller namnvarianter som troligen refererar till samma entitet,
-    rapportera dessa som "potential_aliases". Exempel:
-    - "Sänk" nämns i samma kontext som "Cenk" → potential alias
-    - "Adda-grejen" och "Adda PoC" → potential alias
-    - Smeknamn, förkortningar, felstavningar
-    - "CCM" och "Carbon Copy Machine" → potential alias
+    2. ANKARE (Prioritet 1):
+      - Kontrollera alltid listan "KÄNDA ENTITETER" om sådan finns.
+      - Om texten nämner en entitet som matchar en känd entitet, MÅSTE du återanvända dess UUID exakt.
     
-    OUTPUT KRAV (Returnera ENDAST denna JSON):
-    {
-      "summary": "Kort sammanfattning på svenska. INKLUDERA viktiga datum och aktiviteter.",
-      "graph_nodes": {
-        "Händelser": 0.7,
-        "Teknologier": 0.3,
-        "Person": {
-          "Tommy Olsson": 0.6
-        },
-        "Aktör": {
-          "Adda": 0.8
-        },
-        "Projekt": {
-          "Adda PoC": 0.9
-        }
-      },
-      "dates_mentioned": ["YYYY-MM-DD format för alla datum nämnda i texten"],
-      "actions": ["Aktiviteter som nämns (t.ex. 'Användartester', 'Demo', 'Möte')"],
-      "deadlines": [
-        {"what": "Vad som ska ske", "when": "YYYY-MM-DD"}
+    3. SKAPA RELATIONER:
+      - Identifiera kopplingar mellan noderna.
+      - Skapa ENDAST relationstyper som existerar enligt TILLÅTNA RELATIONSTYPER nedan.
+      - Koppla relationer ENDAST på det sätt som explicit framgår som tillåtet (Källa -> Mål).
+    
+    TILLÅTNA RELATIONSTYPER (WHITELIST):
+    {edge_types_context}
+
+    === KONTEXT FRÅN KÄLLAN ===
+    {known_entities_context}
+
+    RETURNERA JSON (Exakt format):
+    {{
+      "nodes": [
+        {{ 
+          "name": "Namn", 
+          "type": "Nodtyp", 
+          "properties": {{ "egenskap": "värde" }},  // OBS: I vår platta modell ligger egenskaperna direkt på roten, inte i ett properties-objekt.
+          "org_type": "Bolag", // Exempel på egenskap
+          "context_keywords": ["ord1", "ord2"], 
+          "status": "PROVISIONAL",
+          "confidence": 0.85
+        }}
       ],
-      "potential_aliases": [
-        {"name_variant": "Smeknamn/variant", "likely_refers_to": "Formellt namn", "entity_type": "Person|Aktör|Projekt", "confidence": "low|medium|high"}
+      "edges": [
+        {{ "source": "Namn", "target": "Namn", "type": "RELATIONSTYP", "confidence": 0.9 }}
       ]
-    }
-    
-    GRAPH_NODES INSTRUKTION:
-    - Abstrakta koncept (masternoder som Händelser, Teknologier): Ange relevans 0.0-1.0
-    - Typade entiteter (Person, Aktör, Projekt): Dict med namn → relevans
-    - CUTOFF: Inkludera ENDAST noder med relevans >= 0.2
-    - Dokumentet kan vara relevant för FLERA masternoder (viktat)
-    - Använd EXAKT namn från KÄNDA PERSONER/PROJEKT om tillgängliga
+    }}
 
-# --- Chatt-agenten (RAG-gränssnitt) ---
-chat:
-  system_prompt: |
-    Du är "MyMemory", en intelligent assistent. Svara baserat på bifogad kontext.
+    TEXT ATT ANALYSERA:
+    "{text_chunk}"
+
 
 # --- Dreamer (Taxonomi-konsolidering) ---
 dreamer:
