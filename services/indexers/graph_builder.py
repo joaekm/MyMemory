@@ -14,14 +14,14 @@ import re
 # Lägg till projektroten i sys.path för att hitta services-paketet
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.graph_service import GraphStore
+from services.utils.graph_service import GraphStore
 
 # --- CONFIG LOADER ---
 def hitta_och_ladda_config():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths_to_check = [
         os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
-        os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
+        os.path.join(script_dir, '..','..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, '..', 'my_mem_config.yaml')
     ]
     config_path = None

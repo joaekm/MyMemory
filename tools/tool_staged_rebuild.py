@@ -24,7 +24,7 @@ import logging
 # Lägg till project root i path för imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools.rebuild.orchestrator import RebuildOrchestrator
+from tools.rebuild import RebuildOrchestrator
 
 # === LOGGING ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - REBUILD - %(levelname)s - %(message)s')

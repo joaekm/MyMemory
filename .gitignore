@@ -43,3 +43,6 @@ logs/*.txt
 .env
 config/my_mem_config.yaml
 
+# Google Drive garbage
+.tmp.driveupload/
+.tmp.driveupload
