@@ -157,7 +157,7 @@
       "allowed_sources": ["Slack", "Mail", "Calendar"],
       "creation_policy": "ALWAYS_CREATE",
       "properties": {
-        "subject": { "required": true, "type": "string", "default": "No Title" },
+        "name": { "required": true, "type": "string", "default": "No Title" },
         "source_id": { "required": false, "type": "string", "description": "Google Event ID" },
         "start_time": { "required": false, "type": "timestamp" },
         "end_time": { "required": false, "type": "timestamp" },

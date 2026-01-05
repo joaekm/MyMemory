@@ -394,3 +394,87 @@ class GraphStore:
             """, [entity_id, limit]).fetchall()
         
         return [row[0] for row in results]
+
+    # --- DREAMER SUPPORT ---
+
+    def add_pending_review(self, entity: str, master_node: str, score: float, reason: str, context: dict):
+        """
+        Lägg till en manuell granskning (för Dreamer).
+        """
+        import uuid
+        
+        review_id = str(uuid.uuid4())
+        context_json = json.dumps(context, ensure_ascii=False)
+        
+        with self._lock:
+            # Skapa tabellen om den saknas
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS pending_reviews (
+                    id TEXT PRIMARY KEY,
+                    entity TEXT,
+                    master_node TEXT,
+                    score FLOAT,
+                    reason TEXT,
+                    context TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            self.conn.execute("""
+                INSERT INTO pending_reviews (id, entity, master_node, score, reason, context)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, [review_id, entity, master_node, score, reason, context_json])
+            
+            LOGGER.info(f"Saved pending review: {entity} vs {master_node} ({score})")
+
+    def merge_nodes_into(self, target_id: str, source_id: str):
+        """
+        Slå ihop source_id in i target_id.
+        Flytta alla relationer och alias. Radera source_id.
+        """
+        if self.read_only:
+            raise RuntimeError("HARDFAIL: Read-only mode")
+
+        with self._lock:
+            # 1. Flytta UTGÅENDE kanter (source -> X) till (target -> X)
+            # Uppdatera bara om relationen inte redan finns
+            self.conn.execute("""
+                UPDATE edges 
+                SET source = ? 
+                WHERE source = ? 
+                  AND NOT EXISTS (
+                      SELECT 1 FROM edges e2 
+                      WHERE e2.source = ? AND e2.target = edges.target AND e2.edge_type = edges.edge_type
+                  )
+            """, [target_id, source_id, target_id])
+            
+            # 2. Flytta INKOMMANDE kanter (X -> source) till (X -> target)
+            self.conn.execute("""
+                UPDATE edges 
+                SET target = ? 
+                WHERE target = ? 
+                  AND NOT EXISTS (
+                      SELECT 1 FROM edges e2 
+                      WHERE e2.source = edges.source AND e2.target = ? AND e2.edge_type = edges.edge_type
+                  )
+            """, [target_id, source_id, target_id])
+            
+            # 3. Radera kvarvarande kanter (dubbletter som inte flyttades)
+            self.conn.execute("DELETE FROM edges WHERE source = ? OR target = ?", [source_id, source_id])
+            
+            # 4. Flytta ALIASES
+            res_source = self.conn.execute("SELECT aliases FROM nodes WHERE id = ?", [source_id]).fetchone()
+            source_aliases = json.loads(res_source[0]) if res_source and res_source[0] else []
+            
+            res_target = self.conn.execute("SELECT aliases FROM nodes WHERE id = ?", [target_id]).fetchone()
+            target_aliases = json.loads(res_target[0]) if res_target and res_target[0] else []
+            
+            # Slå ihop och deduplicera
+            new_aliases = list(set(target_aliases + source_aliases + [source_id]))
+            
+            self.conn.execute("UPDATE nodes SET aliases = ? WHERE id = ?", [json.dumps(new_aliases, ensure_ascii=False), target_id])
+            
+            # 5. Radera source nod
+            self.conn.execute("DELETE FROM nodes WHERE id = ?", [source_id])
+            
+            LOGGER.info(f"Merged {source_id} into {target_id}")

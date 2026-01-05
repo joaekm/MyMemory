@@ -62,6 +62,24 @@ def load_prompts():
 
 PROMPTS = load_prompts()
 
+# Bakåtkompatibilitet för Dreamer
+class LLMClient:
+    def __init__(self):
+        self.client = client
+
+    def generate(self, prompt: str) -> str:
+        if not self.client:
+            return ""
+        try:
+            response = self.client.models.generate_content(
+                model="gemini-2.0-flash-lite-preview",
+                contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
+            )
+            return response.text
+        except Exception as e:
+            logging.error(f"LLMClient generate failed: {e}")
+            return ""
+
 @mcp.tool()
 def validate_extraction(data: dict) -> str:
     """

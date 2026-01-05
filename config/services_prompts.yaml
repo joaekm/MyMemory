@@ -159,3 +159,45 @@ dreamer:
     {"Händelser": ["Sprint review", "Standup"], "Teknologier": ["Kubernetes"], "Person": ["Anna"], "aliases_detected": [{"alias": "K8s", "canonical": "Kubernetes", "confidence": "high"}]}
     
     Nycklar MÅSTE vara exakta nodnamn från BEFINTLIGA MASTERNODER. Inkludera INTE noder utan nya koncept.
+
+# --- Entity Resolver (Dreamer: Dubblett-jakt) ---
+entity_resolver:
+  entity_resolution_prompt: |
+    Du är en expert på Identity Resolution. Din uppgift är att avgöra om två noder (Node A och Node B) representerar SAMMA verkliga entitet.
+
+    NODE A (Kandidat):
+    {node_a_json}
+
+    NODE B (Matchningsobjekt):
+    {node_b_json}
+
+    INSTRUKTIONER:
+    1. Jämför namn, alias, typ och kontext.
+    2. Ta hänsyn till stavfel, smeknamn (Jocke/Joakim) och namnvariationer (AB/Aktiebolag).
+    3. Titta noga på 'context_keywords' om de finns - pekar de på samma roll/område?
+    4. Om namnen är lika men kontexten är helt olika (t.ex. Jocke på IT vs Jocke på Sälj), är det INTE en match.
+    
+    BEDÖMNING:
+    Returnera en JSON med:
+    - "decision": "MERGE" (om det är samma), "IGNORE" (om olika/osäkert), "REVIEW" (om troligt men kräver människa).
+    - "confidence": 0.0 - 1.0
+    - "reason": Kort förklaring.
+
+    RETURNERA ENDAST JSON:
+    {{
+      "decision": "MERGE",
+      "confidence": 0.95,
+      "reason": "Namnen är identiska och båda har kontexten 'IT-chef'."
+    }}
+
+  context_pruning_prompt: |
+    Du ska städa upp en lista med nyckelord för en entitet.
+    Ta bort dubbletter, synonymer och irrelevanta ord. Behåll de mest beskrivande.
+    
+    LISTA:
+    {keywords}
+    
+    RETURNERA JSON:
+    {{
+      "pruned_keywords": ["ord1", "ord2"]
+    }}
