@@ -1,251 +1,162 @@
 import os
 import time
 import yaml
-import shutil
 import logging
 import datetime
-import chromadb
 import re
 import zoneinfo
-from chromadb.utils import embedding_functions
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+import sys
+
+# Path setup
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from services.utils.vector_service import get_vector_service
 
 # --- CONFIG LOADER ---
 def hitta_och_ladda_config():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    # Sök uppåt i hierarkin efter config
     paths_to_check = [
         os.path.join(script_dir, '..', '..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
         os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
     ]
-    config_path = None
     for p in paths_to_check:
         if os.path.exists(p):
-            config_path = p
-            break
-    if not config_path:
-        print("[VectorIndexer] CRITICAL: Config not found.")
-        exit(1)
-    
-    with open(config_path, 'r') as f: config = yaml.safe_load(f)
-    
-    # Expand paths
-    for k, v in config['paths'].items():
-        config['paths'][k] = os.path.expanduser(v)
-    config['logging']['log_file_path'] = os.path.expanduser(config['logging']['log_file_path'])
-    return config
+            with open(p, 'r') as f:
+                conf = yaml.safe_load(f)
+                for k, v in conf['paths'].items():
+                    conf['paths'][k] = os.path.expanduser(v)
+                return conf
+    print("[VectorIndexer] CRITICAL: Config not found.")
+    exit(1)
 
 CONFIG = hitta_och_ladda_config()
-
-# --- SETUP ---
-# OBS: Använder nu korrekta nycklar från din config
-LAKE_DIR = CONFIG['paths']['lake_store']     # Var Lake-filerna ligger
-CHROMA_PATH = CONFIG['paths']['vector_db'] # Var databasen ligger
-LOG_FILE = CONFIG['logging']['log_file_path']
-
-# Mapp för trasiga filer (Karantän)
-FAILED_DIR = os.path.join(LAKE_DIR, "_failed")
-os.makedirs(FAILED_DIR, exist_ok=True)
-
-# Regex för att hitta UUID i filnamn (t.ex. "Filnamn_UUID.md")
+LAKE_STORE = CONFIG['paths']['lake_store']
+LOG_FILE = os.path.expanduser(CONFIG['logging']['log_file_path'])
 UUID_SUFFIX_PATTERN = re.compile(r'_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.md$')
 
 # Tidszon
 TZ_NAME = CONFIG.get('system', {}).get('timezone', 'UTC')
 try:
     SYSTEM_TZ = zoneinfo.ZoneInfo(TZ_NAME)
-except Exception as e:
-    print(f"[CRITICAL] HARDFAIL: Ogiltig timezone '{TZ_NAME}': {e}")
-    exit(1)
+except Exception:
+    SYSTEM_TZ = zoneinfo.ZoneInfo("UTC")
 
-# Logging Setup
+# Logging
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-logging.basicConfig(
-    filename=LOG_FILE, 
-    level=logging.INFO, 
-    format='%(asctime)s - VECTOR - %(levelname)s - %(message)s'
-)
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format='%(asctime)s - VECTOR - %(levelname)s - %(message)s')
 LOGGER = logging.getLogger('VectorIndexer')
 
-# --- HELPERS ---
-def _ts():
-    return datetime.datetime.now(SYSTEM_TZ).strftime("[%H:%M:%S]")
+def _ts(): return datetime.datetime.now(SYSTEM_TZ).strftime("[%H:%M:%S]")
+def _kort(f, l=25): return f if len(f)<=l else "..." + f[-(l-3):]
 
-def _kort(filnamn, max_len=30):
-    if len(filnamn) <= max_len: return filnamn
-    return filnamn[:15] + "..." + filnamn[-10:]
-
-# --- CHROMA INIT ---
-print(f"{_ts()} ⚙️  Connecting to ChromaDB at {CHROMA_PATH}...")
+# Initiera Service
 try:
-    CHROMA_CLIENT = chromadb.PersistentClient(path=CHROMA_PATH)
-    EMBEDDING_FUNC = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-    # VIKTIGT: Vi använder standardnamnet "knowledge_base" för att matcha MCP-servern
-    VECTOR_COLLECTION = CHROMA_CLIENT.get_or_create_collection(name="knowledge_base", embedding_function=EMBEDDING_FUNC)
-    print(f"{_ts()} ✅ Connected. Collection size: {VECTOR_COLLECTION.count()}")
+    VECTOR_SERVICE = get_vector_service("knowledge_base")
 except Exception as e:
-    print(f"{_ts()} ❌ CRITICAL: Could not connect to ChromaDB: {e}")
+    print(f"[CRITICAL] Kunde inte initiera VectorService: {e}")
     exit(1)
 
-# --- CORE LOGIC ---
-
-def quarantine_file(filväg, orsak):
-    """Flyttar en trasig fil till _failed-mappen."""
-    filnamn = os.path.basename(filväg)
-    dest = os.path.join(FAILED_DIR, filnamn)
+def indexera_vektor(filväg, filnamn):
     try:
-        shutil.move(filväg, dest)
-        LOGGER.warning(f"Quarantined {filnamn}: {orsak}")
-        print(f"{_ts()} 🗑️  QUARANTINE: {_kort(filnamn)} -> Moved to _failed")
-    except Exception as e:
-        LOGGER.error(f"Failed to quarantine {filnamn}: {e}")
+        # 1. Validation
+        match = UUID_SUFFIX_PATTERN.search(filnamn)
+        unit_id = match.group(1) if match else None
+        if not unit_id: return False
 
-def indexera_fil(filväg):
-    filnamn = os.path.basename(filväg)
-    
-    # 1. Validation: Filnamn & UUID
-    match = UUID_SUFFIX_PATTERN.search(filnamn)
-    unit_id = match.group(1) if match else None
-    
-    if not unit_id:
-        # Om filen inte har ett UUID, ignorerar vi den bara (kanske en readme eller tmp-fil)
-        return False
-
-    try:
         # 2. Läs fil
-        with open(filväg, 'r', encoding='utf-8') as f: 
-            content = f.read()
-        
-        # 3. Validation: Frontmatter
-        if not content.startswith("---"):
-            raise ValueError("Saknar YAML frontmatter (---)")
-            
+        with open(filväg, 'r', encoding='utf-8') as f: content = f.read()
+        if not content.startswith("---"): return False
         parts = content.split("---", 2)
-        if len(parts) < 3:
-            raise ValueError("Ogiltigt format (Saknar body efter frontmatter)")
+        if len(parts) < 3: return False
         
-        try:
-            metadata = yaml.safe_load(parts[1])
-        except yaml.YAMLError as e:
-            raise ValueError(f"Trasig YAML: {e}")
-
+        metadata = yaml.safe_load(parts[1])
         text = parts[2].strip()
-        if not text:
-            raise ValueError("Tom body text")
         
-        # 4. Förbered Data
+        # 3. Upsert via Service
         ai_summary = metadata.get('ai_summary') or ""
         timestamp = metadata.get('timestamp_created') or ""
         
-        # Inkludera graf-kontext om den finns
         graph_ctx = metadata.get("graph_context_summary")
-        context_block = f"KONTEXT (Grafrelationer):\n{graph_ctx}\n\n" if graph_ctx else ""
+        ctx_text = f"KONTEXT (Grafrelationer):\n{graph_ctx}\n\n" if graph_ctx else ""
         
-        full_doc = f"{context_block}FILENAME: {filnamn}\nSUMMARY: {ai_summary}\n\nCONTENT:\n{text[:8000]}"
+        full_doc = f"{ctx_text}FILENAME: {filnamn}\nSUMMARY: {ai_summary}\n\nCONTENT:\n{text[:8000]}"
 
-        # 5. Upsert till Chroma
-        VECTOR_COLLECTION.upsert(
-            ids=[unit_id],
-            documents=[full_doc],
-            metadatas=[{
-                "timestamp": str(timestamp),
-                "filename": filnamn,
-                "type": metadata.get('type', 'Unknown'),
-                "name": metadata.get('name', filnamn) # För sökbarhet i MCP
-            }]
+        VECTOR_SERVICE.upsert(
+            id=unit_id,
+            text=full_doc,
+            metadata={"timestamp": timestamp, "filename": filnamn}
         )
         
-        print(f"{_ts()} ✅ INDEX: {_kort(filnamn)}")
+        print(f"{_ts()} ✅ INDEX: {_kort(filnamn)} → ChromaDB")
         LOGGER.info(f"Indexerad: {filnamn} ({unit_id})")
         return True
 
     except Exception as e:
-        print(f"{_ts()} ❌ FAIL: {_kort(filnamn)} - {str(e)}")
-        # HÄR ÄR DIN LOGIK: Om det misslyckas -> Karantän
-        quarantine_file(filväg, str(e))
+        print(f"{_ts()} ❌ INDEX: {_kort(filnamn)} → FAILED")
+        LOGGER.error(f"Fel vid indexering {filnamn}: {e}")
         return False
 
-def perform_delta_sync():
-    """Jämför Lake-filer med ChromaDB och indexerar det som saknas."""
-    print(f"{_ts()} 🔄 Starting Delta Sync...")
-    
-    # 1. Hämta alla filer i Lake
-    lake_files = {} # {uuid: full_path}
-    try:
-        for f in os.listdir(LAKE_DIR):
-            if f.endswith(".md"):
-                match = UUID_SUFFIX_PATTERN.search(f)
-                if match:
-                    lake_files[match.group(1)] = os.path.join(LAKE_DIR, f)
-    except FileNotFoundError:
-        print(f"{_ts()} ❌ Lake directory not found: {LAKE_DIR}")
+# --- SMART DELTA SCANNING ---
+def run_initial_scan():
+    """Jämför Lake mot Vektorindex och indexera BARA det som saknas."""
+    print(f"{_ts()} 🔍 Startar Smart Delta-Scan av {LAKE_STORE}...")
+    if not os.path.exists(LAKE_STORE):
+        print(f"{_ts()} ⚠️ Lake-mappen saknas!")
         return
 
-    # 2. Hämta alla IDn i Chroma
-    try:
-        db_data = VECTOR_COLLECTION.get(include=[]) # Hämta bara IDs
-        existing_ids = set(db_data['ids'])
-    except Exception:
-        existing_ids = set()
+    # 1. Hämta alla filer i Lake
+    lake_files = {f: None for f in os.listdir(LAKE_STORE) if f.endswith(".md") and UUID_SUFFIX_PATTERN.search(f)}
+    
+    # 2. Extrahera UUIDs från filnamn
+    lake_uuids = {}
+    for fname in lake_files:
+        match = UUID_SUFFIX_PATTERN.search(fname)
+        if match:
+            lake_uuids[match.group(1)] = fname
 
-    # 3. Räkna ut diff
-    missing_ids = set(lake_files.keys()) - existing_ids
+    # 3. Hämta befintliga IDs från Vektordatabasen
+    print(f"{_ts()} 📡 Hämtar status från Vektordatabasen...")
+    existing_ids = set(VECTOR_SERVICE.collection.get()['ids'])
+    
+    # 4. Beräkna Diff (Vad saknas i indexet?)
+    missing_ids = set(lake_uuids.keys()) - existing_ids
     
     if not missing_ids:
-        print(f"{_ts()} ✨ System is in sync. No backlog.")
+        print(f"{_ts()} ✅ Indexet är synkat. Inga åtgärder behövs.")
         return
 
-    print(f"{_ts()} ⚠️  Found {len(missing_ids)} unindexed files. Processing backlog...")
+    print(f"{_ts()} 📦 Hittade {len(missing_ids)} filer som saknas i indexet. Börjar indexera...")
     
-    # 4. Bearbeta backlog
-    success_count = 0
-    fail_count = 0
-    
+    count = 0
     for uid in missing_ids:
-        path = lake_files[uid]
-        if indexera_fil(path):
-            success_count += 1
-        else:
-            fail_count += 1
+        filename = lake_uuids[uid]
+        filepath = os.path.join(LAKE_STORE, filename)
+        if indexera_vektor(filepath, filename):
+            count += 1
             
-    print(f"{_ts()} 🏁 Delta Sync Complete. Added: {success_count}, Failed/Moved: {fail_count}")
-
-# --- WATCHER ---
+    print(f"{_ts()} ✅ Delta-Scan klar. {count} filer indexerade.")
 
 class VectorHandler(FileSystemEventHandler):
-    def __init__(self):
-        self.processed_cache = set() # Enkel debounce
-
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".md"):
-            self._try_process(event.src_path)
-
+            self._process(event.src_path)
     def on_modified(self, event):
         if not event.is_directory and event.src_path.endswith(".md"):
-            self._try_process(event.src_path)
-
-    def _try_process(self, path):
-        # Debounce: Om vi nyss körde den, vänta lite
-        if path in self.processed_cache: return
-        
-        time.sleep(0.5) # Låt filen skrivas klart
-        
-        if indexera_fil(path):
-            self.processed_cache.add(path)
-            # Rensa cachen lite då och då så vi inte äter RAM
-            if len(self.processed_cache) > 1000:
-                self.processed_cache.clear()
+            self._process(event.src_path)
+    def _process(self, path):
+        time.sleep(0.5)
+        indexera_vektor(path, os.path.basename(path))
 
 if __name__ == "__main__":
-    # 1. Kör Delta Sync först (Självläkning)
-    perform_delta_sync()
+    # KÖR DELTA-SCAN FÖRST
+    run_initial_scan()
     
-    # 2. Starta Watcher
-    print(f"{_ts()} 👀 Vector Indexer watching: {LAKE_DIR}")
+    print(f"{_ts()} ✓ Vector Indexer online (Watchdog active)")
     observer = Observer()
-    observer.schedule(VectorHandler(), LAKE_DIR, recursive=False)
+    observer.schedule(VectorHandler(), LAKE_STORE, recursive=False)
     observer.start()
     try:
         while True: time.sleep(1)

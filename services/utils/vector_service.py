@@ -1,163 +1,140 @@
+"""
+VectorService - Central hantering av embeddings och ChromaDB.
+
+Single Source of Truth för vilken modell som används för att
+vektorisera text i systemet.
+Implementerar Multiton-mönster för att hantera olika collections.
+"""
 
 import os
+import yaml
 import logging
+import threading
 import chromadb
 from chromadb.utils import embedding_functions
 from typing import List, Dict, Any, Optional
-import yaml
 
-# Setup logging
 LOGGER = logging.getLogger("VectorService")
 
 class VectorService:
-    """
-    Tjänst för interaktion med ChromaDB (Vektordatabas).
-    Hanterar embeddings, indexering och sökning.
+    _instances = {}
+    _lock = threading.Lock()
     
-    Collection: 'dfm_node_index' (Nodes)
-    """
-    
-    def __init__(self, config_path: str = "config/my_mem_config.yaml", collection_name: str = "dfm_node_index"):
+    def __init__(self, config_path: str = None, collection_name: str = "knowledge_base"):
         self.config = self._load_config(config_path)
-        self.db_path = os.path.expanduser(self.config['paths']['chroma_db'])
+        # Robust path lookup: Stödjer både 'chroma_db' och 'vector_db'
+        paths = self.config.get('paths', {})
+        db_path_raw = paths.get('chroma_db') or paths.get('vector_db')
+        
+        if not db_path_raw:
+             raise KeyError("Config 'paths' saknar 'chroma_db' eller 'vector_db'")
+             
+        self.db_path = os.path.expanduser(db_path_raw)
         self.collection_name = collection_name
         
         # Init Chroma
         os.makedirs(self.db_path, exist_ok=True)
         self.client = chromadb.PersistentClient(path=self.db_path)
         
-        # Embedding Function
-        # Läs modellnamn från config, fallback till standard
-        model_name = self.config.get('ai_engine', {}).get('models', {}).get('embedding_swedish', "all-MiniLM-L6-v2")
+        # MODEL SELECTION
+        model_name = self.config.get('ai_engine', {}).get(
+            'embedding_model', 
+            self.config.get('ai_engine', {}).get('models', {}).get('embedding_swedish', "paraphrase-multilingual-MiniLM-L12-v2")
+        )
         LOGGER.info(f"Using embedding model: {model_name}")
+        self.model_name = model_name
         
-        self.embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=model_name)
+        try:
+            self.embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=model_name)
+        except Exception as e:
+            LOGGER.error(f"HARDFAIL: Kunde inte ladda embedding-modell {model_name}: {e}")
+            raise RuntimeError(f"Kunde inte ladda embedding-modell: {e}") from e
         
         # Get/Create Collection
-        self.collection = self.client.get_or_create_collection(
-            name=self.collection_name, 
-            embedding_function=self.embedding_func
-        )
-        LOGGER.info(f"VectorService initialized at {self.db_path} (Collection: {self.collection_name})")
-
-    def _load_config(self, path: str) -> dict:
         try:
-            # Försök hitta config relativt om absolut misslyckas
-            if not os.path.exists(path):
-                # Försök hitta uppåt
-                base_dir = os.path.dirname(os.path.abspath(__file__))
-                path = os.path.join(base_dir, "..", "..", "config", "my_mem_config.yaml")
-                
-            with open(path, "r") as f:
-                return yaml.safe_load(f)
+            self.collection = self.client.get_or_create_collection(
+                name=self.collection_name, 
+                embedding_function=self.embedding_func
+            )
+            LOGGER.info(f"VectorService initialized at {self.db_path} (Collection: {self.collection_name})")
         except Exception as e:
-            LOGGER.error(f"Failed to load config from {path}: {e}")
-            raise
+            LOGGER.error(f"HARDFAIL: Kunde inte ansluta till ChromaDB collection: {e}")
+            raise RuntimeError(f"ChromaDB-fel: {e}") from e
+
+    def _load_config(self, path: str = None) -> dict:
+        if not path:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            paths = [
+                os.path.join(base_dir, '..', '..', 'config', 'my_mem_config.yaml'),
+                os.path.join(base_dir, '..', 'config', 'my_mem_config.yaml'),
+                os.path.join(base_dir, 'config', 'my_mem_config.yaml'),
+            ]
+            for p in paths:
+                if os.path.exists(p):
+                    path = p
+                    break
+        
+        if not path or not os.path.exists(path):
+            raise FileNotFoundError("HARDFAIL: Config not found")
+
+        with open(path, "r") as f:
+            return yaml.safe_load(f)
 
     def upsert(self, id: str, text: str, metadata: Dict[str, Any] = None):
-        """Lägg till eller uppdatera ett dokument i indexet."""
-        if not text:
-            LOGGER.warning(f"Skipping upsert for {id}: Empty text")
-            return
-
-        try:
-            self.collection.upsert(
-                ids=[id],
-                documents=[text],
-                metadatas=[metadata or {}]
-            )
-            LOGGER.debug(f"Upserted {id} into vector index.")
-        except Exception as e:
-            LOGGER.error(f"Failed to upsert {id}: {e}")
-            raise
+        if not text: return
+        self.collection.upsert(ids=[id], documents=[text], metadatas=[metadata or {}])
 
     def upsert_node(self, node: Dict):
-        """
-        Specialmetod för att indexera en graf-nod.
-        Formaterar noden till sökbar text.
-        """
         if not node: return
-        
         node_id = node.get('id')
-        node_type = node.get('type')
-        properties = node.get('properties', {})
-        name = properties.get('name', '')
-        
+        name = node.get('properties', {}).get('name', '')
         if not name: return
 
-        # Bygg textrepresentation ("Document") för embedding
-        aliases = node.get('aliases', [])
-        aliases_str = ", ".join(aliases) if aliases else ""
-        context_keywords = properties.get('context_keywords', [])
-        keywords_str = ", ".join(context_keywords) if isinstance(context_keywords, list) else str(context_keywords)
-        role = properties.get('role', '')
-        
-        text_parts = [
-            f"Name: {name}",
-            f"Type: {node_type}"
-        ]
-        if role: text_parts.append(f"Role: {role}")
-        if aliases_str: text_parts.append(f"Aliases: {aliases_str}")
-        if keywords_str: text_parts.append(f"Keywords: {keywords_str}")
+        parts = [f"Name: {name}", f"Type: {node.get('type')}"]
+        props = node.get('properties', {})
+        if 'role' in props: parts.append(f"Role: {props['role']}")
+        if node.get('aliases'): parts.append(f"Aliases: {', '.join(node['aliases'])}")
+        if props.get('context_keywords'): 
+            kw = props['context_keywords']
+            parts.append(f"Keywords: {', '.join(kw) if isinstance(kw, list) else str(kw)}")
             
-        full_text = ". ".join(text_parts)
-        
-        metadata = {
-            "type": node_type,
+        full_text = ". ".join(parts)
+        self.upsert(id=node_id, text=full_text, metadata={
+            "type": node.get('type'),
             "name": name,
             "source": "graph_node"
-        }
-        
-        self.upsert(id=node_id, text=full_text, metadata=metadata)
+        })
 
     def search(self, query_text: str, limit: int = 5, where: Dict = None) -> List[Dict]:
-        """
-        Sök efter liknande dokument.
-        Returnerar en lista av dicts: { 'id': str, 'distance': float, 'metadata': dict, 'document': str }
-        """
-        if not query_text:
-            return []
-            
-        try:
-            results = self.collection.query(
-                query_texts=[query_text],
-                n_results=limit,
-                where=where
-            )
-            
-            # Formatera resultatet snyggare
-            formatted_results = []
-            if not results['ids']:
-                return []
-                
-            ids = results['ids'][0]
-            distances = results['distances'][0] if results['distances'] else [0.0]*len(ids)
-            metadatas = results['metadatas'][0] if results['metadatas'] else [{}]*len(ids)
-            documents = results['documents'][0] if results['documents'] else [""]*len(ids)
-            
-            for i in range(len(ids)):
-                formatted_results.append({
-                    "id": ids[i],
-                    "distance": distances[i], # Lägre är bättre (cosine distance)
-                    "metadata": metadatas[i],
-                    "document": documents[i]
-                })
-                
-            return formatted_results
-            
-        except Exception as e:
-            LOGGER.error(f"Vector search failed: {e}")
-            return []
+        if not query_text: return []
+        results = self.collection.query(query_texts=[query_text], n_results=limit, where=where)
+        formatted = []
+        if not results['ids']: return []
+        
+        ids = results['ids'][0]
+        distances = results['distances'][0] if results['distances'] else [0.0]*len(ids)
+        metadatas = results['metadatas'][0] if results['metadatas'] else [{}]*len(ids)
+        documents = results['documents'][0] if results['documents'] else [""]*len(ids)
+        
+        for i in range(len(ids)):
+            formatted.append({
+                "id": ids[i],
+                "distance": distances[i],
+                "metadata": metadatas[i],
+                "document": documents[i]
+            })
+        return formatted
 
     def delete(self, id: str):
-        """Ta bort ett dokument från indexet."""
-        try:
-            self.collection.delete(ids=[id])
-            LOGGER.debug(f"Deleted {id} from vector index.")
-        except Exception as e:
-            LOGGER.error(f"Failed to delete {id}: {e}")
+        self.collection.delete(ids=[id])
 
     def count(self) -> int:
         return self.collection.count()
 
-
+# Singleton Factory
+def get_vector_service(collection_name: str = "knowledge_base"):
+    if collection_name not in VectorService._instances:
+        with VectorService._lock:
+            if collection_name not in VectorService._instances:
+                VectorService._instances[collection_name] = VectorService(collection_name=collection_name)
+    return VectorService._instances[collection_name]

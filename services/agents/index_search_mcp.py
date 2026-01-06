@@ -3,7 +3,6 @@ import sys
 import yaml
 import json
 import logging
-import chromadb
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -13,7 +12,6 @@ logging.basicConfig(
     stream=sys.stderr,
     format='%(levelname)s:%(name)s:%(message)s'
 )
-logging.getLogger("chromadb").setLevel(logging.WARNING)
 
 # Path setup
 project_root = str(Path(__file__).parent.parent.parent)
@@ -22,6 +20,8 @@ if project_root not in sys.path:
 
 from mcp.server.fastmcp import FastMCP
 from services.utils.graph_service import GraphStore
+# NY IMPORT: Använd VectorService (Single Source of Truth)
+from services.utils.vector_service import get_vector_service
 
 # --- CONFIG LOADING ---
 def _load_config():
@@ -37,21 +37,11 @@ CONFIG = _load_config()
 PATHS = CONFIG.get('paths', {})
 
 GRAPH_PATH = os.path.expanduser(PATHS.get('graph_db', '~/MyMemory/Index/GraphDB'))
-VECTOR_PATH = os.path.expanduser(PATHS.get('vector_db', '~/MyMemory/Index/VectorDB'))
 LAKE_PATH = os.path.expanduser(PATHS.get('lake_dir', '~/MyMemory/Lake'))
 
 mcp = FastMCP("MyMemoryTrinityConsole")
 
 # --- HELPERS ---
-
-def _get_vector_collection():
-    """Hämtar ChromaDB collection eller kastar fel."""
-    # OBS: Tar bort try/except här för att låta verktyget hantera felet och visa det för dig
-    if not os.path.exists(VECTOR_PATH):
-        raise FileNotFoundError(f"Path does not exist: {VECTOR_PATH}")
-        
-    client = chromadb.PersistentClient(path=VECTOR_PATH)
-    return client.get_collection("knowledge_base")
 
 def _parse_frontmatter(file_path: str) -> Dict:
     """Läser YAML-frontmatter från en markdown-fil."""
@@ -77,6 +67,7 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
     Används för att svara på: "Finns noden X?" eller "Hur ser relationerna ut?"
     """
     try:
+        # GraphStore använder DuckDB internt och är robust
         graph = GraphStore(GRAPH_PATH, read_only=True)
         limit = 15
         
@@ -120,36 +111,41 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
 
 # --- TOOL 2: VECTOR (Semantics) ---
 
-# Uppdaterat verktyg som visar det faktiska felet
 @mcp.tool()
 def query_vector_memory(query_text: str, n_results: int = 5) -> str:
+    """
+    Söker i VEKTOR-minnet (Semantisk sökning).
+    Använder VectorService för att garantera rätt modell och collection.
+    """
     try:
-        # Nu kommer vi se exakt varför den kraschar om den gör det
-        coll = _get_vector_collection()
+        # 1. Hämta Singleton för Knowledge Base (samma som indexeraren använder)
+        # Vi ber explicit om "knowledge_base" enligt din instruktion
+        vs = get_vector_service("knowledge_base")
         
-        results = coll.query(query_texts=[query_text], n_results=n_results)
+        # 2. Sök (VectorService returnerar en ren lista med dicts)
+        results = vs.search(query_text=query_text, limit=n_results)
         
-        if not results['ids'][0]:
+        if not results:
             return f"VEKTOR: Inga semantiska matchningar för '{query_text}'."
 
-        # ... (resten av koden är samma som förut) ...
-        
         output = [f"=== VEKTOR RESULTAT ('{query_text}') ==="]
-        ids = results['ids'][0]
-        distances = results['distances'][0]
-        metadatas = results['metadatas'][0]
-        documents = results['documents'][0]
+        output.append(f"Modell: {vs.model_name}") # Bekräfta modellen för transparens
+        output.append("-" * 30)
         
-        for i, uid in enumerate(ids):
-            dist = distances[i]
-            meta = metadatas[i]
-            content_preview = documents[i].replace('\n', ' ')[:100] + "..."
+        for i, item in enumerate(results):
+            # VectorService har redan packat upp Chroma-strukturen åt oss
+            dist = item['distance']
+            meta = item['metadata']
+            content = item['document']
+            uid = item['id']
             
+            content_preview = content.replace('\n', ' ')[:150] + "..."
+            
+            # Bedöm kvalitet (lägre distans = bättre)
             quality = "🔥 Stark" if dist < 0.8 else "❄️ Svag" if dist > 1.2 else "☁️ Medel"
             
             output.append(f"{i+1}. [{quality} Match] (Dist: {dist:.3f})")
-            output.append(f"   Source: {meta.get('name', 'Unknown')}")
-            output.append(f"   Type: {meta.get('type', 'Unknown')}")
+            output.append(f"   Fil: {meta.get('filename', 'Unknown')}")
             output.append(f"   Content: \"{content_preview}\"")
             output.append(f"   ID: {uid}")
             output.append("---")
@@ -157,8 +153,8 @@ def query_vector_memory(query_text: str, n_results: int = 5) -> str:
         return "\n".join(output)
 
     except Exception as e:
-        # HÄR ÄR NYCKELN: Returnera felet till chatten!
-        return f"⚠️ VEKTOR-FEL: {str(e)} (Path: {VECTOR_PATH})"
+        # Returnera felet till chatten för transparens
+        return f"⚠️ VEKTOR-FEL: {str(e)}"
 
 # --- TOOL 3: LAKE (Metadata) ---
 
@@ -167,17 +163,14 @@ def search_lake_metadata(keyword: str, field: str = None) -> str:
     """
     Söker i KÄLLFILERNAS metadata (Lake Header).
     Skannar markdown-filer för att se hur de är taggade.
-    
-    Args:
-        keyword: Ordet du letar efter (t.ex. "Sälj", ett UUID, eller ett namn).
-        field: (Optional) Sök bara i specifikt fält t.ex. 'mentions', 'keywords', 'summary'.
-    
-    Används för att svara på: "Är källfilerna korrekt taggade med ID/nyckelord?"
     """
     matches = []
     scanned_count = 0
     
     try:
+        if not os.path.exists(LAKE_PATH):
+             return f"⚠️ LAKE-FEL: Mappen {LAKE_PATH} finns inte."
+
         # Hämta alla .md filer
         files = [f for f in os.listdir(LAKE_PATH) if f.endswith('.md')]
         

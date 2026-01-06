@@ -543,13 +543,13 @@ def processa_dokument(filväg: str, filnamn: str):
             "timestamp_created": datetime.datetime.now().isoformat(),
             "summary": semantic_metadata.get("summary", ""),
             "keywords": semantic_metadata.get("keywords", []),
-            "graph_context_status": "pending_validation",
+            #"graph_context_status": "pending_validation",
             "source_type": source_type,
             "ai_model": semantic_metadata.get("ai_model", "unknown"),
-            "validated_mentions": validated_mentions
+            #"validated_mentions": validated_mentions
         }
         
-        fm_str = yaml.dump(frontmatter, sort_keys=False)
+        fm_str = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
         with open(lake_file, 'w', encoding='utf-8') as f:
             f.write(f"---\n{fm_str}---\n\n# {filnamn}\n\n{raw_text}")
             
