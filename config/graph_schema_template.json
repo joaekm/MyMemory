@@ -1,6 +1,6 @@
 {
-  "meta": {
-    "version": "2.1",
+"meta": {
+    "version": "2.2", 
     "description": "Strikt schema för MyMemory med stöd för Self-Healing Graph (Provisional/Verified) samt Declarative Healing.",
     "strict_mode": true
   },
@@ -24,6 +24,23 @@
         "type": "timestamp", 
         "required": true, 
         "description": "Tidpunkt då noden senast observerades/bearbetades av systemet." 
+      },
+      "last_retrieved_at": { 
+        "type": "timestamp", 
+        "required": true, 
+        "description": "Tidpunkt då noden senast användes i ett svar (Relevans)." 
+      },
+      "retrieved_times": { 
+        "type": "integer", 
+        "required": true, 
+        "default": 0, 
+        "description": "Antal gånger noden använts i ett svar (Popularitet)." 
+      },
+      "last_refined_at": { 
+        "type": "string", 
+        "required": true, 
+        "default": "never", 
+        "description": "Tidpunkt då Dreamer senast städade noden (Underhåll)." 
       },
       "source_system": { "type": "string", "required": false },
       "status": {

@@ -57,6 +57,12 @@ Detta dokument spårar vårt aktiva arbete, i enlighet med `WoW 2.4`.
 
 ## Öppna Objekt (Nästa Fas)
 
+* **OBJEKT-58 (Prio 1 - OPERATIVT):** Implementera **Usage Tracking i Planner**.
+    * *Syfte:* Möjliggöra Dreamers relevansurval ("The Living Graph").
+    * *Krav:* `run_planner_loop` i `services/pipeline/planner.py` måste identifiera vilka noder som faktiskt användes i context och anropa en ny metod i `GraphService` för att räkna upp deras `retrieved_times` och sätta `last_retrieved_at` till nu.
+    * *Metod:* "Fire and forget" (får inte slöa ner svaret).
+    * *Koppling:* Driver Dreamers "Relevansurval" (80% av underhållet).
+
 * **OBJEKT-46 (Prio 0 - ARKITEKTUR):** Implementera **Pipeline v6.0** (Refaktorering).
     * *Beslut:* 2025-12-03 – Överenskommelse om ny sök-pipeline.
     * *Nuvarande (v5.2):* Planering → Jägaren + Vektorn → Domaren → Syntes (3 AI-anrop, otydlig SOC)

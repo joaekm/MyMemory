@@ -10,6 +10,7 @@ import json
 import logging
 import threading
 import duckdb
+from datetime import datetime
 
 # --- LOGGING ---
 LOGGER = logging.getLogger('GraphStore')
@@ -169,9 +170,10 @@ class GraphStore:
             })
         return nodes
     
-    def upsert_node(self, id: str, type: str, aliases: list = None, properties: dict = None):
+def upsert_node(self, id: str, type: str, aliases: list = None, properties: dict = None):
         """
         Skapa eller uppdatera en nod.
+        Hanterar merge av properties för att bevara system-metadata.
         
         Args:
             id: Unikt nod-ID
@@ -182,10 +184,41 @@ class GraphStore:
         if self.read_only:
             raise RuntimeError("HARDFAIL: Försöker skriva i read_only mode")
         
-        aliases_json = json.dumps(aliases or [], ensure_ascii=False)
-        properties_json = json.dumps(properties or {}, ensure_ascii=False)
+        new_props = properties or {}
         
         with self._lock:
+            # 1. Hämta existerande egenskaper för att bevara systemfält
+            existing = self.conn.execute(
+                "SELECT properties FROM nodes WHERE id = ?", [id]
+            ).fetchone()
+            
+            final_props = {}
+            
+            if existing:
+                # Noden finns - bevara existerande data, skriv över med nytt
+                try:
+                    current_props = json.loads(existing[0]) if existing[0] else {}
+                except:
+                    current_props = {}
+                
+                final_props = current_props.copy()
+                final_props.update(new_props)
+                
+            else:
+                # Ny nod - Initiera systemfält
+                now_ts = datetime.now().isoformat()
+                defaults = {
+                    "last_retrieved_at": now_ts,
+                    "retrieved_times": 0,
+                    "last_refined_at": "never"
+                }
+                final_props = defaults
+                final_props.update(new_props)
+
+            aliases_json = json.dumps(aliases or [], ensure_ascii=False)
+            properties_json = json.dumps(final_props, ensure_ascii=False)
+
+            # 2. Skriv till DB (UPSERT)
             self.conn.execute("""
                 INSERT INTO nodes (id, type, aliases, properties)
                 VALUES (?, ?, ?, ?)
@@ -194,6 +227,91 @@ class GraphStore:
                     aliases = EXCLUDED.aliases,
                     properties = EXCLUDED.properties
             """, [id, type, aliases_json, properties_json])
+
+def register_usage(self, node_ids: list):
+        """
+        Registrera att noder har använts i ett svar (Relevans).
+        Ökar retrieved_times och sätter last_retrieved_at till nu.
+        """
+        if not node_ids: return
+        
+        now_ts = datetime.now().isoformat()
+        
+        with self._lock:
+            # Batch-uppdatering via Read-Modify-Write för säkerhet
+            placeholders = ','.join(['?'] * len(node_ids))
+            rows = self.conn.execute(
+                f"SELECT id, properties FROM nodes WHERE id IN ({placeholders})", 
+                node_ids
+            ).fetchall()
+            
+            for r in rows:
+                nid = r[0]
+                try:
+                    props = json.loads(r[1]) if r[1] else {}
+                except:
+                    props = {}
+                
+                # Uppdatera räknare
+                count = props.get('retrieved_times', 0)
+                if not isinstance(count, int): count = 0
+                
+                props['retrieved_times'] = count + 1
+                props['last_retrieved_at'] = now_ts
+                
+                # Skriv tillbaka
+                self.conn.execute(
+                    "UPDATE nodes SET properties = ? WHERE id = ?",
+                    [json.dumps(props, ensure_ascii=False), nid]
+                )
+        
+        LOGGER.info(f"Registered usage for {len(node_ids)} nodes")
+
+    def get_refinement_candidates(self, limit: int = 50) -> list[dict]:
+        """
+        Hämta kandidater för Dreamer-underhåll enligt 80/20-principen.
+        
+        - 80% Relevans: Heta noder (nyligen använda).
+        - 20% Underhåll: Glömda noder (aldrig städade eller gamla).
+        """
+        relevance_limit = int(limit * 0.8)
+        maintenance_limit = limit - relevance_limit
+        
+        candidates = []
+        
+        with self._lock:
+            # 1. Relevans (Heta noder) - Sortera på last_retrieved_at DESC
+            rel_rows = self.conn.execute(f"""
+                SELECT id, type, aliases, properties 
+                FROM nodes 
+                ORDER BY json_extract_string(properties, '$.last_retrieved_at') DESC
+                LIMIT ?
+            """, [relevance_limit]).fetchall()
+            
+            # 2. Underhåll (Glömda noder)
+            # Prioritera 'never' (ostädade) först, sedan äldsta datum
+            maint_rows = self.conn.execute(f"""
+                SELECT id, type, aliases, properties 
+                FROM nodes 
+                ORDER BY 
+                    CASE WHEN json_extract_string(properties, '$.last_refined_at') = 'never' THEN 0 ELSE 1 END,
+                    json_extract_string(properties, '$.last_refined_at') ASC
+                LIMIT ?
+            """, [maintenance_limit]).fetchall()
+            
+            # Slå ihop och deduplicera
+            seen_ids = set()
+            for r in rel_rows + maint_rows:
+                if r[0] not in seen_ids:
+                    candidates.append({
+                        "id": r[0],
+                        "type": r[1],
+                        "aliases": json.loads(r[2]) if r[2] else [],
+                        "properties": json.loads(r[3]) if r[3] else {}
+                    })
+                    seen_ids.add(r[0])
+                    
+        return candidates
     
     def delete_node(self, node_id: str) -> bool:
         """

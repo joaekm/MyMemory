@@ -32,29 +32,17 @@ class EntityResolver:
             LOGGER.error(f"Failed to load prompts from {path}: {e}")
             return {}
 
-    def scan_candidates(self) -> List[Dict]:
-        """Hitta noder som är kandidater för städning (PROVISIONAL)."""
-        candidates = []
-        with self.graph_store._lock:
-            # Low-level query för att hitta alla provisional oavsett typ
-            # Vi castar properties till JSON för att kolla status
-            # Använder ORDER BY random() för att inte fastna på samma omöjliga noder
-            rows = self.graph_store.conn.execute("""
-                SELECT id, type, aliases, properties 
-                FROM nodes 
-                WHERE json_extract_string(properties, '$.status') = 'PROVISIONAL'
-                ORDER BY random()
-                LIMIT 100
-            """).fetchall()
-            
-            for r in rows:
-                candidates.append({
-                    "id": r[0],
-                    "type": r[1],
-                    "aliases": json.loads(r[2]) if r[2] else [],
-                    "properties": json.loads(r[3]) if r[3] else {}
-                })
+def scan_candidates(self) -> List[Dict]:
+        """
+        Hämta kandidater för förädling enligt 80/20-strategin.
+        Delegerar logiken till GraphStore för att fånga både 'Heat' (Relevans) och 'Deep Sleep' (Underhåll).
+        """
+        # Hämta 50 kandidater (40 Relevans, 10 Underhåll)
+        candidates = self.graph_store.get_refinement_candidates(limit=50)
         
+        if candidates:
+            LOGGER.info(f"Dreamer selected {len(candidates)} candidates via Relevance/Maintenance strategy.")
+            
         return candidates
 
     def ensure_node_indexed(self, node: Dict):

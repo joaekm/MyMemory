@@ -21,6 +21,12 @@ Detta dokument beskriver den tekniska sanningen om systemets implementation, upp
 
 Systemet använder tre lagringsnivåer för att balansera integritet, prestanda och spårbarhet.
 
+### Graf-metadata: The Living Graph
+För att möjliggöra "Self-Healing" och relevansurval har varje nod i grafen följande obligatoriska system-egenskaper:
+- **last_retrieved_at** (Timestamp): Tidpunkt för senaste användning (Initiering: created_at).
+- **retrieved_times** (Int): Antal gånger noden använts/lästs i en sökning (Initiering: 0).
+- **last_refined_at** (Timestamp/String): När Dreamer senast städade/slog ihop noden (Initiering: "never").
+
 ### "Asset Store" (Lagring 1 - Källan)
 - **Innehåll:** Originalfiler (PDF, Docx) samt genererade .txt-filer från Ljud och Slack.
 - **Namnstandard:** `[Originalnamn]_[UUID].[ext]`.
@@ -61,8 +67,16 @@ Hela systemet orkestreras av `start_services.py` (för realtidstjänster) och ma
 |-------|--------|----------|-------|
 | **Vector Indexer** | Realtid (Watchdog) | Uppdaterar ChromaDB | Snabb sökbarhet |
 | **Graph Builder** | Batch (Manuell) | Konsoliderar mot OTS | Struktur & relationer |
+| **Dreamer** | Bakgrund | Städar & Läker | Underhåll |
+
+**Dreamer - Urvalsstrategi för underhåll:**
+1. **Relevansurval (80%):** Prioriterar noder som används ofta och nyligen (högt `retrieved_times`, nytt `last_retrieved_at`). Detta säkerställer att "aktiv kunskap" alltid är städad.
+2. **Underhållsurval (20%):** Prioriterar noder som inte städats på länge (`last_refined_at`) för att motverka "bit rot" och glömska.
 
 ## 4. Konsumtion & Gränssnitt
+
+### Princip för Spårning
+**ALLA** komponenter som hämtar noder för att generera svar till användaren (t.ex. Planner, ContextBuilder) **MÅSTE** anropa `register_usage(node_ids)` i GraphService. Detta är motorn som driver Relevansurvalet och lär systemet vad som är viktigt.
 
 ### MyMem Chat (v5.2 - Full Transparency)
 
