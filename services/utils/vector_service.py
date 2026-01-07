@@ -10,6 +10,21 @@ import os
 import yaml
 import logging
 import threading
+
+# --- NY KOD START ---
+# Patcha tqdm för att tysta progress bars från SentenceTransformer/ChromaDB
+import tqdm
+import tqdm.auto
+
+_orig_tqdm_init = tqdm.tqdm.__init__
+def _silent_tqdm_init(self, *args, **kwargs):
+    kwargs['disable'] = True
+    return _orig_tqdm_init(self, *args, **kwargs)
+
+tqdm.tqdm.__init__ = _silent_tqdm_init
+tqdm.auto.tqdm.__init__ = _silent_tqdm_init
+# --- NY KOD SLUT ---
+
 import chromadb
 from chromadb.utils import embedding_functions
 from typing import List, Dict, Any, Optional

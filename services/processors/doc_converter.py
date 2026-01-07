@@ -167,7 +167,7 @@ def generate_semantic_metadata(text: str) -> Dict[str, Any]:
     prompt_template = get_prompt('doc_converter', 'doc_summary_prompt')
     if not prompt_template:
         LOGGER.warning("Summary prompt saknas i config, returnerar tom metadata")
-        return {"summary": "", "keywords": []}
+        return {"context_summary": "", "relations_summary": "", "document_keywords": []}
     
     # Klipp texten om den är för lång för summary-modellen
     safe_text = text[:30000]
@@ -185,10 +185,14 @@ def generate_semantic_metadata(text: str) -> Dict[str, Any]:
         
         data = parse_llm_json(response.text)
         return {
-            "summary": data.get("summary", ""),
-            "keywords": data.get("keywords", []),
+            "context_summary": data.get("context_summary", ""),
+            "relations_summary": data.get("relations_summary", ""),
+            "document_keywords": data.get("document_keywords", []) or data.get("keywords", []), # Fallback om LLM slarvar
             "ai_model": lite_model
         }
+    except Exception as e:
+        LOGGER.error(f"Semantic Metadata generation failed: {e}")
+        return {"context_summary": "", "relations_summary": "", "document_keywords": [], "ai_model": "UNKNOWN_ERROR"}
     except Exception as e:
         LOGGER.error(f"Semantic Metadata generation failed: {e}")
         return {"summary": "", "keywords": [], "ai_model": "UNKNOWN_ERROR"}
@@ -521,33 +525,36 @@ def processa_dokument(filväg: str, filnamn: str):
             with PROCESS_LOCK:
                 PROCESSED_FILES.discard(filnamn)
             return
-        # ----------------------------------------------------
 
         # --- UNIFIED PIPELINE SWITCH ---
-        source_type = "Document"
-        if "slack" in filväg.lower(): source_type = "Slack Log"
-        elif "mail" in filväg.lower(): source_type = "Email Thread"
-        elif "calendar" in filväg.lower(): source_type = "Calendar Event"
+                source_type = "Document"
+                if "slack" in filväg.lower(): source_type = "Slack Log"
+                elif "mail" in filväg.lower(): source_type = "Email Thread"
+                elif "calendar" in filväg.lower(): source_type = "Calendar Event"
 
-        # Ett enda anrop!
-        full_result = unified_processing_strategy(raw_text, filnamn, source_type)
+                # Ett enda anrop!
+                full_result = unified_processing_strategy(raw_text, filnamn, source_type)
+                
+                validated_mentions = full_result.get("validated_mentions", [])
+                semantic_metadata = full_result.get("semantic_metadata", {})
+
+                # Spara (Area C compliant structure)
+                # UPPDATERAD: Använder nu context_summary, relations_summary och document_keywords
+                frontmatter = {
+                    "unit_id": unit_id,
+                    "source_ref": lake_file,
+                    "original_filename": filnamn,
+                    "timestamp_created": datetime.datetime.now().isoformat(),
+                    "context_summary": semantic_metadata.get("context_summary", ""),
+                    "relations_summary": semantic_metadata.get("relations_summary", ""),
+                    "document_keywords": semantic_metadata.get("document_keywords", []),
+                    "source_type": source_type,
+                    "ai_model": semantic_metadata.get("ai_model", "unknown"),
+                    #"validated_mentions": validated_mentions
+                }
         
-        validated_mentions = full_result.get("validated_mentions", [])
-        semantic_metadata = full_result.get("semantic_metadata", {})
-
-        # Spara (Area C compliant structure)
-        frontmatter = {
-            "unit_id": unit_id,
-            "source_ref": lake_file,
-            "original_filename": filnamn,
-            "timestamp_created": datetime.datetime.now().isoformat(),
-            "summary": semantic_metadata.get("summary", ""),
-            "keywords": semantic_metadata.get("keywords", []),
-            #"graph_context_status": "pending_validation",
-            "source_type": source_type,
-            "ai_model": semantic_metadata.get("ai_model", "unknown"),
-            #"validated_mentions": validated_mentions
-        }
+        fm_str = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
+        with open(lake_file, 'w', encoding='utf-8') as f:
         
         fm_str = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
         with open(lake_file, 'w', encoding='utf-8') as f:

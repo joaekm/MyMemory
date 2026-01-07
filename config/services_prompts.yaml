@@ -65,17 +65,21 @@ transcriber:
 # --- Doc Converter (Textfiler/Dokument) ---
 doc_converter:
   doc_summary_prompt: |
-    Sammanfatta detta dokument kortfattat och informativt på svenska.
-    Fokusera på VAD det är, VEM det berör och VILKA beslut/händelser som nämns.
+      Analysera detta dokument och skapa två specifika sammanfattningar på svenska.
 
-    TEXT:
-    {text}
+      1. context_summary: En kort text som beskriver vad som gör just detta dokument unikt.
+      2. relations_summary: En kort text som beskriver dokumentets viktigaste kopplingar till personer, projekt eller andra händelser. (T.ex. "Omnämner Projekt X, initierat av Anna Andersson, och kopplar till tidigare diskussion om resursallokering.")
+      3. document_keywords: Generera en lista med nyckelord som kan tjäna som sökord för att maximera träffsäkerheten vid textsökning. Minst 5 max 10 stycken.
 
-    RETURNERA JSON:
-    {{
-      "summary": "Din sammanfattning här...",
-      "keywords": ["nyckelord1", "nyckelord2"]
-    }}
+      TEXT:
+      {text}
+
+      RETURNERA JSON:
+      {{
+        "context_summary": "...",
+        "relations_summary": "...",
+        "document_keywords": ["nyckelord1", "nyckelord2", "viktigt begrepp"]
+      }}
 
   strict_entity_extraction: |
     Du är en expert på Knowledge Graph Extraction. Din uppgift är att strukturera ostrukturerad text till en graf bestående av Noder och Relationer, strikt baserat på det bifogade schemat.
