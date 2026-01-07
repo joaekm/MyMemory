@@ -32,7 +32,7 @@ class EntityResolver:
             LOGGER.error(f"Failed to load prompts from {path}: {e}")
             return {}
 
-def scan_candidates(self) -> List[Dict]:
+    def scan_candidates(self) -> List[Dict]:
         """
         Hämta kandidater för förädling enligt 80/20-strategin.
         Delegerar logiken till GraphStore för att fånga både 'Heat' (Relevans) och 'Deep Sleep' (Underhåll).
@@ -190,96 +190,94 @@ def scan_candidates(self) -> List[Dict]:
         except Exception as e:
             LOGGER.error(f"Context pruning failed: {e}")
 
+    def _is_weak_name(self, name: str) -> bool:
+        """Identifierar UUIDs eller generiska placeholders."""
+        import re
+        patterns = [
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', # UUID
+            r'^Talare \d+$',
+            r'^Unknown$',
+            r'^Unit_.*$'
+        ]
+        return any(re.match(p, name, re.I) for p in patterns)
+
     def run_resolution_cycle(self, dry_run: bool = False):
-        """Kör en hel städ-cykel."""
-        candidates = self.scan_candidates()
-        if not candidates:
-            return {"merged": 0, "reviewed": 0, "ignored": 0}
-            
-        LOGGER.info(f"🔍 Dreamer: Analyserar {len(candidates)} nya/osäkra noder...")
-        
-        stats = {"merged": 0, "reviewed": 0, "ignored": 0}
-        
-        processed_pairs = set()
-        deleted_nodes = set()
+        """Huvudloop för kognitivt underhåll med kausal uppdatering."""
+        candidates = self.scan_candidates() # 80/20 urval
+        stats = {"merged": 0, "split": 0, "renamed": 0, "recat": 0, "deleted": 0}
+        affected_units = set()
+
+        # Säkerhetströsklar
+        THRESHOLD_DELETE = 0.95
+        THRESHOLD_SPLIT = 0.90
+        THRESHOLD_RENAME_NORMAL = 0.95
+        THRESHOLD_RENAME_WEAK = 0.70
 
         for node in candidates:
-            # Hoppa över om noden redan har raderats i denna cykel
-            if node["id"] in deleted_nodes:
-                continue
-
-            name = node.get('properties', {}).get('name', 'Okänd')
-            node_type = node.get("type", "Unknown")
+            # 1. Strukturell Analys (Split/Rename/Recat/Delete)
+            analysis = self.check_structural_changes(node)
+            action = analysis.get("action", "KEEP")
+            conf = analysis.get("confidence", 0.0)
             
-            # Använder nu Vector Search
+            # --- HEURISTISKA SPÄRRAR ---
+            if action == "DELETE":
+                # Kolla om noden är isolerad i grafen
+                if self.graph_store.get_node_degree(node["id"]) > 0:
+                    action = "KEEP" # Veto: radera inte nav-noder
+                elif conf < THRESHOLD_DELETE:
+                    action = "KEEP"
+
+            elif action == "RENAME":
+                is_weak = self._is_weak_name(node["id"])
+                target_threshold = THRESHOLD_RENAME_WEAK if is_weak else THRESHOLD_RENAME_NORMAL
+                if conf < target_threshold:
+                    action = "KEEP"
+
+            # --- VERKSTÄLLANDE ---
+            if action == "DELETE" and not dry_run:
+                self.graph_store.delete_node(node["id"])
+                self.vector_service.delete(node["id"])
+                stats["deleted"] += 1
+                continue # Gå till nästa kandidat
+
+            elif action == "RENAME" and not dry_run:
+                new_name = analysis.get("new_name")
+                units = self.graph_store.get_related_unit_ids(node["id"])
+                self.graph_store.rename_node(node["id"], new_name)
+                affected_units.update(units)
+                stats["renamed"] += 1
+                node = self.graph_store.get_node(new_name) # Fortsätt analys med nya namnet
+
+            elif action == "RE-CATEGORIZE" and not dry_run:
+                if conf >= 0.90:
+                    self.graph_store.recategorize_node(node["id"], analysis.get("new_type"))
+                    affected_units.update(self.graph_store.get_related_unit_ids(node["id"]))
+                    stats["recat"] += 1
+
+            elif action == "SPLIT" and not dry_run:
+                if conf >= THRESHOLD_SPLIT:
+                    units = self.graph_store.get_related_unit_ids(node["id"])
+                    self.graph_store.split_node(node["id"], analysis.get("split_clusters"))
+                    affected_units.update(units)
+                    stats["split"] += 1
+                    continue
+
+            # 2. Identity Resolution (Merge)
+            # Körs endast om noden inte raderats eller splittats
             matches = self.find_potential_matches(node)
-            if matches:
-                LOGGER.info(f"   🔎 Söker dubbletter för '{name}' ({node_type})... Hittade {len(matches)} kandidater.")
-            
             for match in matches:
-                # Hoppa över om match-kandidaten har raderats
-                if match["id"] in deleted_nodes:
-                    continue
-
-                match_name = match.get('properties', {}).get('name', 'Okänd')
-                
-                # Undvik A-B och B-A dubbletter
-                pair_id = tuple(sorted([node["id"], match["id"]]))
-                if pair_id in processed_pairs:
-                    continue
-                processed_pairs.add(pair_id)
-                
-                # LLM Judge
-                evaluation = self.evaluate_merge(match, node) # Match is Candidate A (often Verified?), Node is B
-                
-                decision = evaluation.get("decision", "IGNORE").upper()
-                confidence = evaluation.get("confidence", 0.0)
-                reason = evaluation.get("reason", "No reason provided")
-                
-                if decision == "MERGE" and confidence > 0.9:
-                    if dry_run:
-                        LOGGER.info(f"      [DRY RUN] ✨ Skulle slå ihop '{name}' -> '{match_name}' ({int(confidence*100)}%)")
-                    else:
-                        LOGGER.info(f"      ✨ Slår ihop '{name}' -> '{match_name}' ({int(confidence*100)}%)")
-                        self.graph_store.merge_nodes_into(match["id"], node["id"])
-                        
-                        # Markera noden som raderad
-                        deleted_nodes.add(node["id"])
-                        
-                        # Uppdatera index efter merge (ta bort secondary, uppdatera primary)
-                        self.vector_service.delete(node["id"])
-                        
-                        # Hämta den uppdaterade masternoden
-                        master_node = self.graph_store.get_node(match["id"])
-                        
-                        # Städa kontexten om den blivit för fet
-                        self._prune_context(master_node["id"])
-                        
-                        # Indexera om (med städad kontext)
-                        # Hämta på nytt om vi ändrade i prune
-                        master_node = self.graph_store.get_node(match["id"]) 
-                        self.vector_service.upsert_node(master_node)
-                    
+                merge_eval = self.evaluate_merge(match, node)
+                if merge_eval.get("decision") == "MERGE" and merge_eval.get("confidence", 0) > 0.90:
+                    if not dry_run:
+                        units = self.graph_store.get_related_unit_ids(node["id"])
+                        self.graph_store.merge_nodes(match["id"], node["id"]) # Robust merge
+                        affected_units.update(units)
                     stats["merged"] += 1
-                    # Eftersom node är raderad, bryt den inre loopen (kan inte matcha mot fler)
-                    break 
-                    
-                elif decision == "REVIEW" or (decision == "MERGE" and confidence <= 0.9):
-                    node_type = node.get("type", "Unknown")
-                    if dry_run:
-                        LOGGER.info(f"      [DRY RUN] 🍺 ({node_type}) Skulle spara osäker match: '{name}' vs '{match_name}' ({int(confidence*100)}%)")
-                    else:
-                        LOGGER.info(f"      🍺 ({node_type}) Sparar osäker match: '{name}' vs '{match_name}' ({int(confidence*100)}%) - {reason}")
-                        self.graph_store.add_pending_review(
-                            entity=node["properties"].get("name", "Unknown"),
-                            master_node=match["id"],
-                            score=confidence,
-                            reason=reason,
-                            context={"candidate_id": node["id"], "match_id": match["id"]}
-                        )
-                    stats["reviewed"] += 1
-                else:
-                    # Tyst om det inte är en match, för att minska brus
-                    stats["ignored"] += 1
-                    
+                    break
+
+        # 3. Kausal Semantisk Uppdatering
+        if affected_units and not dry_run:
+            LOGGER.info(f"Triggar semantisk uppdatering för {len(affected_units)} filer...")
+            self.generate_semantic_update(list(affected_units))
+
         return stats

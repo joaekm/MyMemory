@@ -164,6 +164,61 @@ dreamer:
     
     Nycklar MÅSTE vara exakta nodnamn från BEFINTLIGA MASTERNODER. Inkludera INTE noder utan nya koncept.
 
+structural_analysis: |
+    ANALYSERA om denna nod bör delas (SPLIT), döpas om (RENAME), kategoriseras om (RE-CATEGORIZE) eller raderas (DELETE).
+    
+    NOD: {id} ({type})
+    KONTEXT (node_context med spårbarhet):
+    {context_list}
+    
+    TILLÅTNA TYPER (från taxonomi):
+    {taxonomy_nodes}
+    
+    KRITERIER:
+    - SPLIT: Om kontexten innehåller distinkt olika kluster (t.ex. olika personer med samma namn, eller ett ord som betyder två helt olika saker).
+    - RENAME: Om ID:t är svagt (UUID, "Talare 1", "Fil_X") men kontexten innehåller ett tydligt egennamn.
+    - RE-CATEGORIZE: Om kontexten visar att nodtypen är felaktig (t.ex. en "Person" som beskrivs som ett "Projekt").
+    - DELETE: Om noden är brus (stoppord, verb, meningslös text) eller saknar substans.
+    - KEEP: Om noden är stabil och korrekt.
+    
+    BEDÖMNING:
+    Ange 'confidence' (0.0 - 1.0). Var konservativ. 1.0 = Helt säker. 0.5 = Gissning.
+    
+    JSON:
+    {{
+      "action": "SPLIT" | "RENAME" | "RE-CATEGORIZE" | "DELETE" | "KEEP",
+      "confidence": 0.0,
+      "reason": "Motivering",
+      "new_name": "Sträng" (vid RENAME),
+      "new_type": "Sträng" (vid RE-CATEGORIZE),
+      "split_clusters": [ {{"name": "Namn", "context_indices": [0, 2]}} ] (vid SPLIT)
+    }}
+
+semantic_update: |
+    Din uppgift är att FÖRÄDLA metadata för dokumentet "{filename}".
+    Du ska kombinera dokumentets befintliga sammanfattning med ny, djupare insikt från kunskapsgrafen.
+    
+    === NUVARANDE METADATA (Baserat på dokumentets innehåll) ===
+    Context: {current_context}
+    Relations: {current_relations}
+    Keywords: {current_keywords}
+    
+    === NY GRAF-INSIKT (Aggregerad kunskap om entiteter i dokumentet) ===
+    {node_context}
+    
+    === INSTRUKTION ===
+    1. Behåll kärnan i "NUVARANDE METADATA" (det speglar innehållet i dokumentet).
+    2. Injicera detaljer från "NY GRAF-INSIKT" där det förtydligar (t.ex. byt ut "ett projekt" mot "Adda PoC" om grafen bekräftar det).
+    3. Uppdatera keywords: Behåll relevanta gamla, lägg till nya precisa termer från grafen.
+    4. context_summary ska vara en syntes av innehåll + kontext.
+    
+    JSON:
+    {{
+      "context_summary": "...",
+      "relations_summary": "...",
+      "document_keywords": ["ord1", "ord2"]
+    }}
+
 # --- Entity Resolver (Dreamer: Dubblett-jakt) ---
 entity_resolver:
   entity_resolution_prompt: |
