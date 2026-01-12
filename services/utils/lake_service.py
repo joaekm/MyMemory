@@ -112,32 +112,46 @@ class LakeEditor:
                 LOGGER.error(f"Kritist fel vid uppdatering av {filepath}: {e}")
                 return False
 
-    def update_semantics(self, filepath: str, context_summary: Optional[str] = None, 
-                        relations_summary: Optional[str] = None, 
-                        document_keywords: Optional[List[str]] = None) -> bool:
+    def update_semantics(self, filepath: str, context_summary: Optional[str] = None,
+                        relations_summary: Optional[str] = None,
+                        document_keywords: Optional[List[str]] = None,
+                        set_timestamp_updated: bool = True) -> bool:
         """
         Uppdaterar semantiska fält (context_summary, relations_summary, document_keywords).
         Kan uppdatera en, flera eller alla fält atomärt via update_metadata.
-        
+
         Detta är det ENDA sättet att ändra dessa fält för att garantera
         att Dreamers LLM-kurering respekteras.
+
+        Args:
+            filepath: Sökväg till Lake-filen
+            context_summary: Ny sammanfattning (eller None för att behålla)
+            relations_summary: Ny relationsbeskrivning (eller None)
+            document_keywords: Nya nyckelord (eller None)
+            set_timestamp_updated: Om True, sätts timestamp_updated till nu (default: True)
         """
+        import datetime
+
         updates = {}
-        
+
         if context_summary is not None:
             updates['context_summary'] = context_summary
-            
+
         if relations_summary is not None:
             updates['relations_summary'] = relations_summary
-            
+
         if document_keywords is not None:
             if not isinstance(document_keywords, list):
                 LOGGER.warning(f"document_keywords måste vara en lista, fick {type(document_keywords)}")
                 return False
             updates['document_keywords'] = document_keywords
-            
+
+        # Sätt timestamp_updated om semantiska fält faktiskt ändras
+        if updates and set_timestamp_updated:
+            updates['timestamp_updated'] = datetime.datetime.now().isoformat()
+
         if not updates:
             LOGGER.warning(f"Inga uppdateringar angivna för update_semantics i {filepath}")
             return False
-            
+
         return self.update_metadata(filepath, updates)

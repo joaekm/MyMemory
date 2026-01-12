@@ -159,6 +159,120 @@ def query_vector_memory(query_text: str, n_results: int = 5) -> str:
 # --- TOOL 3: LAKE (Metadata) ---
 
 @mcp.tool()
+def search_by_date_range(
+    start_date: str,
+    end_date: str,
+    date_field: str = "content"
+) -> str:
+    """
+    Söker efter dokument inom ett datumintervall.
+
+    Args:
+        start_date: Startdatum (YYYY-MM-DD)
+        end_date: Slutdatum (YYYY-MM-DD)
+        date_field: Vilket datumfält som ska användas:
+            - "content": timestamp_content (när innehållet hände)
+            - "ingestion": timestamp_ingestion (när filen skapades i Lake)
+            - "updated": timestamp_updated (senaste semantiska uppdatering)
+
+    Returns:
+        Lista med matchande dokument sorterade efter datum
+    """
+    from datetime import datetime
+
+    # Mappa date_field till frontmatter-nyckel
+    field_map = {
+        "content": "timestamp_content",
+        "ingestion": "timestamp_ingestion",
+        "updated": "timestamp_updated"
+    }
+
+    if date_field not in field_map:
+        return f"⚠️ Ogiltigt date_field: '{date_field}'. Använd: content, ingestion, updated"
+
+    timestamp_key = field_map[date_field]
+
+    try:
+        # Parsa datum
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+    except ValueError as e:
+        return f"⚠️ Ogiltigt datumformat: {e}. Använd YYYY-MM-DD"
+
+    if not os.path.exists(LAKE_PATH):
+        return f"⚠️ LAKE-FEL: Mappen {LAKE_PATH} finns inte."
+
+    matches = []
+    skipped_unknown = 0
+
+    try:
+        files = [f for f in os.listdir(LAKE_PATH) if f.endswith('.md')]
+
+        for filename in files:
+            full_path = os.path.join(LAKE_PATH, filename)
+            frontmatter = _parse_frontmatter(full_path)
+
+            timestamp_str = frontmatter.get(timestamp_key)
+
+            # Hantera UNKNOWN och None
+            if not timestamp_str or timestamp_str == "UNKNOWN":
+                skipped_unknown += 1
+                continue
+
+            try:
+                # Parsa ISO-format (med eller utan tid)
+                if 'T' in timestamp_str:
+                    file_dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    # Ta bort timezone för jämförelse
+                    file_dt = file_dt.replace(tzinfo=None)
+                else:
+                    file_dt = datetime.strptime(timestamp_str[:10], "%Y-%m-%d")
+
+                # Kolla om inom intervall
+                if start_dt <= file_dt <= end_dt:
+                    source_type = frontmatter.get('source_type', 'Unknown')
+                    summary = frontmatter.get('context_summary', '')[:80]
+                    matches.append({
+                        'filename': filename,
+                        'date': file_dt,
+                        'source_type': source_type,
+                        'summary': summary
+                    })
+
+            except (ValueError, TypeError) as e:
+                logging.debug(f"Kunde inte parsa datum i {filename}: {e}")
+                continue
+
+        # Sortera efter datum
+        matches.sort(key=lambda x: x['date'])
+
+        if not matches:
+            msg = f"DATUM: Inga träffar för {start_date} - {end_date} (fält: {date_field})"
+            if skipped_unknown > 0:
+                msg += f"\n⚠️ {skipped_unknown} filer har {timestamp_key}=UNKNOWN och exkluderades"
+            return msg
+
+        output = [f"=== DATUM RESULTAT ({len(matches)} träffar) ==="]
+        output.append(f"Intervall: {start_date} → {end_date}")
+        output.append(f"Fält: {timestamp_key}")
+        if skipped_unknown > 0:
+            output.append(f"⚠️ {skipped_unknown} filer med UNKNOWN exkluderade")
+        output.append("-" * 30)
+
+        for m in matches:
+            date_str = m['date'].strftime("%Y-%m-%d %H:%M")
+            output.append(f"📄 [{date_str}] {m['filename']}")
+            output.append(f"   Typ: {m['source_type']}")
+            if m['summary']:
+                output.append(f"   {m['summary']}...")
+
+        return "\n".join(output)
+
+    except Exception as e:
+        return f"Datumsökning misslyckades: {e}"
+
+
+@mcp.tool()
 def search_lake_metadata(keyword: str, field: str = None) -> str:
     """
     Söker i KÄLLFILERNAS metadata (Lake Header).

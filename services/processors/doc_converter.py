@@ -106,6 +106,62 @@ LOGGER = logging.getLogger('DocConverter')
 CLIENT = genai.Client(api_key=API_KEY)
 UUID_SUFFIX_PATTERN = re.compile(r'_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(txt|md|pdf|docx|csv|xlsx)$', re.IGNORECASE)
 STANDARD_TIMESTAMP_PATTERN = re.compile(r'^DATUM_TID:\s+(.+)$', re.MULTILINE)
+# Transcriber-format: DATUM: 2025-12-15 och START: 14:30
+TRANSCRIBER_DATE_PATTERN = re.compile(r'^DATUM:\s+(\d{4}-\d{2}-\d{2})$', re.MULTILINE)
+TRANSCRIBER_START_PATTERN = re.compile(r'^START:\s+(\d{2}:\d{2})$', re.MULTILINE)
+
+
+def extract_content_date(text: str) -> str:
+    """
+    Extraherar timestamp_content - när innehållet faktiskt hände.
+
+    Strikt extraktion utan fallbacks:
+    1. DATUM_TID header (från collectors: Slack, Calendar, Gmail) → ISO-sträng
+    2. Transcriber-format DATUM + START → kombineras till ISO-sträng
+    3. Annars → "UNKNOWN"
+
+    Returns:
+        ISO-format sträng eller "UNKNOWN"
+    """
+    header_section = text[:3000]  # Headers är alltid i början
+
+    # 1. Försök DATUM_TID (collectors: Slack, Calendar, Gmail)
+    match = STANDARD_TIMESTAMP_PATTERN.search(header_section)
+    if match:
+        ts_str = match.group(1).strip()
+        try:
+            dt = datetime.datetime.fromisoformat(ts_str)
+            LOGGER.debug(f"extract_content_date: DATUM_TID → {dt.isoformat()}")
+            return dt.isoformat()
+        except ValueError:
+            LOGGER.warning(f"extract_content_date: Ogiltig DATUM_TID '{ts_str}'")
+
+    # 2. Försök Transcriber-format (DATUM + START)
+    date_match = TRANSCRIBER_DATE_PATTERN.search(header_section)
+    start_match = TRANSCRIBER_START_PATTERN.search(header_section)
+
+    if date_match and start_match:
+        date_str = date_match.group(1)
+        time_str = start_match.group(1)
+        try:
+            dt = datetime.datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+            LOGGER.debug(f"extract_content_date: Transcriber → {dt.isoformat()}")
+            return dt.isoformat()
+        except ValueError:
+            LOGGER.warning(f"extract_content_date: Ogiltigt Transcriber-format '{date_str} {time_str}'")
+    elif date_match:
+        # Har datum men inte tid - använd mitt på dagen
+        date_str = date_match.group(1)
+        try:
+            dt = datetime.datetime.strptime(f"{date_str} 12:00", "%Y-%m-%d %H:%M")
+            LOGGER.debug(f"extract_content_date: Transcriber (endast datum) → {dt.isoformat()}")
+            return dt.isoformat()
+        except ValueError:
+            pass
+
+    # 3. Ingen källa hittades
+    LOGGER.info("extract_content_date: Ingen datumkälla → UNKNOWN")
+    return "UNKNOWN"
 
 PROCESSED_FILES = set()
 PROCESS_LOCK = threading.Lock()
@@ -539,18 +595,24 @@ def processa_dokument(filväg: str, filnamn: str):
                 semantic_metadata = full_result.get("semantic_metadata", {})
 
                 # Spara (Area C compliant structure)
-                # UPPDATERAD: Använder nu context_summary, relations_summary och document_keywords
+                # Tre tidsstämplar:
+                # - timestamp_ingestion: När filen skapades i Lake (nu)
+                # - timestamp_content: När innehållet hände (extraherat eller UNKNOWN)
+                # - timestamp_updated: Sätts av Dreamer vid semantisk uppdatering (null initialt)
+                timestamp_content = extract_content_date(raw_text)
+
                 frontmatter = {
                     "unit_id": unit_id,
                     "source_ref": lake_file,
                     "original_filename": filnamn,
-                    "timestamp_created": datetime.datetime.now().isoformat(),
+                    "timestamp_ingestion": datetime.datetime.now().isoformat(),
+                    "timestamp_content": timestamp_content,
+                    "timestamp_updated": None,
                     "context_summary": semantic_metadata.get("context_summary", ""),
                     "relations_summary": semantic_metadata.get("relations_summary", ""),
                     "document_keywords": semantic_metadata.get("document_keywords", []),
                     "source_type": source_type,
                     "ai_model": semantic_metadata.get("ai_model", "unknown"),
-                    #"validated_mentions": validated_mentions
                 }
         
         fm_str = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)

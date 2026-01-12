@@ -6,6 +6,7 @@ import yaml
 from typing import List, Dict, Any, Tuple
 from services.utils.graph_service import GraphStore
 from services.utils.vector_service import VectorService
+from services.utils.lake_service import LakeEditor
 from services.agents.validator_mcp import LLMClient # Reuse LLM client
 
 # Setup logging
@@ -281,3 +282,255 @@ class EntityResolver:
             self.generate_semantic_update(list(affected_units))
 
         return stats
+
+    def check_structural_changes(self, node: Dict) -> Dict:
+        """
+        Anropar LLM för att analysera om noden kräver strukturella ändringar.
+        Returnerar ett beslutsobjekt med action, confidence och eventuella parametrar.
+
+        Actions:
+        - KEEP: Ingen ändring behövs
+        - DELETE: Noden är brus och ska tas bort
+        - RENAME: Noden har svagt namn, byt till föreslaget namn
+        - SPLIT: Noden innehåller flera distinkta entiteter
+        - RE-CATEGORIZE: Nodens typ matchar inte innehållet
+        """
+        # 1. Hämta node_context (bevisen)
+        context_list = node.get("properties", {}).get("node_context", [])
+
+        # Om ingen kontext finns kan vi inte göra en meningsfull analys
+        if not context_list:
+            return {"action": "KEEP", "confidence": 1.0, "reason": "No context available for analysis"}
+
+        # 2. Formatera kontexten som en numrerad lista för LLM (så den kan referera till index vid SPLIT)
+        # Format: [0] Text (Källa: UUID)
+        formatted_context = ""
+        for i, ctx in enumerate(context_list[:40]):  # Begränsa till 40 bevis för att spara tokens
+            text = ctx.get("text", "Inget innehåll")
+            origin = ctx.get("origin", "Okänd källa")
+            formatted_context += f"[{i}] {text} (Källa: {origin})\n"
+
+        # 3. Hämta prompt och formatera
+        prompt_template = self.prompts.get("structural_analysis", "")
+        if not prompt_template:
+            LOGGER.error("Missing structural_analysis prompt in config")
+            return {"action": "KEEP", "confidence": 0.0}
+
+        # Vi kan skicka med existerande taxonomi-noder om vi vill styra RE-CATEGORIZE
+        prompt = prompt_template.format(
+            id=node.get("id"),
+            type=node.get("type"),
+            context_list=formatted_context,
+            taxonomy_nodes="Person, Project, Organization, Group, Event, Roles, Business_relation"
+        )
+
+        # 4. Exekvera LLM-anrop
+        try:
+            response_text = self.llm_client.generate(prompt)
+
+            # Städa upp Markdown-formatering
+            cleaned_json = response_text.replace("```json", "").replace("```", "").strip()
+            result = json.loads(cleaned_json)
+
+            # Säkerställ att vi har de fält som krävs för logiken i run_resolution_cycle
+            if "action" not in result:
+                result["action"] = "KEEP"
+            if "confidence" not in result:
+                result["confidence"] = 0.0
+
+            return result
+
+        except Exception as e:
+            LOGGER.error(f"Structural analysis failed for {node.get('id')}: {e}")
+            # Fallback till säker åtgärd vid fel
+            return {"action": "KEEP", "confidence": 0.0, "reason": f"Analysis error: {str(e)}"}
+
+    def generate_semantic_update(self, unit_ids: List[str]) -> int:
+        """
+        Regenererar semantisk metadata för Lake-filer som påverkats av graf-ändringar.
+
+        Triggas efter MERGE, SPLIT, RENAME, RE-CATEGORIZE operationer.
+        Uppdaterar context_summary, relations_summary och document_keywords
+        baserat på den nya graf-strukturen.
+
+        Sätter automatiskt timestamp_updated via LakeEditor.update_semantics().
+
+        Args:
+            unit_ids: Lista med unit_id för filer som behöver uppdateras
+
+        Returns:
+            Antal filer som uppdaterades
+        """
+        if not unit_ids:
+            return 0
+
+        # Hämta Lake-sökväg från config
+        lake_path = self._get_lake_path()
+        if not lake_path:
+            LOGGER.error("Kunde inte hitta Lake-sökväg i config")
+            return 0
+
+        lake_editor = LakeEditor(lake_path)
+        updated_count = 0
+
+        for unit_id in unit_ids:
+            # Hitta Lake-filen för detta unit_id
+            filepath = self._find_lake_file(lake_path, unit_id)
+            if not filepath:
+                LOGGER.warning(f"Kunde inte hitta Lake-fil för unit_id: {unit_id}")
+                continue
+
+            try:
+                # Läs nuvarande metadata och innehåll
+                current_meta = lake_editor.read_metadata(filepath)
+                if not current_meta:
+                    continue
+
+                # Läs filinnehållet för LLM-analys
+                file_content = self._read_file_content(filepath)
+                if not file_content:
+                    continue
+
+                # Hämta uppdaterad graf-kontext för denna fil
+                graph_context = self._get_graph_context_for_unit(unit_id)
+
+                # Generera ny semantisk metadata via LLM
+                new_semantics = self._regenerate_semantics_llm(
+                    file_content,
+                    current_meta,
+                    graph_context
+                )
+
+                if not new_semantics:
+                    continue
+
+                # Uppdatera filen - timestamp_updated sätts automatiskt
+                success = lake_editor.update_semantics(
+                    filepath,
+                    context_summary=new_semantics.get('context_summary'),
+                    relations_summary=new_semantics.get('relations_summary'),
+                    document_keywords=new_semantics.get('document_keywords'),
+                    set_timestamp_updated=True
+                )
+
+                if success:
+                    updated_count += 1
+                    LOGGER.info(f"✨ Semantisk uppdatering: {os.path.basename(filepath)}")
+
+            except Exception as e:
+                LOGGER.error(f"Fel vid semantisk uppdatering av {unit_id}: {e}")
+
+        LOGGER.info(f"Semantisk uppdatering klar: {updated_count}/{len(unit_ids)} filer")
+        return updated_count
+
+    def _get_lake_path(self) -> str:
+        """Hämtar Lake-sökväg från config."""
+        try:
+            config_path = os.path.join(
+                os.path.dirname(__file__), '..', '..', 'config', 'my_mem_config.yaml'
+            )
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            return os.path.expanduser(config['paths']['lake_store'])
+        except Exception as e:
+            LOGGER.error(f"Kunde inte läsa config: {e}")
+            return ""
+
+    def _find_lake_file(self, lake_path: str, unit_id: str) -> str:
+        """Hittar Lake-fil baserat på unit_id."""
+        try:
+            for filename in os.listdir(lake_path):
+                if unit_id in filename and filename.endswith('.md'):
+                    return os.path.join(lake_path, filename)
+        except Exception as e:
+            LOGGER.error(f"Fel vid sökning efter Lake-fil: {e}")
+        return ""
+
+    def _read_file_content(self, filepath: str) -> str:
+        """Läser innehållet från en Lake-fil (exklusive frontmatter)."""
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Hoppa över frontmatter
+            if content.startswith('---'):
+                parts = content.split('---', 2)
+                if len(parts) >= 3:
+                    return parts[2].strip()
+            return content
+        except Exception as e:
+            LOGGER.error(f"Kunde inte läsa fil {filepath}: {e}")
+            return ""
+
+    def _get_graph_context_for_unit(self, unit_id: str) -> str:
+        """
+        Hämtar graf-kontext för en specifik unit.
+        Returnerar en sträng med relevanta entiteter och relationer.
+        """
+        try:
+            # Hitta alla noder som nämner denna unit
+            mentions = self.graph_store.get_nodes_mentioning_unit(unit_id)
+
+            if not mentions:
+                return "Inga kända entiteter kopplade till detta dokument."
+
+            context_lines = ["KÄNDA ENTITETER I DOKUMENTET:"]
+            for node in mentions:
+                node_type = node.get('type', 'Unknown')
+                name = node.get('properties', {}).get('name', node.get('id'))
+                context_lines.append(f"- [{node_type}] {name}")
+
+            return "\n".join(context_lines)
+        except Exception as e:
+            LOGGER.warning(f"Kunde inte hämta graf-kontext för {unit_id}: {e}")
+            return ""
+
+    def _regenerate_semantics_llm(self, file_content: str, current_meta: Dict, graph_context: str) -> Dict:
+        """
+        Anropar LLM för att regenerera semantisk metadata.
+
+        Args:
+            file_content: Dokumentets innehåll
+            current_meta: Nuvarande frontmatter
+            graph_context: Kontext från grafen (kända entiteter)
+
+        Returns:
+            Dict med context_summary, relations_summary, document_keywords
+            eller None vid fel
+        """
+        prompt_template = self.prompts.get("semantic_regeneration", "")
+        if not prompt_template:
+            LOGGER.warning("Missing semantic_regeneration prompt - using current metadata")
+            return None
+
+        # Begränsa innehållet för att spara tokens
+        truncated_content = file_content[:15000]
+
+        prompt = prompt_template.format(
+            file_content=truncated_content,
+            current_summary=current_meta.get('context_summary', ''),
+            current_relations=current_meta.get('relations_summary', ''),
+            current_keywords=json.dumps(current_meta.get('document_keywords', []), ensure_ascii=False),
+            graph_context=graph_context
+        )
+
+        try:
+            response_text = self.llm_client.generate(prompt)
+
+            # Städa upp Markdown-formatering
+            cleaned_json = response_text.replace("```json", "").replace("```", "").strip()
+            result = json.loads(cleaned_json)
+
+            # Validera att vi fick de förväntade fälten
+            if not isinstance(result, dict):
+                return None
+
+            return {
+                'context_summary': result.get('context_summary'),
+                'relations_summary': result.get('relations_summary'),
+                'document_keywords': result.get('document_keywords')
+            }
+
+        except Exception as e:
+            LOGGER.error(f"Semantic regeneration failed: {e}")
+            return None
