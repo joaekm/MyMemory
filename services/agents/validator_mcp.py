@@ -147,7 +147,15 @@ def extract_and_validate_doc(initial_prompt: str, reference_timestamp: str = Non
                     node['status'] = 'PROVISIONAL'
                 if 'confidence' not in node:
                     node['confidence'] = 0.5
-                
+
+                # Användnings- och underhållsräknare (initialiseras vid skapande)
+                if 'last_retrieved_at' not in node:
+                    node['last_retrieved_at'] = reference_timestamp
+                if 'retrieved_times' not in node:
+                    node['retrieved_times'] = 0
+                if 'last_refined_at' not in node:
+                    node['last_refined_at'] = "never"
+
                 # 2. Fixa ID (UUID) om det saknas (Krävs av schemat)
                 if 'id' not in node:
                     if 'uuid' in node:

@@ -19,16 +19,16 @@ LOGGER = logging.getLogger('GraphStore')
 class GraphStore:
     """
     Thread-safe grafdatabas med DuckDB backend.
-    
+
     Schema:
         nodes(id, type, aliases, properties)
         edges(source, target, edge_type, properties)
     """
-    
+
     def __init__(self, db_path: str, read_only: bool = False):
         """
         Öppna eller skapa en grafdatabas.
-        
+
         Args:
             db_path: Sökväg till DuckDB-filen
             read_only: Om True, öppna i read-only läge
@@ -36,19 +36,19 @@ class GraphStore:
         self.db_path = db_path
         self.read_only = read_only
         self._lock = threading.Lock()
-        
+
         # Skapa mappen om den inte finns
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        
+
         # Öppna anslutning
         if read_only:
             self.conn = duckdb.connect(db_path, read_only=True)
         else:
             self.conn = duckdb.connect(db_path)
             self._init_schema()
-        
+
         LOGGER.info(f"GraphStore öppnad: {db_path} (read_only={read_only})")
-    
+
     def _init_schema(self):
         """Skapa tabeller om de inte finns."""
         with self._lock:
@@ -73,7 +73,7 @@ class GraphStore:
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target)")
-    
+
     def close(self):
         """Stäng databasanslutningen."""
         with self._lock:
@@ -81,19 +81,19 @@ class GraphStore:
                 self.conn.close()
                 self.conn = None
                 LOGGER.info(f"GraphStore stängd: {self.db_path}")
-    
+
     def __enter__(self):
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-    
+
     # --- NODE OPERATIONS ---
-    
+
     def get_node(self, node_id: str) -> dict | None:
         """
         Hämta en nod med givet ID.
-        
+
         Returns:
             dict med {id, type, aliases, properties} eller None
         """
@@ -102,24 +102,24 @@ class GraphStore:
                 "SELECT id, type, aliases, properties FROM nodes WHERE id = ?",
                 [node_id]
             ).fetchone()
-        
+
         if not result:
             return None
-        
+
         return {
             "id": result[0],
             "type": result[1],
             "aliases": json.loads(result[2]) if result[2] else [],
             "properties": json.loads(result[3]) if result[3] else {}
         }
-    
+
     def find_nodes_by_type(self, node_type: str) -> list[dict]:
         """
         Hitta alla noder av en viss typ.
-        
+
         Args:
             node_type: Nodtyp att söka efter
-        
+
         Returns:
             Lista med noder
         """
@@ -128,7 +128,7 @@ class GraphStore:
                 "SELECT id, type, aliases, properties FROM nodes WHERE type = ?",
                 [node_type]
             ).fetchall()
-        
+
         nodes = []
         for row in results:
             nodes.append({
@@ -138,28 +138,28 @@ class GraphStore:
                 "properties": json.loads(row[3]) if row[3] else {}
             })
         return nodes
-    
+
     def find_nodes_by_alias(self, alias: str) -> list[dict]:
         """
         Hitta noder där alias matchar.
-        
+
         Söker i aliases-arrayen (JSON).
-        
+
         Args:
             alias: Alias att söka efter
-        
+
         Returns:
             Lista med matchande noder
         """
         # DuckDB stöder JSON-funktioner
         with self._lock:
             results = self.conn.execute("""
-                SELECT id, type, aliases, properties 
-                FROM nodes 
-                WHERE aliases IS NOT NULL 
+                SELECT id, type, aliases, properties
+                FROM nodes
+                WHERE aliases IS NOT NULL
                   AND list_contains(aliases::TEXT[]::TEXT[], ?)
             """, [alias]).fetchall()
-        
+
         nodes = []
         for row in results:
             nodes.append({
@@ -169,12 +169,12 @@ class GraphStore:
                 "properties": json.loads(row[3]) if row[3] else {}
             })
         return nodes
-    
-def upsert_node(self, id: str, type: str, aliases: list = None, properties: dict = None):
+
+    def upsert_node(self, id: str, type: str, aliases: list = None, properties: dict = None):
         """
         Skapa eller uppdatera en nod.
         Hanterar merge av properties för att bevara system-metadata.
-        
+
         Args:
             id: Unikt nod-ID
             type: Nodtyp (Unit, Entity, Concept, Person)
@@ -183,27 +183,27 @@ def upsert_node(self, id: str, type: str, aliases: list = None, properties: dict
         """
         if self.read_only:
             raise RuntimeError("HARDFAIL: Försöker skriva i read_only mode")
-        
+
         new_props = properties or {}
-        
+
         with self._lock:
             # 1. Hämta existerande egenskaper för att bevara systemfält
             existing = self.conn.execute(
                 "SELECT properties FROM nodes WHERE id = ?", [id]
             ).fetchone()
-            
+
             final_props = {}
-            
+
             if existing:
                 # Noden finns - bevara existerande data, skriv över med nytt
                 try:
                     current_props = json.loads(existing[0]) if existing[0] else {}
                 except:
                     current_props = {}
-                
+
                 final_props = current_props.copy()
                 final_props.update(new_props)
-                
+
             else:
                 # Ny nod - Initiera systemfält
                 now_ts = datetime.now().isoformat()
@@ -228,77 +228,77 @@ def upsert_node(self, id: str, type: str, aliases: list = None, properties: dict
                     properties = EXCLUDED.properties
             """, [id, type, aliases_json, properties_json])
 
-def register_usage(self, node_ids: list):
+    def register_usage(self, node_ids: list):
         """
         Registrera att noder har använts i ett svar (Relevans).
         Ökar retrieved_times och sätter last_retrieved_at till nu.
         """
         if not node_ids: return
-        
+
         now_ts = datetime.now().isoformat()
-        
+
         with self._lock:
             # Batch-uppdatering via Read-Modify-Write för säkerhet
             placeholders = ','.join(['?'] * len(node_ids))
             rows = self.conn.execute(
-                f"SELECT id, properties FROM nodes WHERE id IN ({placeholders})", 
+                f"SELECT id, properties FROM nodes WHERE id IN ({placeholders})",
                 node_ids
             ).fetchall()
-            
+
             for r in rows:
                 nid = r[0]
                 try:
                     props = json.loads(r[1]) if r[1] else {}
                 except:
                     props = {}
-                
+
                 # Uppdatera räknare
                 count = props.get('retrieved_times', 0)
                 if not isinstance(count, int): count = 0
-                
+
                 props['retrieved_times'] = count + 1
                 props['last_retrieved_at'] = now_ts
-                
+
                 # Skriv tillbaka
                 self.conn.execute(
                     "UPDATE nodes SET properties = ? WHERE id = ?",
                     [json.dumps(props, ensure_ascii=False), nid]
                 )
-        
+
         LOGGER.info(f"Registered usage for {len(node_ids)} nodes")
 
     def get_refinement_candidates(self, limit: int = 50) -> list[dict]:
         """
         Hämta kandidater för Dreamer-underhåll enligt 80/20-principen.
-        
+
         - 80% Relevans: Heta noder (nyligen använda).
         - 20% Underhåll: Glömda noder (aldrig städade eller gamla).
         """
         relevance_limit = int(limit * 0.8)
         maintenance_limit = limit - relevance_limit
-        
+
         candidates = []
-        
+
         with self._lock:
             # 1. Relevans (Heta noder) - Sortera på last_retrieved_at DESC
             rel_rows = self.conn.execute(f"""
-                SELECT id, type, aliases, properties 
-                FROM nodes 
+                SELECT id, type, aliases, properties
+                FROM nodes
                 ORDER BY json_extract_string(properties, '$.last_retrieved_at') DESC
                 LIMIT ?
             """, [relevance_limit]).fetchall()
-            
+
             # 2. Underhåll (Glömda noder)
             # Prioritera 'never' (ostädade) först, sedan äldsta datum
             maint_rows = self.conn.execute(f"""
-                SELECT id, type, aliases, properties 
-                FROM nodes 
-                ORDER BY 
+                SELECT id, type, aliases, properties
+                FROM nodes
+                ORDER BY
                     CASE WHEN json_extract_string(properties, '$.last_refined_at') = 'never' THEN 0 ELSE 1 END,
                     json_extract_string(properties, '$.last_refined_at') ASC
                 LIMIT ?
             """, [maintenance_limit]).fetchall()
-            
+
             # Slå ihop och deduplicera
             seen_ids = set()
             for r in rel_rows + maint_rows:
@@ -310,22 +310,22 @@ def register_usage(self, node_ids: list):
                         "properties": json.loads(r[3]) if r[3] else {}
                     })
                     seen_ids.add(r[0])
-                    
+
         return candidates
-    
+
     def delete_node(self, node_id: str) -> bool:
         """
         Ta bort en nod och alla dess kanter.
-        
+
         Args:
             node_id: ID på noden att ta bort
-        
+
         Returns:
             True om noden fanns och togs bort
         """
         if self.read_only:
             raise RuntimeError("HARDFAIL: Försöker skriva i read_only mode")
-        
+
         with self._lock:
             # Ta bort kanter först
             self.conn.execute(
@@ -337,15 +337,15 @@ def register_usage(self, node_ids: list):
                 "DELETE FROM nodes WHERE id = ? RETURNING id",
                 [node_id]
             ).fetchone()
-            
+
             return result is not None
-    
+
     # --- EDGE OPERATIONS ---
-    
+
     def get_edges_from(self, node_id: str) -> list[dict]:
         """
         Hämta alla utgående kanter från en nod.
-        
+
         Returns:
             Lista med {source, target, type, properties}
         """
@@ -354,7 +354,7 @@ def register_usage(self, node_ids: list):
                 "SELECT source, target, edge_type, properties FROM edges WHERE source = ?",
                 [node_id]
             ).fetchall()
-        
+
         edges = []
         for row in results:
             edges.append({
@@ -364,11 +364,11 @@ def register_usage(self, node_ids: list):
                 "properties": json.loads(row[3]) if row[3] else {}
             })
         return edges
-    
+
     def get_edges_to(self, node_id: str) -> list[dict]:
         """
         Hämta alla inkommande kanter till en nod.
-        
+
         Returns:
             Lista med {source, target, type, properties}
         """
@@ -377,7 +377,7 @@ def register_usage(self, node_ids: list):
                 "SELECT source, target, edge_type, properties FROM edges WHERE target = ?",
                 [node_id]
             ).fetchall()
-        
+
         edges = []
         for row in results:
             edges.append({
@@ -387,11 +387,11 @@ def register_usage(self, node_ids: list):
                 "properties": json.loads(row[3]) if row[3] else {}
             })
         return edges
-    
+
     def upsert_edge(self, source: str, target: str, edge_type: str, properties: dict = None):
         """
         Skapa eller uppdatera en kant.
-        
+
         Args:
             source: Käll-nod ID
             target: Mål-nod ID
@@ -400,9 +400,9 @@ def register_usage(self, node_ids: list):
         """
         if self.read_only:
             raise RuntimeError("HARDFAIL: Försöker skriva i read_only mode")
-        
+
         properties_json = json.dumps(properties or {}, ensure_ascii=False)
-        
+
         with self._lock:
             self.conn.execute("""
                 INSERT INTO edges (source, target, edge_type, properties)
@@ -410,31 +410,31 @@ def register_usage(self, node_ids: list):
                 ON CONFLICT (source, target, edge_type) DO UPDATE SET
                     properties = EXCLUDED.properties
             """, [source, target, edge_type, properties_json])
-    
+
     def delete_edge(self, source: str, target: str, edge_type: str) -> bool:
         """
         Ta bort en specifik kant.
-        
+
         Returns:
             True om kanten fanns och togs bort
         """
         if self.read_only:
             raise RuntimeError("HARDFAIL: Försöker skriva i read_only mode")
-        
+
         with self._lock:
             result = self.conn.execute(
                 "DELETE FROM edges WHERE source = ? AND target = ? AND edge_type = ? RETURNING source",
                 [source, target, edge_type]
             ).fetchone()
-            
+
             return result is not None
-    
+
     # --- STATISTICS ---
-    
+
     def get_stats(self) -> dict:
         """
         Hämta statistik om grafen.
-        
+
         Returns:
             dict med total_nodes, total_edges, nodes per typ, edges per typ
         """
@@ -443,45 +443,45 @@ def register_usage(self, node_ids: list):
             node_counts = self.conn.execute(
                 "SELECT type, COUNT(*) FROM nodes GROUP BY type"
             ).fetchall()
-            
+
             # Räkna kanter per typ
             edge_counts = self.conn.execute(
                 "SELECT edge_type, COUNT(*) FROM edges GROUP BY edge_type"
             ).fetchall()
-        
+
         nodes_dict = {row[0]: row[1] for row in node_counts}
         edges_dict = {row[0]: row[1] for row in edge_counts}
-        
+
         return {
             "total_nodes": sum(nodes_dict.values()),
             "total_edges": sum(edges_dict.values()),
             "nodes": nodes_dict,
             "edges": edges_dict
         }
-    
+
     # --- SEARCH HELPERS ---
-    
+
     def find_nodes_fuzzy(self, term: str, limit: int = 10) -> list[dict]:
         """
         Fuzzy-sök efter noder baserat på ID eller alias.
-        
+
         Args:
             term: Sökterm
             limit: Max antal resultat
-        
+
         Returns:
             Lista med matchande noder
         """
         # Sök i id och aliases
         with self._lock:
             results = self.conn.execute("""
-                SELECT id, type, aliases, properties 
-                FROM nodes 
-                WHERE id ILIKE ? 
+                SELECT id, type, aliases, properties
+                FROM nodes
+                WHERE id ILIKE ?
                    OR (aliases IS NOT NULL AND aliases ILIKE ?)
                 LIMIT ?
             """, [f"%{term}%", f"%{term}%", limit]).fetchall()
-        
+
         nodes = []
         for row in results:
             nodes.append({
@@ -491,26 +491,26 @@ def register_usage(self, node_ids: list):
                 "properties": json.loads(row[3]) if row[3] else {}
             })
         return nodes
-    
+
     def get_related_units(self, entity_id: str, limit: int = 10) -> list[str]:
         """
         Hitta alla Units som nämner en viss Entity.
-        
+
         Args:
             entity_id: Entity-nodens ID
             limit: Max antal resultat
-        
+
         Returns:
             Lista med Unit-IDs
         """
         with self._lock:
             results = self.conn.execute("""
-                SELECT DISTINCT source 
-                FROM edges 
+                SELECT DISTINCT source
+                FROM edges
                 WHERE target = ? AND edge_type = 'UNIT_MENTIONS'
                 LIMIT ?
             """, [entity_id, limit]).fetchall()
-        
+
         return [row[0] for row in results]
 
     # --- DREAMER SUPPORT ---
@@ -520,10 +520,10 @@ def register_usage(self, node_ids: list):
         Lägg till en manuell granskning (för Dreamer).
         """
         import uuid
-        
+
         review_id = str(uuid.uuid4())
         context_json = json.dumps(context, ensure_ascii=False)
-        
+
         with self._lock:
             # Skapa tabellen om den saknas
             self.conn.execute("""
@@ -537,139 +537,140 @@ def register_usage(self, node_ids: list):
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            
+
             self.conn.execute("""
                 INSERT INTO pending_reviews (id, entity, master_node, score, reason, context)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, [review_id, entity, master_node, score, reason, context_json])
-            
+
             LOGGER.info(f"Saved pending review: {entity} vs {master_node} ({score})")
 
     def merge_nodes(self, target_id: str, source_id: str):
-            """
-            Slå ihop source_id in i target_id (ROBUST & ATOMÄR).
-            
-            Process:
-            1. Aggregera properties (hanterar listor och node_context korrekt).
-            2. Flytta alla relationer.
-            3. Flytta alias.
-            4. Radera källnoden.
-            """
-            if self.read_only:
-                raise RuntimeError("HARDFAIL: Read-only mode")
+        """
+        Slå ihop source_id in i target_id (ROBUST & ATOMÄR).
 
-            with self._lock:
-                # 1. HÄMTA DATA
-                res_target = self.conn.execute("SELECT properties FROM nodes WHERE id = ?", [target_id]).fetchone()
-                res_source = self.conn.execute("SELECT properties FROM nodes WHERE id = ?", [source_id]).fetchone()
-                
-                if not res_target or not res_source:
-                    LOGGER.warning(f"Merge aborted: Node missing ({target_id} or {source_id})")
-                    return
+        Process:
+        1. Aggregera properties (hanterar listor och node_context korrekt).
+        2. Flytta alla relationer.
+        3. Flytta alias.
+        4. Radera källnoden.
+        """
+        if self.read_only:
+            raise RuntimeError("HARDFAIL: Read-only mode")
 
-                try:
-                    props_t = json.loads(res_target[0]) if res_target[0] else {}
-                    props_s = json.loads(res_source[0]) if res_source[0] else {}
-                except Exception as e:
-                    LOGGER.error(f"JSON decode error during merge: {e}")
-                    return
+        with self._lock:
+            # 1. HÄMTA DATA
+            res_target = self.conn.execute("SELECT properties FROM nodes WHERE id = ?", [target_id]).fetchone()
+            res_source = self.conn.execute("SELECT properties FROM nodes WHERE id = ?", [source_id]).fetchone()
 
-                # 2. AGGREGERA PROPERTIES
-                merged_props = props_t.copy()
-                
-                for k, v in props_s.items():
-                    # Om det är en lista (t.ex. keywords, evidence, node_context)
-                    if isinstance(v, list) and k in merged_props and isinstance(merged_props[k], list):
-                        combined = merged_props[k] + v
-                        
-                        # SPECIALHANTERING: List of Dicts (t.ex. node_context)
-                        if combined and isinstance(combined[0], dict):
-                            # Deduplicera baserat på innehåll genom serialisering
-                            seen = set()
-                            unique_list = []
-                            for item in combined:
-                                # Sortera keys för konsekvent hashning
-                                try:
-                                    # Skapar en hashbar representation av dictet
-                                    item_key = tuple(sorted((k, str(v)) for k, v in item.items()))
-                                    if item_key not in seen:
-                                        seen.add(item_key)
-                                        unique_list.append(item)
-                                except Exception:
-                                    # Fallback om datat är komplext: behåll allt
-                                    unique_list.append(item)
-                            merged_props[k] = unique_list
-                        
-                        # STANDARD: List of Strings/Ints
-                        else:
+            if not res_target or not res_source:
+                LOGGER.warning(f"Merge aborted: Node missing ({target_id} or {source_id})")
+                return
+
+            try:
+                props_t = json.loads(res_target[0]) if res_target[0] else {}
+                props_s = json.loads(res_source[0]) if res_source[0] else {}
+            except Exception as e:
+                LOGGER.error(f"JSON decode error during merge: {e}")
+                return
+
+            # 2. AGGREGERA PROPERTIES
+            merged_props = props_t.copy()
+
+            for k, v in props_s.items():
+                # Om det är en lista (t.ex. keywords, evidence, node_context)
+                if isinstance(v, list) and k in merged_props and isinstance(merged_props[k], list):
+                    combined = merged_props[k] + v
+
+                    # SPECIALHANTERING: List of Dicts (t.ex. node_context)
+                    if combined and isinstance(combined[0], dict):
+                        # Deduplicera baserat på innehåll genom serialisering
+                        seen = set()
+                        unique_list = []
+                        for item in combined:
+                            # Sortera keys för konsekvent hashning
                             try:
-                                merged_props[k] = list(set(combined))
-                            except TypeError:
-                                merged_props[k] = combined # Fallback
-                                
-                    # Om skalärt värde saknas i target, kopiera från source
-                    elif k not in merged_props:
-                        merged_props[k] = v
-                
-                # SPARA TARGET (Innan vi flyttar kanter)
-                self.conn.execute("UPDATE nodes SET properties = ? WHERE id = ?", 
-                                [json.dumps(merged_props, ensure_ascii=False), target_id])
+                                # Skapar en hashbar representation av dictet
+                                item_key = tuple(sorted((k, str(v)) for k, v in item.items()))
+                                if item_key not in seen:
+                                    seen.add(item_key)
+                                    unique_list.append(item)
+                            except Exception:
+                                # Fallback om datat är komplext: behåll allt
+                                unique_list.append(item)
+                        merged_props[k] = unique_list
 
-                # 3. FLYTTA UTGÅENDE KANTER (source -> X) till (target -> X)
-                self.conn.execute("""
-                    UPDATE edges 
-                    SET source = ? 
-                    WHERE source = ? 
-                    AND NOT EXISTS (
-                        SELECT 1 FROM edges e2 
-                        WHERE e2.source = ? AND e2.target = edges.target AND e2.edge_type = edges.edge_type
-                    )
-                """, [target_id, source_id, target_id])
-                
-                # 4. FLYTTA INKOMMANDE KANTER (X -> source) till (X -> target)
-                self.conn.execute("""
-                    UPDATE edges 
-                    SET target = ? 
-                    WHERE target = ? 
-                    AND NOT EXISTS (
-                        SELECT 1 FROM edges e2 
-                        WHERE e2.source = edges.source AND e2.target = ? AND e2.edge_type = edges.edge_type
-                    )
-                """, [target_id, source_id, target_id])
-                
-                # 5. STÄDA KANTER (Ta bort dubbletter som uppstod vid flytt eller self-loops)
-                self.conn.execute("DELETE FROM edges WHERE source = ? OR target = ?", [source_id, source_id])
-                # Ta bort self-loops på target om de skapades
-                self.conn.execute("DELETE FROM edges WHERE source = ? AND target = ?", [target_id, target_id])
-                
-                # 6. FLYTTA ALIASES
-                res_source_a = self.conn.execute("SELECT aliases FROM nodes WHERE id = ?", [source_id]).fetchone()
-                aliases_s = json.loads(res_source_a[0]) if res_source_a and res_source_a[0] else []
-                
-                res_target_a = self.conn.execute("SELECT aliases FROM nodes WHERE id = ?", [target_id]).fetchone()
-                aliases_t = json.loads(res_target_a[0]) if res_target_a and res_target_a[0] else []
-                
-                # Gamla IDt blir ett alias
-                new_aliases = list(set(aliases_t + aliases_s + [source_id]))
-                
-                self.conn.execute("UPDATE nodes SET aliases = ? WHERE id = ?", 
-                                [json.dumps(new_aliases, ensure_ascii=False), target_id])
-                
-                # 7. RADERA SOURCE
-                self.conn.execute("DELETE FROM nodes WHERE id = ?", [source_id])
-                
-                LOGGER.info(f"Merged {source_id} into {target_id} (Data aggregated)")
+                    # STANDARD: List of Strings/Ints
+                    else:
+                        try:
+                            merged_props[k] = list(set(combined))
+                        except TypeError:
+                            merged_props[k] = combined # Fallback
+
+                # Om skalärt värde saknas i target, kopiera från source
+                elif k not in merged_props:
+                    merged_props[k] = v
+
+            # SPARA TARGET (Innan vi flyttar kanter)
+            self.conn.execute("UPDATE nodes SET properties = ? WHERE id = ?",
+                            [json.dumps(merged_props, ensure_ascii=False), target_id])
+
+            # 3. FLYTTA UTGÅENDE KANTER (source -> X) till (target -> X)
+            self.conn.execute("""
+                UPDATE edges
+                SET source = ?
+                WHERE source = ?
+                AND NOT EXISTS (
+                    SELECT 1 FROM edges e2
+                    WHERE e2.source = ? AND e2.target = edges.target AND e2.edge_type = edges.edge_type
+                )
+            """, [target_id, source_id, target_id])
+
+            # 4. FLYTTA INKOMMANDE KANTER (X -> source) till (X -> target)
+            self.conn.execute("""
+                UPDATE edges
+                SET target = ?
+                WHERE target = ?
+                AND NOT EXISTS (
+                    SELECT 1 FROM edges e2
+                    WHERE e2.source = edges.source AND e2.target = ? AND e2.edge_type = edges.edge_type
+                )
+            """, [target_id, source_id, target_id])
+
+            # 5. STÄDA KANTER (Ta bort dubbletter som uppstod vid flytt eller self-loops)
+            self.conn.execute("DELETE FROM edges WHERE source = ? OR target = ?", [source_id, source_id])
+            # Ta bort self-loops på target om de skapades
+            self.conn.execute("DELETE FROM edges WHERE source = ? AND target = ?", [target_id, target_id])
+
+            # 6. FLYTTA ALIASES
+            res_source_a = self.conn.execute("SELECT aliases FROM nodes WHERE id = ?", [source_id]).fetchone()
+            aliases_s = json.loads(res_source_a[0]) if res_source_a and res_source_a[0] else []
+
+            res_target_a = self.conn.execute("SELECT aliases FROM nodes WHERE id = ?", [target_id]).fetchone()
+            aliases_t = json.loads(res_target_a[0]) if res_target_a and res_target_a[0] else []
+
+            # Gamla IDt blir ett alias
+            new_aliases = list(set(aliases_t + aliases_s + [source_id]))
+
+            self.conn.execute("UPDATE nodes SET aliases = ? WHERE id = ?",
+                            [json.dumps(new_aliases, ensure_ascii=False), target_id])
+
+            # 7. RADERA SOURCE
+            self.conn.execute("DELETE FROM nodes WHERE id = ?", [source_id])
+
+            LOGGER.info(f"Merged {source_id} into {target_id} (Data aggregated)")
+
     def rename_node(self, old_id: str, new_name: str):
         """
         Byt namn på en nod (Canonical Swap).
         Implementeras som Create New + Merge Old into New.
         """
         if self.read_only: raise RuntimeError("HARDFAIL: Read-only")
-        
+
         with self._lock:
             # Kolla om målet redan finns
             exists = self.conn.execute("SELECT 1 FROM nodes WHERE id = ?", [new_name]).fetchone()
-            
+
             if exists:
                 # Målet finns -> Vanlig Merge
                 LOGGER.info(f"Rename target {new_name} exists. Merging instead.")
@@ -680,11 +681,11 @@ def register_usage(self, node_ids: list):
                 if not res:
                     LOGGER.warning(f"Rename failed: Source {old_id} not found")
                     return
-                
+
                 # Skapa nya noden (Klon)
                 self.conn.execute("INSERT INTO nodes (id, type, aliases, properties) VALUES (?, ?, ?, ?)",
                                 [new_name, res[0], res[1], res[2]])
-                
+
                 # Använd merge-logiken för att flytta kanter och städa upp gamla noden
                 self.merge_nodes(new_name, old_id)
                 LOGGER.info(f"Renamed {old_id} -> {new_name}")
@@ -692,50 +693,50 @@ def register_usage(self, node_ids: list):
     def split_node(self, original_id: str, split_map: list):
         """
         Dela upp en nod i flera nya noder.
-        
+
         Args:
             original_id: ID på noden som ska splittas.
             split_map: Lista av dicts:
                        [{ "name": "Nytt_Namn_1", "context_indices": [0, 2] }, ...]
         """
         if self.read_only: raise RuntimeError("HARDFAIL: Read-only")
-        
+
         with self._lock:
             # 1. Hämta originaldata
             res = self.conn.execute("SELECT type, properties FROM nodes WHERE id = ?", [original_id]).fetchone()
             if not res:
                 LOGGER.warning(f"Split failed: Node {original_id} not found")
                 return
-                
+
             orig_type = res[0]
             try:
                 orig_props = json.loads(res[1]) if res[1] else {}
             except:
                 orig_props = {}
-                
+
             node_context = orig_props.get("node_context", [])
-            
+
             # 2. Skapa nya noder
             created_nodes = []
             for item in split_map:
                 new_name = item.get("name")
                 indices = item.get("context_indices", [])
-                
+
                 if not new_name: continue
-                
+
                 # Bygg properties för den nya noden
                 new_props = orig_props.copy()
-                
+
                 # Filtrera node_context baserat på index
                 if node_context:
                     specific_context = [ctx for i, ctx in enumerate(node_context) if i in indices]
                     new_props["node_context"] = specific_context
-                
+
                 # Spara nya noden
-                # (Om den redan finns, gör vi en upsert på properties för att inte krascha, 
+                # (Om den redan finns, gör vi en upsert på properties för att inte krascha,
                 # men logiskt sett borde Split skapa nya unika namn)
                 props_json = json.dumps(new_props, ensure_ascii=False)
-                
+
                 # Check exist
                 exists = self.conn.execute("SELECT 1 FROM nodes WHERE id = ?", [new_name]).fetchone()
                 if not exists:
@@ -746,14 +747,14 @@ def register_usage(self, node_ids: list):
                     # För enkelhetens skull i denna operation skriver vi över properties med den splittade datan
                     # eftersom syftet är att isolera kluster.
                     self.conn.execute("UPDATE nodes SET properties = ? WHERE id = ?", [props_json, new_name])
-                
+
                 created_nodes.append(new_name)
 
             # 3. Kopiera relationer (Brute force copy)
             # Eftersom vi inte vet vilken relation som hör till vilket kluster,
             # kopierar vi ALLA relationer till ALLA nya noder.
             # Dreamer får städa detta i framtida cykler (relevans-städning).
-            
+
             # Utgående
             out_edges = self.conn.execute("SELECT target, edge_type, properties FROM edges WHERE source = ?", [original_id]).fetchall()
             for new_node in created_nodes:
@@ -779,31 +780,31 @@ def register_usage(self, node_ids: list):
             # Detta tar också bort dess kanter via Cascade (om implementerat) eller manuell delete
             self.conn.execute("DELETE FROM edges WHERE source = ? OR target = ?", [original_id, original_id])
             self.conn.execute("DELETE FROM nodes WHERE id = ?", [original_id])
-            
+
             LOGGER.info(f"Split {original_id} into {created_nodes}")
 
     def recategorize_node(self, node_id: str, new_type: str):
-            """
-            Byt typ på en nod (Re-categorize).
-            """
-            if self.read_only: raise RuntimeError("HARDFAIL: Read-only")
-            
-            with self._lock:
-                # Kontrollera att noden finns
-                exists = self.conn.execute("SELECT 1 FROM nodes WHERE id = ?", [node_id]).fetchone()
-                if not exists:
-                    LOGGER.warning(f"Recategorize failed: Node {node_id} not found")
-                    return
+        """
+        Byt typ på en nod (Re-categorize).
+        """
+        if self.read_only: raise RuntimeError("HARDFAIL: Read-only")
 
-                self.conn.execute("UPDATE nodes SET type = ? WHERE id = ?", [new_type, node_id])
-                LOGGER.info(f"Recategorized {node_id} -> {new_type}")
+        with self._lock:
+            # Kontrollera att noden finns
+            exists = self.conn.execute("SELECT 1 FROM nodes WHERE id = ?", [node_id]).fetchone()
+            if not exists:
+                LOGGER.warning(f"Recategorize failed: Node {node_id} not found")
+                return
+
+            self.conn.execute("UPDATE nodes SET type = ? WHERE id = ?", [new_type, node_id])
+            LOGGER.info(f"Recategorized {node_id} -> {new_type}")
 
     def get_node_degree(self, node_id: str) -> int:
         """Returnerar antal unika relationer (exklusive inkommande från Unit-noder)."""
         with self._lock:
             # Vi räknar kopplingar mot andra entiteter/koncept för att mäta 'viktighet'
             res = self.conn.execute("""
-                SELECT count(*) FROM edges 
+                SELECT count(*) FROM edges
                 WHERE (source = ? OR target = ?)
                 AND edge_type NOT IN ('UNIT_MENTIONS', 'DEALS_WITH')
             """, [node_id, node_id]).fetchone()
@@ -813,7 +814,7 @@ def register_usage(self, node_ids: list):
         """Hämtar alla Unit-IDs (filer) som refererar till denna nod."""
         with self._lock:
             rows = self.conn.execute("""
-                SELECT DISTINCT source FROM edges 
+                SELECT DISTINCT source FROM edges
                 WHERE target = ? AND edge_type IN ('UNIT_MENTIONS', 'DEALS_WITH')
             """, [node_id]).fetchall()
             return [r[0] for r in rows]

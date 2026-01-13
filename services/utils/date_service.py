@@ -2,7 +2,7 @@
 DateService - Central datumhantering för MyMemory (OBJEKT-50)
 
 Prioritetsordning för datumextraktion:
-1. Frontmatter (timestamp_created) - mest pålitligt
+1. Frontmatter (timestamp_ingestion) - mest pålitligt
 2. Filnamn (Slack_kanal_2025-12-11_uuid.txt) - pålitligt för Slack
 3. PDF-metadata (CreationDate) - för PDF-filer
 4. Filsystem (birthtime/mtime) - alltid försöker sist
@@ -51,17 +51,17 @@ class DateExtractor(ABC):
 
 class FrontmatterExtractor(DateExtractor):
     """
-    Läser timestamp_created från YAML frontmatter.
-    
+    Läser timestamp_ingestion från YAML frontmatter.
+
     Förväntat format i .md-filer:
     ---
-    timestamp_created: '2025-12-11T14:30:00+01:00'
+    timestamp_ingestion: '2025-12-11T14:30:00+01:00'
     ---
-    
+
     Validerar att datumet är rimligt (>= MIN_YEAR).
     """
-    
-    PATTERN = re.compile(r"timestamp_created:\s*['\"]?([^'\"\n]+)")
+
+    PATTERN = re.compile(r"timestamp_ingestion:\s*['\"]?([^'\"\n]+)")
     MIN_YEAR = 2015  # Datum äldre än detta anses korrupt
     
     @property

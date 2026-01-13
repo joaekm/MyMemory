@@ -84,7 +84,7 @@ def auto_repair(health_info):
                         text = parts[2].strip()
                         
                         ai_summary = metadata.get('ai_summary') or ""
-                        timestamp = metadata.get('timestamp_created') or ""
+                        timestamp = metadata.get('timestamp_ingestion') or ""
                         
                         full_doc = f"FILENAME: {filename}\nSUMMARY: {ai_summary}\n\nCONTENT:\n{text[:8000]}"
                         

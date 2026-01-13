@@ -280,8 +280,8 @@ class EntityGatekeeper:
             for p in self.graph_store.find_nodes_by_type("Person"):
                 uuid_str = p['id']
                 props = p.get('properties', {})
-                if 'email' in props: self.indices["Person"]["email"][props['email'].lower()] = uuid_str
-                if 'name' in props:
+                if props.get('email'): self.indices["Person"]["email"][props['email'].lower()] = uuid_str
+                if props.get('name'):
                     name = props['name'].strip().lower()
                     if name not in self.indices["Person"]["name"]: self.indices["Person"]["name"][name] = []
                     self.indices["Person"]["name"][name].append(uuid_str)
@@ -583,41 +583,38 @@ def processa_dokument(filväg: str, filnamn: str):
             return
 
         # --- UNIFIED PIPELINE SWITCH ---
-                source_type = "Document"
-                if "slack" in filväg.lower(): source_type = "Slack Log"
-                elif "mail" in filväg.lower(): source_type = "Email Thread"
-                elif "calendar" in filväg.lower(): source_type = "Calendar Event"
+        source_type = "Document"
+        if "slack" in filväg.lower(): source_type = "Slack Log"
+        elif "mail" in filväg.lower(): source_type = "Email Thread"
+        elif "calendar" in filväg.lower(): source_type = "Calendar Event"
 
-                # Ett enda anrop!
-                full_result = unified_processing_strategy(raw_text, filnamn, source_type)
-                
-                validated_mentions = full_result.get("validated_mentions", [])
-                semantic_metadata = full_result.get("semantic_metadata", {})
+        # Ett enda anrop!
+        full_result = unified_processing_strategy(raw_text, filnamn, source_type)
 
-                # Spara (Area C compliant structure)
-                # Tre tidsstämplar:
-                # - timestamp_ingestion: När filen skapades i Lake (nu)
-                # - timestamp_content: När innehållet hände (extraherat eller UNKNOWN)
-                # - timestamp_updated: Sätts av Dreamer vid semantisk uppdatering (null initialt)
-                timestamp_content = extract_content_date(raw_text)
+        validated_mentions = full_result.get("validated_mentions", [])
+        semantic_metadata = full_result.get("semantic_metadata", {})
 
-                frontmatter = {
-                    "unit_id": unit_id,
-                    "source_ref": lake_file,
-                    "original_filename": filnamn,
-                    "timestamp_ingestion": datetime.datetime.now().isoformat(),
-                    "timestamp_content": timestamp_content,
-                    "timestamp_updated": None,
-                    "context_summary": semantic_metadata.get("context_summary", ""),
-                    "relations_summary": semantic_metadata.get("relations_summary", ""),
-                    "document_keywords": semantic_metadata.get("document_keywords", []),
-                    "source_type": source_type,
-                    "ai_model": semantic_metadata.get("ai_model", "unknown"),
-                }
-        
-        fm_str = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
-        with open(lake_file, 'w', encoding='utf-8') as f:
-        
+        # Spara (Area C compliant structure)
+        # Tre tidsstämplar:
+        # - timestamp_ingestion: När filen skapades i Lake (nu)
+        # - timestamp_content: När innehållet hände (extraherat eller UNKNOWN)
+        # - timestamp_updated: Sätts av Dreamer vid semantisk uppdatering (null initialt)
+        timestamp_content = extract_content_date(raw_text)
+
+        frontmatter = {
+            "unit_id": unit_id,
+            "source_ref": lake_file,
+            "original_filename": filnamn,
+            "timestamp_ingestion": datetime.datetime.now().isoformat(),
+            "timestamp_content": timestamp_content,
+            "timestamp_updated": None,
+            "context_summary": semantic_metadata.get("context_summary", ""),
+            "relations_summary": semantic_metadata.get("relations_summary", ""),
+            "document_keywords": semantic_metadata.get("document_keywords", []),
+            "source_type": source_type,
+            "ai_model": semantic_metadata.get("ai_model", "unknown"),
+        }
+
         fm_str = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
         with open(lake_file, 'w', encoding='utf-8') as f:
             f.write(f"---\n{fm_str}---\n\n# {filnamn}\n\n{raw_text}")

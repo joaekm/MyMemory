@@ -77,7 +77,7 @@ def indexera_vektor(filväg, filnamn):
         
         # 3. Upsert via Service
         ai_summary = metadata.get('ai_summary') or ""
-        timestamp = metadata.get('timestamp_created') or ""
+        timestamp = metadata.get('timestamp_ingestion') or ""
         
         graph_ctx = metadata.get("graph_context_summary")
         ctx_text = f"KONTEXT (Grafrelationer):\n{graph_ctx}\n\n" if graph_ctx else ""

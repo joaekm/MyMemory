@@ -38,21 +38,6 @@ class RebuildOrchestrator:
         self.project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.staging_info = {}
     
-    def _run_graph_builder(self):
-        """Kör graf-byggning direkt i samma process för att ha kontroll över GraphStore-anslutningar."""
-        _log("  🧠 Kör Graf-byggning...")
-        
-        # Importera och kör direkt istället för subprocess
-        # Detta löser DuckDB-låskonflikter eftersom alla GraphStore-anslutningar sker i samma process
-        try:
-            from services.indexers.graph_builder import process_lake_batch
-            process_lake_batch()
-            _log("  ✅ Graf-byggning klar")
-        except Exception as e:
-            _log(f"  ❌ Graf-byggning fel: {e}")
-            LOGGER.error(f"Graph Builder Error: {e}", exc_info=True)
-            raise RuntimeError(f"Graf-byggning misslyckades: {e}") from e
-
     def _run_dreamer(self):
         """Kör Dreamer (Entity Resolver) för att städa grafen."""
         _log("  😴 Kör Dreamer (Städning & Länkning)...")
@@ -215,9 +200,6 @@ class RebuildOrchestrator:
                     raise
                 
                 self.service_manager.stop()
-                
-                # Konsolidering
-                self._run_graph_builder()
 
                 # Städning (Dreamer)
                 self._run_dreamer()
