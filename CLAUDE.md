@@ -180,6 +180,24 @@ services/agents/dreamer.py
   - `documentation/my_mem_koncept_logg.md` - vid arkitekturbeslut
 - Historik går förlorad om commits skjuts upp
 
+## Felsökning & Loggar
+
+**Loggfil:** `~/MyMemory/Logs/my_mem_system.log`
+
+**Vid felsökning - kolla loggen först!** Innan du frågar om fel eller oväntade beteenden, läs loggen:
+```bash
+# Senaste raderna
+tail -100 ~/MyMemory/Logs/my_mem_system.log
+
+# Sök efter fel
+grep -i "error\|exception\|fail" ~/MyMemory/Logs/my_mem_system.log | tail -50
+
+# Specifik tjänst (TRANS, VECTOR, SLACK, RETRIEVER, etc.)
+grep "TRANS" ~/MyMemory/Logs/my_mem_system.log | tail -50
+```
+
+Alla tjänster loggar till samma fil med prefix: `TRANS`, `VECTOR`, `SLACK`, `RETRIEVER`, `GMAIL`, `CALENDAR`.
+
 ## Konfigurationsfiler
 
 | Fil | Syfte |
