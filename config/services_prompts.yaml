@@ -164,7 +164,7 @@ dreamer:
     
     Nycklar MÅSTE vara exakta nodnamn från BEFINTLIGA MASTERNODER. Inkludera INTE noder utan nya koncept.
 
-structural_analysis: |
+  structural_analysis: |
     ANALYSERA om denna nod bör delas (SPLIT), döpas om (RENAME), kategoriseras om (RE-CATEGORIZE) eller raderas (DELETE).
     
     NOD: {id} ({type})
@@ -194,7 +194,7 @@ structural_analysis: |
       "split_clusters": [ {{"name": "Namn", "context_indices": [0, 2]}} ] (vid SPLIT)
     }}
 
-semantic_update: |
+  semantic_update: |
     Din uppgift är att FÖRÄDLA metadata för dokumentet "{filename}".
     Du ska kombinera dokumentets befintliga sammanfattning med ny, djupare insikt från kunskapsgrafen.
     

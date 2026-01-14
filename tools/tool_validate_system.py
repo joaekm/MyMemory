@@ -8,8 +8,6 @@ import datetime
 import logging
 from chromadb.utils import embedding_functions
 
-from services.utils.graph_service import GraphStore
-
 # Enkel loggning för CLI-verktyg
 logging.basicConfig(level=logging.WARNING, format='%(levelname)s - %(message)s')
 LOGGER = logging.getLogger('SystemValidator')
@@ -32,7 +30,6 @@ CONFIG = ladda_yaml('my_mem_config.yaml')
 LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])
 CHROMA_PATH = os.path.expanduser(CONFIG['paths']['chroma_db'])
-GRAPH_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
 LOG_FILE = os.path.expanduser(CONFIG['logging']['log_file_path'])
 
 # Hämta extensions
@@ -165,58 +162,9 @@ def validera_chroma(expected_count, lake_ids):
         LOGGER.error(f"Kunde inte läsa ChromaDB: {e}")
         print(f"❌ KRITISKT FEL: Kunde inte läsa ChromaDB: {e}")
 
-def validera_graf(expected_count, lake_ids):
-    print_header("3. GRAF-AUDIT (DuckDB)")
-    graph = None
-    try:
-        graph = GraphStore(GRAPH_PATH, read_only=True)
-        stats = graph.get_stats()
-        
-        unit_count = stats.get('nodes', {}).get('Unit', 0)
-        entity_count = stats.get('nodes', {}).get('Entity', 0)
-        concept_count = stats.get('nodes', {}).get('Concept', 0)
-        total_edges = stats.get('total_edges', 0)
-        
-        print(f"🕸️  Graf-noder:")
-        print(f"   - Units:    {unit_count} st")
-        print(f"   - Entities: {entity_count} st")
-        print(f"   - Concepts: {concept_count} st")
-        print(f"   - Kanter:   {total_edges} st")
-        
-        if unit_count == expected_count:
-            print("✅ SYNKAD: Grafen matchar Sjön.")
-        else:
-            print(f"❌ OSYNKAD: Grafen diffar med {abs(expected_count - unit_count)} noder.")
-            
-            # Hämta alla Unit-IDs från grafen
-            units = graph.find_nodes_by_type("Unit")
-            graph_ids = {u['id'] for u in units}
-            
-            lake_id_set = set(lake_ids.keys())
-            
-            missing_in_graph = lake_id_set - graph_ids
-            if missing_in_graph:
-                print(f"\n   Saknas i Graf ({len(missing_in_graph)} st):")
-                for uid in missing_in_graph:
-                    filename = lake_ids.get(uid, uid)
-                    # Visa namn utan UUID för läsbarhet
-                    display_name = filename.rsplit('_', 1)[0] if '_' in filename else filename
-                    print(f"   - {display_name}")
-                print(f"\n   Tips: Kör 'python services/my_mem_graph_builder.py' för att synka")
-        
-        return unit_count
-
-    except Exception as e:
-        LOGGER.error(f"Kunde inte läsa GraphStore: {e}")
-        print(f"❌ KRITISKT FEL: Kunde inte läsa GraphStore: {e}")
-        return 0
-    finally:
-        if graph:
-            graph.close()
-
 def rensa_gammal_logg():
     """Rensar loggfilen på rader äldre än 24 timmar."""
-    print_header("4. LOGG-RENSNING")
+    print_header("3. LOGG-RENSNING")
     
     if not os.path.exists(LOG_FILE):
         print(f"⚠️ Loggfil finns inte: {LOG_FILE}")
@@ -272,14 +220,13 @@ def run_startup_checks():
     Används av start_services.py vid uppstart.
     """
     print("=== MyMem System Validator ===")
-    
+
     lake_c = validera_filer()
     lake_ids = get_lake_ids() if lake_c > 0 else {}
-    
+
     # Hämta counts för health_info
     vector_count = 0
-    graph_count = 0
-    
+
     if lake_c > 0:
         # Chroma
         try:
@@ -290,23 +237,18 @@ def run_startup_checks():
         except Exception as e:
             LOGGER.error(f"Kunde inte läsa ChromaDB: {e}")
             print(f"❌ KRITISKT FEL: Kunde inte läsa ChromaDB: {e}")
-        
-        # Graf (DuckDB)
-        graph_count = validera_graf(lake_c, lake_ids)
     else:
         print("\nIngen data att validera i databaserna.")
-    
+
     # Rensa gammal logg
     rensa_gammal_logg()
-    
+
     # Returnera health_info för auto_repair
     return {
         'lake_count': lake_c,
         'vector_count': vector_count,
-        'graph_count': graph_count,
         'lake_store': LAKE_STORE,
         'chroma_path': CHROMA_PATH,
-        'graph_path': GRAPH_PATH,
         'lake_ids': lake_ids
     }
 

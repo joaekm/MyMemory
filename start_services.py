@@ -37,57 +37,56 @@ def _load_config():
     return None
 
 def auto_repair(health_info):
-    """Reparerar saknade filer i Vector och Graf"""
+    """Reparerar saknade filer i Vector"""
     if not health_info:
         return
-    
+
     lake_count = health_info['lake_count']
     vector_count = health_info['vector_count']
-    graph_count = health_info['graph_count']
     lake_store = health_info['lake_store']
     chroma_path = health_info['chroma_path']
     lake_ids_dict = health_info.get('lake_ids', {})
-    
+
     repaired = False
-    
+
     # --- VECTOR REPAIR ---
     if vector_count < lake_count:
         try:
             import chromadb
             from chromadb.utils import embedding_functions
-            
+
             lake_id_set = set(lake_ids_dict.keys())
-            
+
             client = chromadb.PersistentClient(path=chroma_path)
             emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
             coll = client.get_or_create_collection(name="dfm_knowledge_base", embedding_function=emb_fn)
             vector_ids = set(coll.get()['ids'])
-            
+
             missing = lake_id_set - vector_ids
             if missing:
                 print(f"{_ts()} 🔧 REPAIR: Indexerar {len(missing)} saknade filer i Vector...")
-                
+
                 for uid in missing:
                     filename = lake_ids_dict.get(uid, f"{uid}.md")
                     filepath = os.path.join(lake_store, filename)
                     try:
                         with open(filepath, 'r', encoding='utf-8') as f:
                             content = f.read()
-                        
+
                         if not content.startswith("---"):
                             continue
                         parts = content.split("---", 2)
                         if len(parts) < 3:
                             continue
-                        
+
                         metadata = yaml.safe_load(parts[1])
                         text = parts[2].strip()
-                        
+
                         ai_summary = metadata.get('ai_summary') or ""
                         timestamp = metadata.get('timestamp_ingestion') or ""
-                        
+
                         full_doc = f"FILENAME: {filename}\nSUMMARY: {ai_summary}\n\nCONTENT:\n{text[:8000]}"
-                        
+
                         coll.upsert(
                             ids=[uid],
                             documents=[full_doc],
@@ -96,36 +95,14 @@ def auto_repair(health_info):
                     except Exception as e:
                         LOGGER.warning(f"Kunde inte indexera {filename}: {e}")
                         print(f"{_ts()} ⚠️ Kunde inte indexera {filename}: {e}")
-                
+
                 print(f"{_ts()} ✅ REPAIR: Vector klar")
                 repaired = True
-                
+
         except Exception as e:
             LOGGER.error(f"Vector repair misslyckades: {e}")
             print(f"{_ts()} ❌ Vector repair misslyckades: {e}")
-    
-    # --- GRAPH REPAIR ---
-    if graph_count < lake_count:
-        print(f"{_ts()} 🔧 REPAIR: Kör Graph Builder för {lake_count - graph_count} saknade noder...")
-        try:
-            result = subprocess.run(
-                [sys.executable, "-m", "services.indexers.graph_builder"],
-                capture_output=True,
-                text=True,
-                timeout=120
-            )
-            if result.returncode == 0:
-                print(f"{_ts()} ✅ REPAIR: Graf klar")
-                repaired = True
-            else:
-                print(f"{_ts()} ⚠️ Graph builder avslutade med fel")
-        except subprocess.TimeoutExpired:
-            LOGGER.warning("Graph builder timeout (120s)")
-            print(f"{_ts()} ⚠️ Graph builder timeout (120s)")
-        except Exception as e:
-            LOGGER.error(f"Graph repair misslyckades: {e}")
-            print(f"{_ts()} ❌ Graph repair misslyckades: {e}")
-    
+
     if repaired:
         print()
 
