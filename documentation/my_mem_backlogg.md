@@ -13,7 +13,7 @@ original_binary_ref: null
 
 # Projekt-Backlog
 
-Detta dokument spårar vårt aktiva arbete. Uppdaterad 2026-01-14 efter MCP-pivoten.
+Detta dokument spårar vårt aktiva arbete. Uppdaterad 2026-01-14.
 
 ## Statusförklaring
 
@@ -63,6 +63,8 @@ Detta dokument spårar vårt aktiva arbete. Uppdaterad 2026-01-14 efter MCP-pivo
     * *Lösning:* `services/utils/date_service.py` med prioritet: Frontmatter → Filnamn → PDF-metadata → Filesystem.
 * **LÖST-54:** Migrera från **KùzuDB till DuckDB**.
     * *Lösning:* `GraphStore`-klass med relationell graf-modell (nodes/edges tabeller).
+* **LÖST-36:** Implementera **Kalender-ingestion**.
+    * *Lösning:* Gmail/Calendar collectors implementerade.
 
 ---
 
@@ -112,6 +114,20 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
 
 ### Prio 1 - Datakvalitet
 
+* **OBJEKT-62 (AKTIV - NY):** Fixa **Transcription Truncation**.
+    * *Problem:* Långa transkriptioner trunkeras i Lake-filer.
+    * *Rotorsak:* Gemini Pro har output-token-gräns. Prompten ber om hela transkriptet i JSON-fältet `"transcript"`, vilket kapas vid långa möten.
+    * *Lösning:* Separera metadata-extraktion från transkript-output. Behåll `raw_transcript` (från Flash), applicera bara annoteringarna.
+    * *Påverkan:* `services/processors/transcriber.py`, `config/services_prompts.yaml`
+
+* **OBJEKT-63 (AKTIV - NY):** Implementera **Rigorös Metadata-testkedja**.
+    * *Problem:* Hela datacykeln för metadata (Schema → Ingestion → Dreamer → Validator → Lake) saknar end-to-end-tester. Kedjan bryts ofta utan att det upptäcks.
+    * *Krav:*
+        - Test som verifierar att en property definierad i schema-template propageras korrekt genom hela flödet
+        - HARDFAIL om kedjan bryts (ingen tyst fallback)
+        - Täcker: Schema-validering → DocConverter/Transcriber → GraphStore → Dreamer → MCP-validator
+    * *Filosofi:* Om en property sätts i schemat ska den gå hela vägen. Om den inte gör det ska det vara högljutt.
+
 * **OBJEKT-44 (AKTIV):** Implementera **"Entity Resolution & Alias Learning"**.
     * *Status:* Delvis implementerat. EntityGatekeeper finns. Alias-learning saknas.
     * *Kvarstående:*
@@ -138,8 +154,6 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
 
 Dessa objekt är fortfarande potentiellt relevanta men inte prioriterade.
 
-* **OBJEKT-36 (PARKERAD):** Kalender-integration.
-    * *Relevans:* Kan vara relevant för ingestion. Gmail/Calendar collectors finns.
 
 * **OBJEKT-40 (PARKERAD):** Harvest Integration.
     * *Relevans:* Tidrapporteringsdata kan berika minnet.

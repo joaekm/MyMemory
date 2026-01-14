@@ -95,27 +95,70 @@ MCP-server (index_search_mcp.py) → Claude Desktop / Cursor / andra AI-verktyg
 - Logga orsaken med full kontext
 - Avbryt operationen istället för att gissa
 
-### 3. Inga hårdkodade värden
-- **Sökvägar:** Läs från `config/my_mem_config.yaml`
-- **Graf-schema:** Läs från `config/graph_schema_template.json`
-- **Promptar:** Lägg i `config/*.yaml`, aldrig i Python-kod
+**Undantag:** Fallbacks är tillåtna endast om de är explicit dokumenterade i svaret, loggas med WARNING, och användaren kan se att en fallback användes.
 
-### 4. Ingen AI-cringe
+```python
+# ❌ DÅLIGT: Tyst fallback
+if not results:
+    results = relaxed_search(query)  # Användaren vet inte
+
+# ✅ BRA: Explicit hardfail
+if not results:
+    return {"status": "NO_RESULTS", "reason": f"Strict search for '{query}' returned 0 hits"}
+```
+
+### 3. Configuration Driven
+Inga inställningar, modellnamn (t.ex. `gemini-pro`), API-nycklar eller tröskelvärden (t.ex. `0.95`) får hårdkodas i Python-filer. De måste hämtas dynamiskt från konfigurationsfiler (yaml) eller miljövariabler.
+
+- **Sökvägar:** Läs från `config/my_mem_config.yaml`
+- **Graf-schema:** Läs från `config/graph_schema_template.json` (SSOT för ontologin)
+- **Promptar:** Lägg i `config/services_prompts.yaml`, aldrig i Python-kod
+- **Undantag:** Default-värden i `.get()`-anrop är okej
+
+```python
+# ❌ DÅLIGT
+VALID_NODE_TYPES = ["Person", "Organization", "Project"]
+GRAPH_PATH = os.path.expanduser("~/MyMemory/Index/my_mem_graph")
+MODEL = "gemini-pro"
+
+# ✅ BRA
+from services.utils.schema_validator import get_allowed_node_types
+CONFIG = load_config('my_mem_config.yaml')
+GRAPH_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
+MODEL = CONFIG.get('models', {}).get('model_pro')
+```
+
+### 4. External Prompts
+Promptar till LLM får **ALDRIG** definieras i koden. Variabler som heter `prompt`, `instruction` eller `template` får inte tilldelas långa strängar eller f-strings. All prompt-text ska laddas från `config/services_prompts.yaml`.
+
+### 5. Schema Consistency
+Koden måste strikt följa namngivningen i `graph_schema_template.json`. Det är förbjudet att uppfinna egna nycklar för noder eller properties (t.ex. använda `evidence` om schemat säger `distinguishing_context`). Om koden refererar till en property, MÅSTE den finnas i schemat.
+
+### 6. Traceability
+Dataflödet måste vara spårbart. Det är förbjudet att skriva över dynamisk data med hårdkodad dummy-data (t.ex. "LLM sammanfattad fakta") eller återställa tidsstämplar manuellt utan logik. Data som extraheras i ett steg måste bevaras till lagring.
+
+### 7. Ingen AI-cringe
 - Undvik töntiga metafornamn ("Trädgårdsmästaren", "Bibliotekarien")
 - Använd deskriptiva namn som beskriver funktionen
 
-### 5. Stanna vid vägval
+### 8. Stanna vid vägval
 Fråga användaren vid:
 - Namngivning (funktioner, variabler, fält)
 - Prompt-formuleringar
 - Output-format (JSON-strukturer, API-kontrakt)
 - Trade-offs och oklarheter
 
-### 6. Generella lösningar på specifika problem
+### 9. Generella lösningar på specifika problem
 - Sök den generella orsaken, inte det specifika symptomet
 - Undvik specifika fixar som skapar teknisk skuld
 
-### 7. Skyddade filer
+```
+Problem: "Systemet hittar inte 'Cenk' när jag söker"
+❌ DÅLIGT: "Lägg till 'Cenk' som alias i konfigurationen"
+✅ BRA: "Varför hittar vi inte varianter av namn generellt?" → Entity Resolution
+```
+
+### 10. Skyddade filer
 Fråga innan radering/omskrivning av:
 ```
 config/my_mem_config.yaml
@@ -124,6 +167,18 @@ services/utils/graph_service.py
 services/processors/doc_converter.py
 services/agents/dreamer.py
 ```
+
+### 11. Arbeta i Main - Aldrig i Worktrees
+- **ALDRIG** arbeta i git worktree-branches
+- Alla ändringar sker direkt i main-repot (`/Users/jekman/Projects/MyMemory`)
+- Worktrees skapar förvirring, synkproblem, och commits kan gå förlorade
+
+### 12. Dokumentation och Commits
+- **Committa efter varje logisk ändring** - inte bara vid sessionsslut
+- **Uppdatera dokumentation:**
+  - `documentation/my_mem_backlogg.md` - när objekt löses eller läggs till
+  - `documentation/my_mem_koncept_logg.md` - vid arkitekturbeslut
+- Historik går förlorad om commits skjuts upp
 
 ## Konfigurationsfiler
 
