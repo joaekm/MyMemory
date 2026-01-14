@@ -1,184 +1,153 @@
 
-# Systemarkitektur (v5.0 - Post-Simulering)
+# Systemarkitektur (v6.0 - MCP-pivot)
 
-Detta dokument beskriver den tekniska sanningen om systemets implementation, uppdaterad efter första stresstestet (December 2025).
+Detta dokument beskriver den tekniska sanningen om systemets implementation, uppdaterad efter pivoten från egen chatt till MCP-exponering (Januari 2026).
 
 ## 1. Huvudprinciper
 
-1. **HARDFAIL > Silent Fallback:** Systemet ska misslyckas tydligt istället för att tyst falla tillbaka. Alla fel rapporteras explicit till användaren. (Se `.cursorrules`)
+1. **HARDFAIL > Silent Fallback:** Systemet ska misslyckas tydligt istället för att tyst falla tillbaka. Alla fel rapporteras explicit.
 
-2. **Split Indexing:** Vi skiljer strikt på Realtid (Vektorsökning) och Batch (Graf/Taxonomi) för att undvika process-låsningar. Konsolidering (Graf) körs i intervaller, Vektorn körs direkt.
+2. **Datakvalitet först:** Bättre data ger bättre svar oavsett reasoning-logik. Fokus på ingestion, validering och förädling.
 
-3. **OTS-Modellen:** All kunskap struktureras i grafen enligt taxonomin Operativt - Taktiskt - Strategiskt.
+3. **MCP som exponering:** MyMemory är händerna (kunskapsbas), inte hjärnan (reasoning). Externa AI-verktyg hanterar reasoning.
 
-4. **Rich Raw Data:** All insamlad data (Ljud, Slack) mellanlandar som .txt-filer i Assets försedda med en "Rich Header" (tidsstämplar, talare, käll-ID) innan de bearbetas vidare. Detta garanterar spårbarhet.
+4. **Schema som SSOT:** `graph_schema_template.json` definierar tillåtna nodtyper, relationer och properties.
 
-5. **Agentic Reasoning:** Chatten är inte längre bara en sökning, utan en process som planerar, väljer källa (Graf vs Vektor) och syntetiserar.
-
-6. **Idempotens & Självläkning:** Alla agenter hoppar över filer som redan är klara, men fyller automatiskt i "hål" om filer saknas i nästa led.
+5. **Idempotens & Självläkning:** Alla agenter hoppar över redan klara filer och fyller automatiskt i hål.
 
 ## 2. Datamodell: Trippel Lagring
 
-Systemet använder tre lagringsnivåer för att balansera integritet, prestanda och spårbarhet.
-
-### Graf-metadata: The Living Graph
-För att möjliggöra "Self-Healing" och relevansurval har varje nod i grafen följande obligatoriska system-egenskaper:
-- **last_retrieved_at** (Timestamp): Tidpunkt för senaste användning (Initiering: created_at).
-- **retrieved_times** (Int): Antal gånger noden använts/lästs i en sökning (Initiering: 0).
-- **last_refined_at** (Timestamp/String): När Dreamer senast städade/slog ihop noden (Initiering: "never").
-
-### "Asset Store" (Lagring 1 - Källan)
-- **Innehåll:** Originalfiler (PDF, Docx) samt genererade .txt-filer från Ljud och Slack.
-- **Namnstandard:** `[Originalnamn]_[UUID].[ext]`.
-- **Syfte:** "Sanningen". Här finns rådatan. **Aldrig röra.**
+### "Assets" (Lagring 1 - Källan)
+- **Innehåll:** Originalfiler (PDF, Docx, ljud, etc.)
+- **Namnstandard:** `[beskrivning]_[UUID].[ext]`
+- **Syfte:** Sanningen. Aldrig röra.
+- **Sökväg:** `~/MyMemory/Assets/`
 
 ### "Lake" (Lagring 2 - Mellanlager)
-- **Innehåll:** `.md`-filer med standardiserad YAML-frontmatter (innehållande UUID).
-- **Ansvarig:** Skapas uteslutande av DocConverter.
-- **Syfte:** Normalisering. Allt är text här. Stabil över tid.
+- **Innehåll:** `.md`-filer med standardiserad YAML-frontmatter
+- **Ansvarig:** Skapas av DocConverter och Transcriber
+- **Syfte:** Normaliserad text med metadata
+- **Sökväg:** `~/MyMemory/Lake/`
 
 ### "Index" (Lagring 3 - Hjärnan)
-- **ChromaDB:** Vektorer för semantisk sökning (Textlikhet).
-- **KùzuDB:** Graf för entitets-relationer och tidslinjer (Exakthet).
-- **taxonomy.json:** Sanningens källa för Masternoder (OTS).
-- **Framtid:** Grafen ska lära sig aliases över tid (OBJEKT-44).
+- **ChromaDB:** Vektorer för semantisk sökning
+- **DuckDB:** Relationell graf (nodes + edges tabeller)
+- **Sökväg:** `~/MyMemory/Index/`
 
-## 3. Agent-sviten (Tjänsterna)
+### 3-Timestamp-systemet
+Alla Lake-filer har tre tidsstämplar i frontmatter:
+- `timestamp_ingestion`: När filen indexerades i Lake
+- `timestamp_content`: När innehållet faktiskt hände (eller "UNKNOWN")
+- `timestamp_updated`: Sätts av Dreamer vid förädling
 
-Hela systemet orkestreras av `start_services.py` (för realtidstjänster) och manuella/schemalagda anrop (för batch).
-
-### 3.1 Insamling & Logistik
-
-| Agent | Input | Funktion | Output |
-|-------|-------|----------|--------|
-| **File Retriever** | DropZone | Flyttar filer till Asset Store, tilldelar UUID | Assets |
-| **Slack Archiver** | Slack API | "Daily Digest" - en .txt per kanal/dag | Assets |
-
-### 3.2 Bearbetning (The Core)
-
-| Agent | Bevakar | Modell | Output | Problem (OBJEKT-45) |
-|-------|---------|--------|--------|---------------------|
-| **Transcriber** | Assets (ljud) | Gemini Pro | `.txt` i Assets | Jobbar "i mörkret" - ingen kontext om kända personer |
-| **Doc Converter** | Assets (dok) | Gemini Flash | `.md` i Lake | Laddar taxonomi men använder den bara för validering |
-
-### 3.3 Indexering (Delad Arkitektur)
-
-| Agent | Status | Funktion | Syfte |
-|-------|--------|----------|-------|
-| **Vector Indexer** | Realtid (Watchdog) | Uppdaterar ChromaDB | Snabb sökbarhet |
-| **Graph Builder** | Batch (Manuell) | Konsoliderar mot OTS | Struktur & relationer |
-| **Dreamer** | Bakgrund | Städar & Läker | Underhåll |
-
-**Dreamer - Urvalsstrategi för underhåll:**
-1. **Relevansurval (80%):** Prioriterar noder som används ofta och nyligen (högt `retrieved_times`, nytt `last_retrieved_at`). Detta säkerställer att "aktiv kunskap" alltid är städad.
-2. **Underhållsurval (20%):** Prioriterar noder som inte städats på länge (`last_refined_at`) för att motverka "bit rot" och glömska.
-
-## 4. Konsumtion & Gränssnitt
-
-### Princip för Spårning
-**ALLA** komponenter som hämtar noder för att generera svar till användaren (t.ex. Planner, ContextBuilder) **MÅSTE** anropa `register_usage(node_ids)` i GraphService. Detta är motorn som driver Relevansurvalet och lär systemet vad som är viktigt.
-
-### MyMem Chat (v5.2 - Full Transparency)
-
-**Pipeline:**
-```
-Planering (Flash Lite)
-    ↓
-Jägaren (Search Lake) + Vektorn (ChromaDB)
-    ↓
-Domaren (Flash Lite - Re-ranking)
-    ↓
-Syntes (Gemini Pro)
-```
-
-**Komponenter:**
-- **Jägaren:** Python-baserad "brute force"-scanning av `/Lake` för exakta nyckelord. Löser "Vector Blindness".
-- **Domaren:** LLM-baserad filtrering som prioriterar innehåll över format.
-- **Syntesen:** Genererar svar med källhänvisning.
-
-**Prestandaproblem (Simulering 2025-12-03):**
-- Snitttid per runda: **50.6 sekunder**
-- Max tid: **130 sekunder**
-- `MAX_CHARS = 100000` → skickar upp till 100k tecken till Gemini Pro
-- **Lösning:** OBJEKT-43 (Summary-First Search)
-
-**Konfiguration:**
-- `chat_prompts.yaml`: Alla system-instruktioner (Planering, Domare, Syntes).
-- **Refresh:** Initierar nya DB-anslutningar vid varje sökning för att se nydata direkt.
-
-### Pipeline v6.0 (Planerad - OBJEKT-46)
-
-**Beslut 2025-12-03:** Ny arkitektur med tydligare separation of concerns.
+## 3. Ingestion-flöde
 
 ```
-Input → IntentRouter → ContextBuilder → Planner → Synthesizer → Output
-             (AI)           (Kod)         (AI)        (AI)
-         Klassificera     Hämta data   Bygg rapport   Svara
+DropZone → File Retriever → Assets (UUID-normaliserade original)
+                ↓
+    ┌──────────┴──────────┐
+    │                     │
+Transcriber          DocConverter
+(ljud → text)        (text + metadata + graf-extraktion)
+    ↓                     ↓
+Assets/Transcripts   Lake (.md + frontmatter)
+    └─────────────────────┘
+              ↓
+      Vector Indexer (realtid) → ChromaDB
+
+      Dreamer (batch) → Graf-förädling
 ```
 
-| Komponent | Typ | Ansvar | Fil |
-|-----------|-----|--------|-----|
-| **IntentRouter** | AI (Flash Lite) | Klassificera intent (FACT/INSPIRATION), parsa tid, upplös kontext | `intent_router.py` |
-| **ContextBuilder** | **Kod** | Deterministisk sökning baserad på strategi | `context_builder.py` |
-| **Planner** | AI (Flash Lite) | Skapa kurerad rapport från kandidater | `planner.py` |
-| **Synthesizer** | AI (Pro) | Generera svar från rapport | (befintlig) |
+### Komponenter
 
-**Nyckelskillnader mot v5.2:**
-- Synthesizer får en **rapport**, inte råa dokument
-- ContextBuilder är **deterministisk kod**, inte AI
-- Tydlig SOC: Varje komponent har ETT ansvar
-- Förberedd för agentic loop (v7.0)
+| Komponent | Bevakar | Output | Funktion |
+|-----------|---------|--------|----------|
+| **File Retriever** | DropZone | Assets | UUID-normalisering, sortering |
+| **Transcriber** | Assets/Recordings | Assets/Transcripts | Ljud → Text via Gemini |
+| **DocConverter** | Assets/* | Lake | Text-extraktion + AI-metadata + EntityGatekeeper |
+| **Vector Indexer** | Lake | ChromaDB | Delta-scan + Watchdog |
+| **Dreamer** | (batch) | Graf + Lake | Entity Resolution, förädling |
 
-### Launcher (macOS)
-- **Fil:** `MyMemory.app/Contents/Resources/Scripts/main.scpt`
-- **Funktion:** Orkestrerar start av backend och frontend.
-- **Debug Mode:** Argument `--debug` visar tankeprocess.
+### EntityGatekeeper (Dubblettkontroll)
+Vid ingestion kontrollerar DocConverter varje entitet:
+1. **LINK:** Exakt eller fuzzy-match i grafen → återanvänd befintlig UUID
+2. **CREATE:** Ingen match → skapa ny provisional nod
 
-### Simuleringsverktyg (Nytt)
-- **Fil:** `tools/simulate_session.py`
-- **Funktion:** Stresstestning med AI-persona (Interrogator + Evaluator).
-- **Output:** Utvärderingsrapport + teknisk logg i `logs/`.
+## 4. Index-struktur
 
-## 5. Konfiguration
+### ChromaDB (Vektor)
+- **Collection:** `dfm_knowledge_base`
+- **Embedding:** `all-MiniLM-L6-v2` (lokal)
+- **Dokument:** Sammanfattning + nyckelord + innehåll (max 8000 tecken)
 
-All styrning sker via konfigurationsfiler:
+### DuckDB (Graf)
+Relationell modell med två tabeller:
+```sql
+nodes(id TEXT PRIMARY KEY, type TEXT, aliases TEXT, properties TEXT)
+edges(source TEXT, target TEXT, edge_type TEXT, properties TEXT)
+```
+
+## 5. MCP-exponering
+
+### index_search_mcp.py (9 verktyg)
+| Verktyg | Funktion |
+|---------|----------|
+| `search_graph_nodes` | Sök noder i grafen |
+| `query_vector_memory` | Vektorsökning i ChromaDB |
+| `search_by_date_range` | Tidsfilterad sökning |
+| `search_lake_metadata` | Sök i Lake metadata |
+| `get_neighbor_network` | Hämta relaterade noder |
+| `get_entity_summary` | Sammanfattning av entitet |
+| `get_graph_statistics` | Grafstatistik |
+| `parse_relative_date` | Parsa "igår", "förra veckan" |
+| `read_document_content` | Läs dokumentinnehåll |
+
+### validator_mcp.py (2 verktyg)
+| Verktyg | Funktion |
+|---------|----------|
+| `validate_extraction` | Validera extraherad data mot schema |
+| `extract_and_validate_doc` | Extrahera och validera dokument |
+
+## 6. Dreamer - Förädling
+
+EntityResolver i `dreamer.py` förädlar på tre platser:
+
+1. **Vektor (ChromaDB):** Säkerställer att noder är indexerade för semantisk sökning
+2. **Graf (DuckDB):** Merge, split, rename av dubbletter via LLM-bedömning
+3. **Lake:** Uppdatering av node_context och metadata
+
+### Urvalsstrategi (80/20)
+- **80% Relevans:** Noder som används ofta och nyligen
+- **20% Underhåll:** Noder som inte städats på länge
+
+### Trigger
+Just nu endast vid rebuild. Designfråga att lösa.
+
+## 7. Konfiguration
 
 | Fil | Syfte |
 |-----|-------|
-| `my_mem_config.yaml` | Sökvägar, API-nycklar, Slack-kanaler, AI-modeller |
-| `my_mem_taxonomy.json` | Masternoder (OTS) |
-| `chat_prompts.yaml` | System-prompter för chatten |
-| `services_prompts.yaml` | Prompter för insamlingsagenter |
-| `.cursorrules` | **Utvecklingsregler** (HARDFAIL, Ingen AI-cringe) |
+| `config/my_mem_config.yaml` | Sökvägar, API-nycklar, modeller |
+| `config/graph_schema_template.json` | SSOT: nodtyper, relationer, properties |
+| `config/services_prompts.yaml` | Promptar för tjänster |
 
-## 6. Tech Stack & Beroenden
+## 8. Tech Stack
 
 | Kategori | Teknologi |
 |----------|-----------|
 | **Språk** | Python 3.12 |
 | **Vektordatabas** | ChromaDB |
-| **Grafdatabas** | KùzuDB (inbäddad) |
-| **Parsing** | pandas, pypdf, python-docx |
-| **UI** | Rich (CLI) |
-| **AI-klient** | google-genai (v1.0+ syntax) |
+| **Grafdatabas** | DuckDB (relationell graf) |
+| **AI-modeller** | Google Gemini (Pro/Flash/Lite) |
+| **Embeddings** | all-MiniLM-L6-v2 (lokal) |
+| **MCP** | FastMCP |
 
-**AI-Modeller:**
-| Uppgift | Modell | Notering |
-|---------|--------|----------|
-| Planering | Gemini Flash Lite | Låg latens |
-| Re-ranking | Gemini Flash Lite | Låg latens |
-| Transkribering | Gemini Pro | Hög kvalitet |
-| **Syntes** | Gemini Pro | **~70% av svarstiden** |
-| Embeddings | all-MiniLM-L6-v2 | Lokal CPU |
+## 9. Status (Januari 2026)
 
-## 7. Kända Begränsningar (2025-12-03)
+- **Datakvalitet:** ~70% klar. Principer etablerade.
+- **MCP-server:** 11 verktyg. Alfa-status. Används med Claude Desktop.
+- **Kvarstående:** Metadata-modell, Dreamer-trigger, ingestion-validering.
 
-Identifierade under första stresstestet:
-
-| Problem | Objekt | Prio |
-|---------|--------|------|
-| Ingen aggregerad insikt | OBJEKT-41 | 0 (KRITISK) |
-| Förstår inte "igår"/"förra veckan" | OBJEKT-42 | 0 (KRITISK) |
-| Långsam syntes (50-130s) | OBJEKT-43 | 0.5 |
-| Felstavade namn i transkribering | OBJEKT-44 | 1 |
-| Insamlingsagenter jobbar i mörkret | OBJEKT-45 | 1 |
+---
+*Senast uppdaterad: 2026-01-14*
+*Se `my_mem_koncept_logg.md` för resonemang bakom beslut.*

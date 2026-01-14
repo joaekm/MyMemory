@@ -983,3 +983,159 @@ Under arbetet med v3.2 identifierades tre fundamentala insikter om AI-driven sys
     - Alternativ: Godkänn, Justera (Byt namn, Flytta, Alias), Kasta.
     - Besluten sparas som "Validation Rules" i grafen så systemet inte gör om samma fel.
 * **Filosofi:** AI föreslår, Människan beslutar. Systemet lär sig av besluten.
+
+---
+
+## Konflikt 57: Från Chatt till Datakvalitet till MCP (Den Stora Pivoten)
+
+**Datum:** December 2025 - Januari 2026
+
+### Bakgrund
+Pipeline v8.x hade blivit allt mer sofistikerad: IntentRouter, Planner med ReAct-loop, Kronologen, "Thinking Out Loud", Multi-Agent delegation. Trots komplexiteten blev svaren inte märkbart bättre.
+
+### Fas 1: "Varför får jag inte bra svar?"
+* **Observation:** Mer avancerad reasoning-logik gav inte bättre resultat.
+* **Symptom:** Systemet missade fakta som fanns i Lake, blandade ihop entiteter, gav inkonsekvent kontext.
+* **Initial hypotes:** Pipelinen behöver fler steg, bättre prompts, smartare agenter.
+
+### Fas 2: "Aha. Data! Jag behöver hög datakvalitet."
+* **Insikt:** Problemet var inte reasoning-lagret. Det var datan.
+* **Princip:** Garbage in, garbage out. Ingen mängd sofistikerad reasoning kan kompensera för dålig datakvalitet.
+* **Konsekvens:** Fokus skiftade från chatt-pipeline till ingestion-process:
+    - Dreamer för entity resolution och graf-städning
+    - Schema-driven validation via MCP
+    - "The Living Graph Cycle" för kontinuerlig förädling
+    - Tre-timestamp-system för spårbarhet
+
+### Fas 3: "Vänta lite, jag kan ju plugga in vad som helst i den här grejen."
+* **Insikt:** Om datakvaliteten är hög behövs ingen egen chatt-klient.
+* **Arkitektur-pivot:**
+    - MCP-server exponerar Index till externa AI-verktyg
+    - Claude Desktop, Cursor, eller vilket AI-verktyg som helst kan bli "hjärnan"
+    - MyMemory blir **händerna** (kunskapsbas + context assembly), inte hjärnan (reasoning)
+* **Fördel:** Undviker att bygga och underhålla egen reasoning-logik. Utnyttjar istället frontier-modeller direkt.
+
+### Beslut
+* **Trinity Desktop:** Övergiven (dead end, för komplex)
+* **Chat Pipeline (v5-v8):** Övergiven (kod borttagen)
+* **Nytt fokus:** Ingestion-kvalitet + MCP-exponering
+
+### Status (Januari 2026)
+* **Datakvalitet:** ~70% klar. Principer etablerade.
+* **Kvarstående:** Metadata-modellen (vilka properties i graf vs lake) och hur de sätts (validering, resolution i ingestion).
+* **MCP-server:** 11 verktyg exponerade. Används dagligen med Claude Desktop. Alfa-status.
+
+---
+
+## Konflikt 58: Taxonomi → Schema-template (SSOT-pivot)
+
+**Datum:** December 2025 - Januari 2026
+
+### Problemet med taxonomin
+* **OTS-modellen:** All kunskap skulle struktureras hierarkiskt (Strategiskt → Taktiskt → Operativt).
+* **Taxonomi-filen:** `my_mem_taxonomy.json` var en "karta" som definierade denna hierarki.
+* **Observation:** Grafen försökte passa in i hierarkin, men datan passade inte modellen.
+* **Resultat:** Återvändsgränd i grafkvalitet. Entiteter hamnade på fel plats eller duplicerades.
+
+### Insikten
+* **Grafen är inte hierarkisk.** Den är en **relationell samling** av entiteter med kopplingar.
+* **Behov:** En "mall" (schema) som definierar *vad* som är tillåtet, inte *var* det ska placeras.
+* **Princip:** SSOT (Single Source of Truth) för ontologin.
+
+### Lösningen: graph_schema_template.json
+* **Innehåll:**
+    - Tillåtna nodtyper (Person, Organization, Project, etc.)
+    - Tillåtna properties per nodtyp
+    - Tillåtna relationer mellan nodtyper
+    - Affärsregler för validering
+* **Validering:** `schema_validator.py` och `validator_mcp.py` säkerställer att all data följer schemat.
+
+### Resultat
+* **Mindre komplexitet:** Ingen hierarkisk placering att hantera.
+* **Tydligare SSOT:** En fil styr hela ontologin.
+* **Bättre datakvalitet:** Validering fångar fel tidigt.
+
+### Status
+* Schema-template fungerar och är SSOT.
+* Kvarstående problem ligger i ingestion (hur data sätts), inte i schemat.
+
+---
+
+## Konflikt 59: KùzuDB → DuckDB (Grafdatabas-pivot)
+
+**Datum:** December 2025
+
+### Problemet med KùzuDB
+* **Låsningar:** Vid parallella processer (DocConverter + Dreamer) uppstod `IO Exception: Could not set lock`.
+* **Underhåll:** Projektet var inte aktivt underhållet. Buggar fixades långsamt.
+* **Komplexitet:** Cypher-syntax för en relativt enkel datamodell.
+
+### Beslut
+* **Pivot till DuckDB:** Robust, aktivt underhållet, SQL-syntax.
+* **Modell:** Relationell graf med två tabeller:
+    ```sql
+    nodes(id, type, aliases, properties)
+    edges(source, target, edge_type, properties)
+    ```
+* **Trade-off:** Ingen inbyggd graf-traversering, men SQL räcker för våra behov.
+
+### Implementation (LÖST-54)
+* `GraphStore`-klass i `services/utils/graph_service.py`
+* Thread-safe med `threading.Lock()`
+* `aliases`-kolumn för Entity Resolution
+* Index på type, source, target för prestanda
+
+### Resultat
+* Inga fler låsningsproblem.
+* Enklare debugging (SQL är bekant).
+* Snabbare utveckling.
+
+---
+
+## Konflikt 60: SessionEngine → MCP (Ansvarsfördelning)
+
+**Datum:** Januari 2026
+
+### Problemet
+* **SessionEngine** hanterade session-state, historik, och "learning" (spara sessioner som dokument).
+* **Fråga:** Om MyMemory inte längre har egen chatt, vem äger sessionen?
+
+### Insikt
+* **Sessionshantering är AI-verktygets ansvar.**
+* Claude Desktop har egen session/konversation.
+* Cursor har egen kontext.
+* MyMemory ska inte duplicera detta.
+
+### Beslut
+* **SessionEngine:** Borttagen.
+* **Ansvar:** AI-verktyget (Claude Desktop) äger sessionen. MyMemory exponerar bara data via MCP.
+
+### Konsekvens
+* Enklare arkitektur.
+* Tydlig separation: MyMemory = data, AI-verktyg = reasoning + session.
+
+---
+
+## Konflikt 61: Dreamer Trigger (Öppen designfråga)
+
+**Datum:** Januari 2026
+
+### Problemet
+* **Dreamer** (EntityResolver) förädlar grafen på tre platser:
+    1. **Vektor (ChromaDB):** Semantiska kopplingar
+    2. **Graf (DuckDB):** Merge, split, rename av noder
+    3. **Lake:** Uppdatering av node_context och metadata
+* **Nuvarande trigger:** Endast vid rebuild (manuellt).
+* **Problem:** Grafen blir "smutsig" mellan rebuilds.
+
+### Designfråga
+* Hur ska Dreamer triggas i produktion?
+* Alternativ:
+    1. **Schema:** Kör varje natt
+    2. **Watchdog:** Kör när Lake uppdateras
+    3. **Threshold:** Kör när X nya entiteter skapats
+    4. **On-demand:** MCP-verktyg som triggar Dreamer
+
+### Status
+* Öppen fråga. Behöver en god startpunkt för design.
+* Dreamer fungerar tekniskt, men trigger-mekanismen saknas.

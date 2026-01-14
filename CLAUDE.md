@@ -2,9 +2,9 @@
 
 ## Projektöversikt
 
-MyMemory är ett personligt kunskapshanteringssystem ("Digitalist Företagsminne") som samlar in, bearbetar, indexerar och söker i användarens data från olika källor (dokument, ljud, Slack).
+MyMemory är ett personligt kunskapshanteringssystem ("Digitalist Företagsminne") som samlar in, bearbetar och indexerar användarens data från olika källor (dokument, ljud, Slack, mail, kalender). Exponeras via MCP-server för integration med AI-verktyg som Claude Desktop och Cursor.
 
-**Tech Stack:** Python 3.12, ChromaDB (vektor), DuckDB (graf), Google Gemini AI, Rich (CLI)
+**Tech Stack:** Python 3.12, ChromaDB (vektor), DuckDB (graf), Google Gemini AI, MCP (Model Context Protocol)
 
 ## Viktiga kommandon
 
@@ -16,32 +16,73 @@ python start_services.py
 python tools/validate_rules.py services/<ändrad_fil>.py
 
 # Validera promptar
-python tools/validate_prompts.py config/chat_prompts.yaml
-python tools/validate_prompts.py --fix  # Autofixa med LLM
+python tools/validate_prompts.py config/services_prompts.yaml
 
-# Simulering/stresstest
-python tools/simulate_session.py
+# Inspektera graf/vektor
+python tools/tool_inspect_graph.py
+python tools/tool_inspect_vector.py
+
+# Rebuild efter hard reset
+python tools/tool_hard_reset.py
+python tools/tool_staged_rebuild.py --confirm --phase foundation
 ```
 
 ## Projektstruktur
 
 ```
-config/              # Konfigurationsfiler (YAML, JSON)
-  my_mem_config.yaml   # Huvudconfig (sökvägar, API-nycklar)
-  chat_prompts.yaml    # Promptar för chat
-  services_prompts.yaml # Promptar för tjänster
-services/            # Huvudkod
-  agents/              # AI-agenter (Dreamer, etc.)
-  collectors/          # Datainsamling (Slack, File)
-  engine/              # Kärnmotor
-  indexers/            # ChromaDB, Graf
-  interface/           # CLI/UI
-  pipeline/            # Bearbetningspipeline
-  processors/          # Dokumentbearbetning
-  utils/               # Hjälpfunktioner
-tools/               # Verktyg och validatorer
-documentation/       # Arkitekturdokumentation
+config/                     # Konfigurationsfiler
+  my_mem_config.yaml          # Huvudconfig (sökvägar, API-nycklar)
+  graph_schema_template.json  # SSOT: nodtyper, relationer, properties
+  services_prompts.yaml       # Promptar för tjänster
+services/                   # Huvudkod
+  agents/                     # Dreamer, MCP-servrar
+  collectors/                 # Datainsamling (Slack, File, Gmail, Calendar)
+  indexers/                   # Vector Indexer
+  processors/                 # DocConverter, Transcriber
+  utils/                      # Hjälpfunktioner (graph_service, vector_service, etc.)
+tools/                      # Verktyg och validatorer
+  rebuild/                    # Staged rebuild system
+documentation/              # Arkitekturdokumentation
 ```
+
+## Arkitektur
+
+### Tre lagringsnivåer
+1. **Assets** (`~/MyMemory/Assets`) - Originalfiler, aldrig röra
+2. **Lake** (`~/MyMemory/Lake`) - Normaliserade .md-filer med YAML-frontmatter
+3. **Index** (`~/MyMemory/Index`) - ChromaDB (vektor) + DuckDB (graf)
+
+### Ingestion-flöde
+```
+DropZone → File Retriever → Assets (UUID-normaliserade original)
+                ↓
+    ┌──────────┴──────────┐
+    │                     │
+Transcriber          DocConverter
+(ljud → text)        (text + AI-metadata + graf-extraktion)
+    ↓                     ↓
+Assets/Transcripts   Lake (.md + frontmatter)
+    └─────────────────────┘
+              ↓
+      Vector Indexer (realtid) → ChromaDB
+
+      Dreamer (batch) → Graf-förädling
+```
+
+### Exponering
+```
+MCP-server (index_search_mcp.py) → Claude Desktop / Cursor / andra AI-verktyg
+```
+
+### Dreamer - förädling på tre platser
+1. **Vektor** - semantiska kopplingar (ChromaDB)
+2. **Graf** - noder och relationer: merge, split, rename (DuckDB)
+3. **Lake** - uppdatering av node_context + metadata i frontmatter
+
+### 3-timestamp-systemet
+- `timestamp_ingestion` - när filen indexerades i Lake
+- `timestamp_content` - när innehållet hände (extraherat eller UNKNOWN)
+- `timestamp_updated` - sätts av Dreamer vid förädling
 
 ## Utvecklingsregler
 
@@ -56,7 +97,7 @@ documentation/       # Arkitekturdokumentation
 
 ### 3. Inga hårdkodade värden
 - **Sökvägar:** Läs från `config/my_mem_config.yaml`
-- **Kategorier:** Läs från `~/MyMemory/Index/my_mem_taxonomy.json`
+- **Graf-schema:** Läs från `config/graph_schema_template.json`
 - **Promptar:** Lägg i `config/*.yaml`, aldrig i Python-kod
 
 ### 4. Ingen AI-cringe
@@ -77,26 +118,11 @@ Fråga användaren vid:
 ### 7. Skyddade filer
 Fråga innan radering/omskrivning av:
 ```
-services/utils/document_dna.py
-services/my_mem_*_collector.py
-services/graph_service.py
-services/session_engine.py
 config/my_mem_config.yaml
-```
-
-## Arkitektur (kortfattat)
-
-**Tre lagringsnivåer:**
-1. **Asset Store** (`~/MyMemory/Assets`) - Originalfiler, aldrig röra
-2. **Lake** (`~/MyMemory/Lake`) - Normaliserade .md-filer med YAML-frontmatter
-3. **Index** (`~/MyMemory/Index`) - ChromaDB + Graf + Taxonomi
-
-**Agent-pipeline:**
-```
-DropZone → File Retriever → Assets
-Assets → Transcriber/DocConverter → Lake
-Lake → Vector Indexer (realtid) + Graph Builder (batch) → Index
-Index → Chat Pipeline → Svar
+config/graph_schema_template.json
+services/utils/graph_service.py
+services/processors/doc_converter.py
+services/agents/dreamer.py
 ```
 
 ## Konfigurationsfiler
@@ -104,6 +130,5 @@ Index → Chat Pipeline → Svar
 | Fil | Syfte |
 |-----|-------|
 | `config/my_mem_config.yaml` | Sökvägar, API-nycklar, modeller |
-| `config/chat_prompts.yaml` | System-prompter för chatten |
-| `config/services_prompts.yaml` | Prompter för insamlingsagenter |
-| `~/MyMemory/Index/my_mem_taxonomy.json` | Masternoder (kategorier) |
+| `config/graph_schema_template.json` | SSOT: tillåtna noder, relationer, properties |
+| `config/services_prompts.yaml` | Promptar för tjänster |
