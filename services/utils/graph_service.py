@@ -205,12 +205,17 @@ class GraphStore:
                 final_props.update(new_props)
 
             else:
-                # Ny nod - Initiera systemfält
+                # Ny nod - Initiera alla required systemfält enligt schema
                 now_ts = datetime.now().isoformat()
                 defaults = {
+                    "created_at": now_ts,
+                    "last_synced_at": now_ts,
+                    "last_seen_at": now_ts,
                     "last_retrieved_at": now_ts,
                     "retrieved_times": 0,
-                    "last_refined_at": "never"
+                    "last_refined_at": "never",
+                    "status": "PROVISIONAL",
+                    "confidence": 0.5
                 }
                 final_props = defaults
                 final_props.update(new_props)

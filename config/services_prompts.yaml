@@ -15,34 +15,30 @@ transcriber:
     
 
   # PASS 2: Berikning & Analys (Text + Kontext -> Insikt)
+  # OBS: Returnerar INTE full transkription (token-limit). Python applicerar speaker_map på raw_transcript.
   pass2_enriched: |
     {context_injection}
 
-    Du har fått en rå transkription av ett möte eller en inspelning. Din uppgift är att tvätta, identifiera och berika texten med hjälp av kontexten ovan (om tillgänglig) eller innehållet.
+    Du har fått en rå transkription av ett möte eller en inspelning. Din uppgift är att analysera och extrahera metadata.
 
     UTFÖR FÖLJANDE STEG:
 
     STEG 1: KVALITETSKONTROLL
     Analysera om råtexten är användbar.
     Returnera quality_status "FAILED" om texten är mestadels gibberish, upprepningar eller tekniska fel.
-    
-    STEG 2: BERIKAD TRANSKRIPTION (Om quality_status är "OK")
-    Skriv om transkriptionen för maximal läsbarhet och tydlighet.
-    
-    A. TALARIDENTIFIERING:
-       Använd "MÖTESKONTEXT" och "KÄNDA TALARE" för att ersätta "Talare 1" med riktiga namn.
-       
-    B. KONTEXTUELLA ANNOTERINGAR:
-       När talare använder vaga ord ("det", "den", "projektet") och du vet vad som avses, skjut in en förklaring.
-       Format: (Anm: förklaring)
-       Exempel: "Vi måste fixa buggen i det (Anm: Inköpslänken) innan releasen."
 
-    C. FORMATERING:
-       Behåll dialogformatet "Namn: Text".
+    STEG 2: TALARIDENTIFIERING (Om quality_status är "OK")
+    Identifiera vilka verkliga personer som motsvarar "Talare 1", "Talare 2" etc.
+    Använd "MÖTESKONTEXT" och "KÄNDA TALARE" från kontexten.
+
+    Skapa en speaker_map som mappar generiska etiketter till riktiga namn:
+    - Nyckeln är EXAKT etiketten från råtranskriptet (t.ex. "Talare 1:")
+    - Värdet är det identifierade namnet (t.ex. "Anna Andersson:")
+    - Om du inte kan identifiera en talare, utelämna den från mappen.
 
     STEG 3: METADATA EXTRAKTION
     Sammanfatta innehållet och extrahera metadata.
-    
+
     - Titel: Om kontext finns (t.ex. "Budgetmöte"), använd den. Annars, skapa en kort, beskrivande titel baserat på innehållet.
     - Plats: Om kontext/innehåll nämner plats (t.ex. "Teams", "Konferensrummet"), ange det. Annars "Okänd".
     - Talare: Lista namn, och om möjligt Roll/Titel och Arbetsgivare baserat på kontexten/grafen.
@@ -53,7 +49,7 @@ transcriber:
       "failure_reason": "Endast vid FAILED",
       "title": "Kort beskrivande titel",
       "location": "Plats eller Okänd",
-      "transcript": "Den berikade dialogen...",
+      "speaker_map": {"Talare 1:": "Anna Andersson:", "Talare 2:": "Erik Svensson:"},
       "summary": "Kortfattad sammanfattning av mötet",
       "speakers_detailed": [
         {"name": "Namn Efternamn", "role": "Titel/Roll", "org": "Organisation"}

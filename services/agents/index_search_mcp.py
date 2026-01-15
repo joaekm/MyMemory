@@ -37,9 +37,15 @@ def _load_config():
 
 CONFIG = _load_config()
 PATHS = CONFIG.get('paths', {})
+SEARCH_CONFIG = CONFIG.get('search', {})
 
 GRAPH_PATH = os.path.expanduser(PATHS.get('graph_db', '~/MyMemory/Index/GraphDB'))
 LAKE_PATH = os.path.expanduser(PATHS.get('lake_dir', '~/MyMemory/Lake'))
+
+# Search limits och tröskelvärden från config
+GRAPH_SEARCH_LIMIT = SEARCH_CONFIG.get('graph_limit', 15)
+VECTOR_DISTANCE_STRONG = SEARCH_CONFIG.get('distance_strong', 0.8)
+VECTOR_DISTANCE_WEAK = SEARCH_CONFIG.get('distance_weak', 1.2)
 
 mcp = FastMCP("MyMemoryTrinityConsole")
 
@@ -71,7 +77,7 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
     try:
         # GraphStore använder DuckDB internt och är robust
         graph = GraphStore(GRAPH_PATH, read_only=True)
-        limit = 15
+        limit = GRAPH_SEARCH_LIMIT
         
         # Direkt SQL för prestanda och filtrering
         sql = "SELECT id, type, aliases, properties FROM nodes WHERE (id ILIKE ? OR aliases ILIKE ?)"
@@ -144,7 +150,7 @@ def query_vector_memory(query_text: str, n_results: int = 5) -> str:
             content_preview = content.replace('\n', ' ')[:150] + "..."
             
             # Bedöm kvalitet (lägre distans = bättre)
-            quality = "🔥 Stark" if dist < 0.8 else "❄️ Svag" if dist > 1.2 else "☁️ Medel"
+            quality = "🔥 Stark" if dist < VECTOR_DISTANCE_STRONG else "❄️ Svag" if dist > VECTOR_DISTANCE_WEAK else "☁️ Medel"
             
             output.append(f"{i+1}. [{quality} Match] (Dist: {dist:.3f})")
             output.append(f"   Fil: {meta.get('filename', 'Unknown')}")

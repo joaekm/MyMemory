@@ -97,36 +97,50 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
 * **OBSOLET-32:** ~~Implementera **"Quick Save"**~~ (Read/Write) i Chatten.
     * *Orsak:* Ingen egen chatt. Kan göras via MCP om behov uppstår.
 
+* **OBSOLET-47:** ~~Migrera till **gemini-embedding-001**~~.
+    * *Orsak:* Baserat på felaktig premiss. Systemet använder `paraphrase-multilingual-MiniLM-L12-v2` (lokal SentenceTransformer), INTE Googles `text-embedding-004`. Ingen Google-embedding används. Identifierad och städad 2026-01-15.
+
 ---
 
 ## Aktiva Objekt
 
-### Prio 0 - KRITISK
-
-* **OBJEKT-47 (AKTIV - AKUT):** Migrera till **gemini-embedding-001**.
-    * *Status:* **DEADLINE PASSERAD (2026-01-14)**
-    * *Notifiering:* Google meddelade 2025-12-03 att `text-embedding-004` fasas ut.
-    * *Påverkan:* Alla embeddings i ChromaDB använder nuvarande modell.
-    * *Migrationsplan:*
-        1. Uppdatera embedding-funktion i `vector_indexer.py`
-        2. Re-embeda ALL data i Lake (kräver full re-indexering)
-        3. Testa sökkvalitet efter migrering
-
 ### Prio 1 - Datakvalitet
 
-* **OBJEKT-62 (AKTIV - NY):** Fixa **Transcription Truncation**.
+* **OBJEKT-65 (POC):** **Extractor + Critic Pattern** för entity-extraktion.
+    * *Problem:* LLM:en skapar för många och för generösa entiteter. Projekt, Personer och Roller tolkas frikostigt.
+    * *Hypotes:* Två LLM-anrop i dialog - Extractor föreslår, Critic ifrågasätter och filtrerar.
+    * *POC-scope:*
+        - Analysera nuvarande output (kvantifiera "noise")
+        - Designa Critic-prompt med specifika filtreringsfrågor
+        - Testa på 2-3 dokument: nuvarande pipeline vs med Critic
+        - Mäta: antal entiteter före/efter, precision, recall
+    * *Critic-frågor (utkast):*
+        - "Är detta ett konkret projekt med tydligt mål och avgränsning?"
+        - "Är denna person en faktisk identifierbar individ?"
+        - "Är denna roll en formell position eller bara en beskrivning?"
+    * *Påverkan:* `services/processors/doc_converter.py`, `config/services_prompts.yaml`
+    * *Mål:* Bekräfta att team-approach är en farbar väg innan full implementation.
+
+* **OBJEKT-62 (PÅGÅENDE):** Fixa **Transcription Truncation**.
     * *Problem:* Långa transkriptioner trunkeras i Lake-filer.
-    * *Rotorsak:* Gemini Pro har output-token-gräns. Prompten ber om hela transkriptet i JSON-fältet `"transcript"`, vilket kapas vid långa möten.
-    * *Lösning:* Separera metadata-extraktion från transkript-output. Behåll `raw_transcript` (från Flash), applicera bara annoteringarna.
+    * *Rotorsak:* Gemini Pro (Pass 2) har output-token-gräns (~8k tokens). Prompten ber om hela transkriptet i JSON-fältet `"transcript"`, vilket kapas vid långa möten.
+    * *Bevis:* Filer som `Inspelning_20251212_1400` (58 MB ljud → 9 KB transkript) slutar mitt i en mening.
+    * *Lösning:* Ändra Pass 2 prompt så den INTE returnerar `transcript`. Returnera istället:
+        - `speaker_map`: {"Talare 1": "Anna", "Talare 2": "Erik"}
+        - `metadata`: title, summary, location, keywords, entities
+        - Python applicerar `speaker_map` på `raw_transcript` från Pass 1 (Flash)
     * *Påverkan:* `services/processors/transcriber.py`, `config/services_prompts.yaml`
 
-* **OBJEKT-63 (AKTIV - NY):** Implementera **Rigorös Metadata-testkedja**.
-    * *Problem:* Hela datacykeln för metadata (Schema → Ingestion → Dreamer → Validator → Lake) saknar end-to-end-tester. Kedjan bryts ofta utan att det upptäcks.
-    * *Krav:*
-        - Test som verifierar att en property definierad i schema-template propageras korrekt genom hela flödet
-        - HARDFAIL om kedjan bryts (ingen tyst fallback)
-        - Täcker: Schema-validering → DocConverter/Transcriber → GraphStore → Dreamer → MCP-validator
-    * *Filosofi:* Om en property sätts i schemat ska den gå hela vägen. Om den inte gör det ska det vara högljutt.
+* **OBJEKT-63 (LÖST):** Implementera **Rigorös Metadata-testkedja**.
+    * *Lösning:* E2E-regressionstest implementerat i `tools/test_property_chain.py`.
+    * *Detaljer:*
+        - Testar hela kedjan: DocConverter → Lake → VectorIndexer → Dreamer → Graf
+        - Skapar testfil, kör pipeline, validerar properties i varje steg
+        - HARDFAIL vid brutna kedjor, okända properties, eller saknade required fields
+        - `include_in_vector`-flagga i scheman styr vilken metadata som indexeras
+        - Nya schema: `config/lake_metadata_template.json` (SSOT för Lake frontmatter)
+        - Uppdaterat: `config/graph_schema_template.json` med `include_in_vector`-flaggor
+    * *Användning:* `python tools/test_property_chain.py` (kör fullständigt test), `--dry-run` (visa schema), `--keep` (behåll testdata)
 
 * **OBJEKT-44 (AKTIV):** Implementera **"Entity Resolution & Alias Learning"**.
     * *Status:* Delvis implementerat. EntityGatekeeper finns. Alias-learning saknas.
@@ -142,6 +156,19 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
         - Bättre context injection i Transcriber
 
 ### Prio 2 - Infrastruktur
+
+* **OBJEKT-64 (LÖST):** Fullständig **Config-Driven Refaktorering**.
+    * *Status:* Alla violations fixade 2026-01-15.
+    * *Lösning:* Nya config-sektioner: `search`, `collectors`, `validation`, utökad `processing`.
+    * *Fixade filer:*
+        - `index_search_mcp.py`: Använder nu `SEARCH_CONFIG`
+        - `slack_collector.py`: Använder nu `collectors.slack.page_size`
+        - `doc_converter.py`: Använder nu `processing.summary_max_chars`, `header_scan_chars`
+        - `date_service.py`: Använder nu `validation.min_year`
+        - `validator_mcp.py`: Använder nu `get_model_lite()`
+        - `dreamer.py`: Använder nu `dreamer.thresholds`
+        - `tool_validate_system.py`: Använder nu `VectorService`
+        - `export_graph_to_obsidian.py`: Använder nu relativa sökvägar
 
 * **OBJEKT-61 (AKTIV - NY):** Designa **Dreamer Trigger-mekanism**.
     * *Problem:* Dreamer körs bara vid rebuild. Grafen blir "smutsig" mellan.
@@ -172,5 +199,5 @@ Dessa objekt är fortfarande potentiellt relevanta men inte prioriterade.
 
 ---
 
-*Senast uppdaterad: 2026-01-14*
+*Senast uppdaterad: 2026-01-15*
 *Se `my_mem_koncept_logg.md` för resonemang bakom beslut.*

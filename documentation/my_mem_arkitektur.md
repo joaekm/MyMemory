@@ -76,8 +76,8 @@ Vid ingestion kontrollerar DocConverter varje entitet:
 ## 4. Index-struktur
 
 ### ChromaDB (Vektor)
-- **Collection:** `dfm_knowledge_base`
-- **Embedding:** `all-MiniLM-L6-v2` (lokal)
+- **Collection:** `knowledge_base`
+- **Embedding:** `KBLab/sentence-bert-swedish-cased` (lokal, 768 dim, svenska + engelska)
 - **Dokument:** Sammanfattning + nyckelord + innehåll (max 8000 tecken)
 
 ### DuckDB (Graf)
@@ -139,7 +139,7 @@ Just nu endast vid rebuild. Designfråga att lösa.
 | **Vektordatabas** | ChromaDB |
 | **Grafdatabas** | DuckDB (relationell graf) |
 | **AI-modeller** | Google Gemini (Pro/Flash/Lite) |
-| **Embeddings** | all-MiniLM-L6-v2 (lokal) |
+| **Embeddings** | KBLab/sentence-bert-swedish-cased (768 dim) |
 | **MCP** | FastMCP |
 
 ## 9. Status (Januari 2026)

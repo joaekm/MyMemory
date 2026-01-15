@@ -22,6 +22,12 @@ python tools/validate_prompts.py config/services_prompts.yaml
 python tools/tool_inspect_graph.py
 python tools/tool_inspect_vector.py
 
+# Validera property chain (kör efter ändringar i schema/processors/utils/agents)
+python tools/test_property_chain.py
+
+# Validera MCP-verktyg (kör efter ändringar i index_search_mcp.py)
+python tools/test_mcp_search.py
+
 # Rebuild efter hard reset
 python tools/tool_hard_reset.py
 python tools/tool_staged_rebuild.py --confirm --phase foundation
@@ -89,6 +95,11 @@ MCP-server (index_search_mcp.py) → Claude Desktop / Cursor / andra AI-verktyg
 ### 1. Kör validatorer efter varje ändring
 - **0 violations** krävs innan nästa fil får ändras
 - Validatorerna får ALDRIG ändras utan explicit tillåtelse
+- **Kör property chain test** efter ändringar i schema-filer eller processors:
+  ```bash
+  python tools/test_property_chain.py
+  ```
+  Testet verifierar att properties propagerar korrekt: Schema → DocConverter → Lake → Vector → Graf
 
 ### 2. HARDFAIL > Silent Fallback
 - Inga tysta fallbacks - rapportera fel explicit
@@ -203,5 +214,6 @@ Alla tjänster loggar till samma fil med prefix: `TRANS`, `VECTOR`, `SLACK`, `RE
 | Fil | Syfte |
 |-----|-------|
 | `config/my_mem_config.yaml` | Sökvägar, API-nycklar, modeller |
-| `config/graph_schema_template.json` | SSOT: tillåtna noder, relationer, properties |
+| `config/graph_schema_template.json` | SSOT: graf-noder, relationer, properties |
+| `config/lake_metadata_template.json` | SSOT: Lake frontmatter-schema |
 | `config/services_prompts.yaml` | Promptar för tjänster |

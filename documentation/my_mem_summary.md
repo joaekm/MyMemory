@@ -86,14 +86,20 @@ Förädlar på tre platser:
 
 | Område | Status |
 |--------|--------|
-| **Datakvalitet** | ~70% klar. Principer etablerade. |
-| **MCP-server** | 11 verktyg. Alfa. Fungerande. |
-| **Ingestion** | Fungerar. Metadata-modell behöver skärpas. |
+| **Datakvalitet** | ~75% klar. Property chain validerad. |
+| **MCP-server** | 11 verktyg. Alfa. Fungerande. Testat. |
+| **Ingestion** | Fungerar. Metadata-modell definierad i SSOT. |
 | **Dreamer** | Fungerar. Trigger-mekanism saknas. |
 
+### Senaste framsteg (2026-01-15)
+* **OBJEKT-63 (LÖST):** E2E property chain test (`tools/test_property_chain.py`)
+* **OBJEKT-65 (POC):** Extractor + Critic pattern för bättre entity-extraktion
+* Nytt schema: `lake_metadata_template.json` (SSOT för Lake frontmatter)
+* MCP-testsvit: `tools/test_mcp_search.py` (27 tester, alla pass)
+* Graf-migration: 1487 noder fick `last_synced_at`, `confidence`, `status`
+
 ### Kvarstående
-* Metadata-modellen (vilka properties i graf vs lake)
-* Hur properties sätts (validering, resolution i ingestion)
+* Extractor + Critic POC (validera hypotes)
 * Dreamer-trigger i produktion
 
 ## 8. Teknisk Stack
@@ -104,7 +110,7 @@ Förädlar på tre platser:
 | Vektordatabas | ChromaDB |
 | Grafdatabas | DuckDB (relationell graf) |
 | AI-modeller | Google Gemini (Pro/Flash/Lite) |
-| Embeddings | all-MiniLM-L6-v2 (lokal) |
+| Embeddings | KBLab/sentence-bert-swedish-cased (lokal, 768 dim) |
 | MCP | FastMCP |
 
 ## 9. Utvecklingsregler
@@ -117,6 +123,6 @@ Definierade i `.cursorrules` och `CLAUDE.md`:
 4. **Ingen AI-cringe** – Professionella namn (ej "Trädgårdsmästaren")
 
 ---
-*Senast uppdaterad: 2026-01-14*
+*Senast uppdaterad: 2026-01-15*
 *Se `my_mem_arkitektur.md` för teknisk implementation.*
 *Se `my_mem_koncept_logg.md` för resonemang bakom beslut.*

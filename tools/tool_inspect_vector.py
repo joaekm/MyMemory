@@ -1,21 +1,21 @@
-import chromadb
 import os
-import yaml
-from chromadb.utils import embedding_functions
+import sys
 
-# Läs sökvägar från config (Princip 8)
+# Path setup för att hitta services
 script_dir = os.path.dirname(os.path.abspath(__file__))
-config_path = os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml')
-with open(config_path, 'r') as f:
-    config = yaml.safe_load(f)
-chroma_path = os.path.expanduser(config['paths']['chroma_db'])
+project_root = os.path.join(script_dir, '..')
+sys.path.insert(0, project_root)
 
-print(f"--- RÅDATA-ANALYS: {chroma_path} ---")
+# Använd VectorService (SSOT för embedding-modell)
+from services.utils.vector_service import get_vector_service
+
+vector_service = get_vector_service("knowledge_base")
+coll = vector_service.collection
+
+print(f"--- RÅDATA-ANALYS: {vector_service.db_path} ---")
+print(f"--- Embedding-modell: {vector_service.model_name} ---")
 
 try:
-    client = chromadb.PersistentClient(path=chroma_path)
-    emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-    coll = client.get_collection(name="dfm_knowledge_base", embedding_function=emb_fn)
     
     query = "Industritorget"
     print(f"🔎 Söker efter: '{query}'")

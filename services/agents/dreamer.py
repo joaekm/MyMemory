@@ -12,6 +12,21 @@ from services.agents.validator_mcp import LLMClient # Reuse LLM client
 # Setup logging
 LOGGER = logging.getLogger("EntityResolver")
 
+def _load_dreamer_config() -> dict:
+    """Ladda Dreamer-config (tröskelvärden och limits)."""
+    config_path = os.path.join(
+        os.path.dirname(__file__), '..', '..', 'config', 'my_mem_config.yaml'
+    )
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        return config.get('dreamer', {})
+    except Exception as e:
+        LOGGER.warning(f"Kunde inte ladda dreamer-config: {e}. Använder defaults.")
+        return {}
+
+DREAMER_CONFIG = _load_dreamer_config()
+
 class EntityResolver:
     """
     Dreamer Agent: Ansvarig för Identity Resolution och städning av grafen.
@@ -38,8 +53,8 @@ class EntityResolver:
         Hämta kandidater för förädling enligt 80/20-strategin.
         Delegerar logiken till GraphStore för att fånga både 'Heat' (Relevans) och 'Deep Sleep' (Underhåll).
         """
-        # Hämta 50 kandidater (40 Relevans, 10 Underhåll)
-        candidates = self.graph_store.get_refinement_candidates(limit=50)
+        candidate_limit = DREAMER_CONFIG.get('candidate_limit', 50)
+        candidates = self.graph_store.get_refinement_candidates(limit=candidate_limit)
         
         if candidates:
             LOGGER.info(f"Dreamer selected {len(candidates)} candidates via Relevance/Maintenance strategy.")
@@ -65,7 +80,8 @@ class EntityResolver:
             search_text += " " + " ".join(keywords)
 
         # Semantisk sökning med KB-BERT
-        results = self.vector_service.search(search_text, limit=10)
+        vector_limit = DREAMER_CONFIG.get('vector_search_limit', 10)
+        results = self.vector_service.search(search_text, limit=vector_limit)
         
         valid_matches = []
         for res in results:
@@ -208,11 +224,14 @@ class EntityResolver:
         stats = {"merged": 0, "split": 0, "renamed": 0, "recat": 0, "deleted": 0}
         affected_units = set()
 
-        # Säkerhetströsklar
-        THRESHOLD_DELETE = 0.95
-        THRESHOLD_SPLIT = 0.90
-        THRESHOLD_RENAME_NORMAL = 0.95
-        THRESHOLD_RENAME_WEAK = 0.70
+        # Säkerhetströsklar från config
+        thresholds = DREAMER_CONFIG.get('thresholds', {})
+        THRESHOLD_DELETE = thresholds.get('delete', 0.95)
+        THRESHOLD_SPLIT = thresholds.get('split', 0.90)
+        THRESHOLD_RENAME_NORMAL = thresholds.get('rename_normal', 0.95)
+        THRESHOLD_RENAME_WEAK = thresholds.get('rename_weak', 0.70)
+        THRESHOLD_RECATEGORIZE = thresholds.get('recategorize', 0.90)
+        THRESHOLD_MERGE = thresholds.get('merge', 0.90)
 
         for node in candidates:
             # 1. Strukturell Analys (Split/Rename/Recat/Delete)
@@ -250,7 +269,7 @@ class EntityResolver:
                 node = self.graph_store.get_node(new_name) # Fortsätt analys med nya namnet
 
             elif action == "RE-CATEGORIZE" and not dry_run:
-                if conf >= 0.90:
+                if conf >= THRESHOLD_RECATEGORIZE:
                     self.graph_store.recategorize_node(node["id"], analysis.get("new_type"))
                     affected_units.update(self.graph_store.get_related_unit_ids(node["id"]))
                     stats["recat"] += 1
@@ -268,7 +287,7 @@ class EntityResolver:
             matches = self.find_potential_matches(node)
             for match in matches:
                 merge_eval = self.evaluate_merge(match, node)
-                if merge_eval.get("decision") == "MERGE" and merge_eval.get("confidence", 0) > 0.90:
+                if merge_eval.get("decision") == "MERGE" and merge_eval.get("confidence", 0) >= THRESHOLD_MERGE:
                     if not dry_run:
                         units = self.graph_store.get_related_unit_ids(node["id"])
                         self.graph_store.merge_nodes(match["id"], node["id"]) # Robust merge

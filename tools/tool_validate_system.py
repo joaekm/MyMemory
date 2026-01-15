@@ -2,11 +2,12 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import yaml
-import chromadb
 import re
 import datetime
 import logging
-from chromadb.utils import embedding_functions
+
+# Använd VectorService (SSOT för collection-namn och embedding-modell)
+from services.utils.vector_service import get_vector_service
 
 # Enkel loggning för CLI-verktyg
 logging.basicConfig(level=logging.WARNING, format='%(levelname)s - %(message)s')
@@ -131,8 +132,8 @@ def validera_filer():
 def validera_chroma(expected_count, lake_ids):
     print_header("2. VEKTOR-AUDIT (CHROMA)")
     try:
-        client = chromadb.PersistentClient(path=CHROMA_PATH)
-        coll = client.get_collection(name="dfm_knowledge_base")
+        vector_service = get_vector_service("knowledge_base")
+        coll = vector_service.collection
         count = coll.count()
         print(f"🧠 Vektorer i minnet: {count} st")
         
@@ -228,11 +229,10 @@ def run_startup_checks():
     vector_count = 0
 
     if lake_c > 0:
-        # Chroma
+        # Chroma (via VectorService för konsistent collection-namn)
         try:
-            client = chromadb.PersistentClient(path=CHROMA_PATH)
-            coll = client.get_collection(name="dfm_knowledge_base")
-            vector_count = coll.count()
+            vector_service = get_vector_service("knowledge_base")
+            vector_count = vector_service.count()
             validera_chroma(lake_c, lake_ids)
         except Exception as e:
             LOGGER.error(f"Kunde inte läsa ChromaDB: {e}")

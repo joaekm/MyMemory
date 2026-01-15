@@ -99,6 +99,11 @@ GRAPH_DB_PATH = CONFIG['paths']['graph_db']
 API_KEY = CONFIG['ai_engine']['api_key']
 MODEL_NAME = CONFIG.get('ai_engine', {}).get('models', {}).get('model_lite', 'models/gemini-2.0-flash-lite-preview')
 
+# Processing limits från config
+PROCESSING_CONFIG = CONFIG.get('processing', {})
+SUMMARY_MAX_CHARS = PROCESSING_CONFIG.get('summary_max_chars', 30000)
+HEADER_SCAN_CHARS = PROCESSING_CONFIG.get('header_scan_chars', 3000)
+
 # Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - DOCCONV - %(levelname)s - %(message)s')
 LOGGER = logging.getLogger('DocConverter')
@@ -123,7 +128,7 @@ def extract_content_date(text: str) -> str:
     Returns:
         ISO-format sträng eller "UNKNOWN"
     """
-    header_section = text[:3000]  # Headers är alltid i början
+    header_section = text[:HEADER_SCAN_CHARS]  # Headers är alltid i början
 
     # 1. Försök DATUM_TID (collectors: Slack, Calendar, Gmail)
     match = STANDARD_TIMESTAMP_PATTERN.search(header_section)
@@ -226,7 +231,7 @@ def generate_semantic_metadata(text: str) -> Dict[str, Any]:
         return {"context_summary": "", "relations_summary": "", "document_keywords": []}
     
     # Klipp texten om den är för lång för summary-modellen
-    safe_text = text[:30000]
+    safe_text = text[:SUMMARY_MAX_CHARS]
     final_prompt = prompt_template.format(text=safe_text)
     
     try:
@@ -601,6 +606,9 @@ def processa_dokument(filväg: str, filnamn: str):
         # - timestamp_updated: Sätts av Dreamer vid semantisk uppdatering (null initialt)
         timestamp_content = extract_content_date(raw_text)
 
+        # Hämta default access_level från config (Privacy-First: default 5 = PRIVATE)
+        default_access_level = CONFIG.get('security', {}).get('default_access_level', 5)
+
         frontmatter = {
             "unit_id": unit_id,
             "source_ref": lake_file,
@@ -608,10 +616,11 @@ def processa_dokument(filväg: str, filnamn: str):
             "timestamp_ingestion": datetime.datetime.now().isoformat(),
             "timestamp_content": timestamp_content,
             "timestamp_updated": None,
+            "source_type": source_type,
+            "access_level": default_access_level,
             "context_summary": semantic_metadata.get("context_summary", ""),
             "relations_summary": semantic_metadata.get("relations_summary", ""),
             "document_keywords": semantic_metadata.get("document_keywords", []),
-            "source_type": source_type,
             "ai_model": semantic_metadata.get("ai_model", "unknown"),
         }
 

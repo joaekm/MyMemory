@@ -27,18 +27,22 @@ logger = logging.getLogger("ShadowGraph")
 
 def load_config():
     """Ladda konfiguration från my_mem_config.yaml."""
+    # Beräkna sökväg relativt till script-mappen
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+
     paths_to_check = [
+        os.path.join(project_root, "config", "my_mem_config.yaml"),
+        os.path.join(script_dir, "..", "config", "my_mem_config.yaml"),
         "config/my_mem_config.yaml",
-        "../config/my_mem_config.yaml",
-        "/Users/jekman/Projects/MyMemory/config/my_mem_config.yaml"
     ]
-    
+
     config_path = None
     for p in paths_to_check:
         if os.path.exists(p):
             config_path = p
             break
-            
+
     if not config_path:
         logger.error("HARDFAIL: Kunde inte hitta my_mem_config.yaml")
         sys.exit(1)

@@ -38,6 +38,7 @@ LOG_FILE = os.path.expanduser(CONFIG['logging']['log_file_path'])
 SLACK_CONF = CONFIG.get('slack', {})
 BOT_TOKEN = SLACK_CONF.get('bot_token')
 CHANNELS = SLACK_CONF.get('channels', [])
+SLACK_PAGE_SIZE = CONFIG.get('collectors', {}).get('slack', {}).get('page_size', 200)
 HISTORY_DAYS = SLACK_CONF.get('history_days', 7)
 
 log_dir = os.path.dirname(LOG_FILE)
@@ -84,7 +85,7 @@ def fetch_daily_messages(channel_id, target_date):
     try:
         cursor = None
         while True:
-            result = CLIENT.conversations_history(channel=channel_id, oldest=start_ts, latest=end_ts, limit=200, cursor=cursor)
+            result = CLIENT.conversations_history(channel=channel_id, oldest=start_ts, latest=end_ts, limit=SLACK_PAGE_SIZE, cursor=cursor)
             messages = result["messages"]
             all_messages.extend(messages)
             if not result.get("has_more"): break

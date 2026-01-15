@@ -51,10 +51,10 @@ class VectorService:
         os.makedirs(self.db_path, exist_ok=True)
         self.client = chromadb.PersistentClient(path=self.db_path)
         
-        # MODEL SELECTION
-        model_name = self.config.get('ai_engine', {}).get(
-            'embedding_model', 
-            self.config.get('ai_engine', {}).get('models', {}).get('embedding_swedish', "paraphrase-multilingual-MiniLM-L12-v2")
+        # MODEL SELECTION - Läser från ai_engine.models.embedding_model
+        model_name = self.config.get('ai_engine', {}).get('models', {}).get(
+            'embedding_model',
+            "paraphrase-multilingual-MiniLM-L12-v2"  # Fallback om config saknas
         )
         LOGGER.info(f"Using embedding model: {model_name}")
         self.model_name = model_name

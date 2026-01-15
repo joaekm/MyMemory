@@ -32,18 +32,26 @@ from google.genai import types
 mcp = FastMCP("DigitalistValidator")
 validator = SchemaValidator()
 
-def get_api_key():
-    # Vi återanvänder logiken från SchemaValidator för att hitta config-sökvägen
+def load_config():
+    """Ladda config och returnera hela dict."""
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     config_path = os.path.join(base_dir, "config", "my_mem_config.yaml")
-    
+
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
-            return config.get('ai_engine', {}).get('api_key')
+            return yaml.safe_load(f)
     except Exception as e:
-        print(f"Kunde inte ladda API-nyckel från config: {e}")
-        return None
+        print(f"Kunde inte ladda config: {e}")
+        return {}
+
+CONFIG = load_config()
+
+def get_api_key():
+    return CONFIG.get('ai_engine', {}).get('api_key')
+
+def get_model_lite():
+    """Hämta model_lite från config."""
+    return CONFIG.get('ai_engine', {}).get('models', {}).get('model_lite', 'models/gemini-flash-lite-latest')
 
 # --- INITIERA KLIENT ---
 api_key = get_api_key()
@@ -72,7 +80,7 @@ class LLMClient:
             return ""
         try:
             response = self.client.models.generate_content(
-                model="gemini-2.0-flash-lite-preview",
+                model=get_model_lite(),
                 contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
             )
             return response.text
@@ -125,7 +133,7 @@ def extract_and_validate_doc(initial_prompt: str, reference_timestamp: str = Non
     for attempt in range(max_attempts):
         try:
             response = client.models.generate_content(
-                model="gemini-2.0-flash-lite-preview",
+                model=get_model_lite(),
                 contents=current_messages,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )

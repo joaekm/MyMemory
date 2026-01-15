@@ -17,37 +17,78 @@
   "base_properties": {
     "description": "Egenskaper som alla noder automatiskt får (system-nivå).",
     "properties": {
-      "id": { "type": "string", "required": true, "description": "Primary Key (UUID för dok, Email för person, etc)" },
-      "created_at": { "type": "timestamp", "required": true },
-      "last_synced_at": { "type": "timestamp", "required": true },
-      "last_seen_at": { 
-        "type": "timestamp", 
-        "required": true, 
-        "description": "Tidpunkt då noden senast observerades/bearbetades av systemet." 
+      "id": {
+        "type": "string",
+        "required": true,
+        "include_in_vector": false,
+        "description": "Primary Key (UUID för dok, Email för person, etc)"
       },
-      "last_retrieved_at": { 
-        "type": "timestamp", 
-        "required": true, 
-        "description": "Tidpunkt då noden senast användes i ett svar (Relevans)." 
+      "name": {
+        "type": "string",
+        "required": true,
+        "include_in_vector": true,
+        "description": "Nodens primära namn/identifierare"
       },
-      "retrieved_times": { 
-        "type": "integer", 
-        "required": true, 
-        "default": 0, 
-        "description": "Antal gånger noden använts i ett svar (Popularitet)." 
+      "type": {
+        "type": "string",
+        "required": true,
+        "include_in_vector": true,
+        "description": "Nodtypen (Person, Organization, etc.)"
       },
-      "last_refined_at": { 
-        "type": "string", 
-        "required": true, 
-        "default": "never", 
-        "description": "Tidpunkt då Dreamer senast städade noden (Underhåll)." 
+      "source": {
+        "type": "string",
+        "required": false,
+        "include_in_vector": true,
+        "default": "graph_node",
+        "description": "Markör för vektorsök att detta är en graf-nod"
       },
-      "source_system": { "type": "string", "required": false },
+      "created_at": {
+        "type": "timestamp",
+        "required": true,
+        "include_in_vector": false
+      },
+      "last_synced_at": {
+        "type": "timestamp",
+        "required": true,
+        "include_in_vector": false
+      },
+      "last_seen_at": {
+        "type": "timestamp",
+        "required": true,
+        "include_in_vector": false,
+        "description": "Tidpunkt då noden senast observerades/bearbetades av systemet."
+      },
+      "last_retrieved_at": {
+        "type": "timestamp",
+        "required": true,
+        "include_in_vector": false,
+        "description": "Tidpunkt då noden senast användes i ett svar (Relevans)."
+      },
+      "retrieved_times": {
+        "type": "integer",
+        "required": true,
+        "default": 0,
+        "include_in_vector": false,
+        "description": "Antal gånger noden använts i ett svar (Popularitet)."
+      },
+      "last_refined_at": {
+        "type": "string",
+        "required": true,
+        "default": "never",
+        "include_in_vector": false,
+        "description": "Tidpunkt då Dreamer senast städade noden (Underhåll)."
+      },
+      "source_system": {
+        "type": "string",
+        "required": false,
+        "include_in_vector": false
+      },
       "status": {
         "type": "enum",
         "required": true,
         "values": ["VERIFIED", "PROVISIONAL"],
         "default": "PROVISIONAL",
+        "include_in_vector": false,
         "description": "Anger om entiteten är bekräftad sanning eller en gissning."
       },
       "confidence": {
@@ -56,12 +97,20 @@
         "min": 0.0,
         "max": 1.0,
         "default": 0.5,
+        "include_in_vector": false,
         "description": "Schema-Fit Score. 1.0 = Trusted/Verified, <0.3 = Brus."
       },
-      "distinguishing_context": {
+      "node_context": {
         "type": "list",
         "required": false,
-        "description": "Lista med nyckelord/kontext för att skilja dubbletter åt (t.ex. ['IT', 'Chef'])."
+        "include_in_vector": false,
+        "description": "Beviskedja - lista med objekt {text, origin} som visar var noden omnämns. Används för Entity Resolution och Dreamer-förädling."
+      },
+      "aliases": {
+        "type": "list",
+        "required": false,
+        "include_in_vector": false,
+        "description": "Alternativa namn/identifierare för noden. Används vid Entity Resolution för fuzzy matching."
       }
     }
   },
@@ -230,18 +279,28 @@
       "properties": {
         "uuid": { "required": true, "type": "uuid", "description": "Filens UUID från Assets" },
         "title": { "required": true, "type": "string" },
-        "doc_format": { 
-          "required": false, 
-          "type": "enum", 
-          "values": [".pdf", ".docx", ".txt", ".md", ".json", ".xls", ".xlsx", ".csv"] 
+        "doc_format": {
+          "required": false,
+          "type": "enum",
+          "values": [".pdf", ".docx", ".txt", ".md", ".json", ".xls", ".xlsx", ".csv"]
         },
-        "doc_type": { 
-          "required": false, 
-          "type": "enum", 
-          "values": ["Avtal", "Beslut", "Specifikation", "Leveransdokument", "Offert", "Uppdragsbeskrivning", "Protokoll", "Faktura", "Rapport"] 
+        "doc_type": {
+          "required": false,
+          "type": "enum",
+          "values": ["Avtal", "Beslut", "Specifikation", "Leveransdokument", "Offert", "Uppdragsbeskrivning", "Protokoll", "Faktura", "Rapport"]
         },
         "created_at": { "required": false, "type": "timestamp" },
-        "version": { "required": false, "type": "string" }
+        "version": { "required": false, "type": "string" },
+        "timestamp": { "required": false, "type": "timestamp", "description": "Alias för created_at (legacy)" },
+        "source_type": {
+          "required": false,
+          "type": "enum",
+          "values": ["Document", "Slack Log", "Email Thread", "Calendar Event", "Transcript"],
+          "description": "Typ av källa"
+        },
+        "context_summary": { "required": false, "type": "string", "description": "AI-genererad kontextsammanfattning" },
+        "relations_summary": { "required": false, "type": "string", "description": "AI-genererad relationssammanfattning" },
+        "summary": { "required": false, "type": "string", "description": "DEPRECATED - använd context_summary" }
       }
     }
   },

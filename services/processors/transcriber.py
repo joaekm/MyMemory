@@ -205,8 +205,9 @@ Deltagare/Info:
 
 INSTRUKTION: Använd deltagarlistan ovan för att identifiera "Talare X" och förstå syftningar.
 """
-            except Exception:
-                continue 
+            except Exception as parse_err:
+                LOGGER.debug(f"Kalenderparsning: {parse_err}")
+                continue
                 
     except Exception as e:
         LOGGER.warning(f"Kalenderfel: {e}")
@@ -215,12 +216,9 @@ INSTRUKTION: Använd deltagarlistan ovan för att identifiera "Talare X" och fö
 
 # --- PROCESSING HELPERS ---
 
-def clean_ghost_artifacts():
-    base_mem = os.path.dirname(ASSET_STORE)
-    ghost_drop = os.path.join(base_mem, "DropZone")
-    if os.path.exists(ghost_drop):
-        try: shutil.rmtree(ghost_drop)
-        except: pass
+# Temp-mapp för upload-filer (utanför watchdog-scope)
+TMP_UPLOAD_FOLDER = os.path.join(RECORDINGS_FOLDER, ".tmp")
+os.makedirs(TMP_UPLOAD_FOLDER, exist_ok=True)
 
 def safe_upload(filväg, original_namn):
     safe_path = None
@@ -228,7 +226,7 @@ def safe_upload(filväg, original_namn):
         time.sleep(1)
         try:
             safe_name = f"temp_upload_{int(time.time())}_{threading.get_ident()}{os.path.splitext(filväg)[1]}"
-            safe_path = os.path.join(os.path.dirname(filväg), safe_name)
+            safe_path = os.path.join(TMP_UPLOAD_FOLDER, safe_name)
             try: os.symlink(filväg, safe_path)
             except OSError: shutil.copy2(filväg, safe_path)
             upload_file = AI_CLIENT.files.upload(file=safe_path, config={'display_name': original_namn})
@@ -437,8 +435,14 @@ def processa_mediafil(filväg, filnamn):
             shutil.move(filväg, dest)
             return
 
-        # 6. Spara Resultat
-        final_text = result.get('transcript', raw_transcript)
+        # 6. Applicera Speaker Map på raw_transcript
+        final_text = raw_transcript
+        speaker_map = result.get('speaker_map', {})
+        if speaker_map:
+            for generic_label, real_name in speaker_map.items():
+                final_text = final_text.replace(generic_label, real_name)
+            _log("🏷️", f"{kort_namn} → Mappade {len(speaker_map)} talare")
+
         header = skapa_rich_header(filnamn, timestamp, dur, MODEL_SMART, result, unit_id)
         
         with open(txt_fil, 'w', encoding='utf-8') as f:
@@ -462,8 +466,6 @@ class AudioHandler(FileSystemEventHandler):
                 EXECUTOR.submit(processa_mediafil, event.src_path, fname)
 
 if __name__ == "__main__":
-    clean_ghost_artifacts()
-    
     pending = 0
     if os.path.exists(RECORDINGS_FOLDER):
         for f in os.listdir(RECORDINGS_FOLDER):

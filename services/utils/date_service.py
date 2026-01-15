@@ -18,12 +18,29 @@ Användning:
 
 import os
 import re
+import yaml
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Optional
 
 LOGGER = logging.getLogger('DateService')
+
+# Ladda config för MIN_YEAR
+def _load_validation_config() -> dict:
+    """Ladda validation-config."""
+    config_path = os.path.join(
+        os.path.dirname(__file__), '..', '..', 'config', 'my_mem_config.yaml'
+    )
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        return config.get('validation', {})
+    except Exception:
+        return {}
+
+VALIDATION_CONFIG = _load_validation_config()
+DATE_MIN_YEAR = VALIDATION_CONFIG.get('min_year', 2015)
 
 # === ABSTRACT BASE ===
 
@@ -62,7 +79,7 @@ class FrontmatterExtractor(DateExtractor):
     """
 
     PATTERN = re.compile(r"timestamp_ingestion:\s*['\"]?([^'\"\n]+)")
-    MIN_YEAR = 2015  # Datum äldre än detta anses korrupt
+    MIN_YEAR = DATE_MIN_YEAR  # Datum äldre än detta anses korrupt
     
     @property
     def name(self) -> str:
@@ -206,7 +223,7 @@ class FilesystemExtractor(DateExtractor):
     Validering: Datum äldre än MIN_YEAR anses korrupt.
     """
     
-    MIN_YEAR = 2015  # Äldre anses korrupt (1984-datum etc.)
+    MIN_YEAR = DATE_MIN_YEAR  # Äldre anses korrupt (1984-datum etc.)
     
     @property
     def name(self) -> str:

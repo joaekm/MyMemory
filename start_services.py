@@ -52,14 +52,13 @@ def auto_repair(health_info):
     # --- VECTOR REPAIR ---
     if vector_count < lake_count:
         try:
-            import chromadb
-            from chromadb.utils import embedding_functions
+            # Använd VectorService (SSOT för embedding-modell)
+            from services.utils.vector_service import get_vector_service
 
             lake_id_set = set(lake_ids_dict.keys())
 
-            client = chromadb.PersistentClient(path=chroma_path)
-            emb_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-            coll = client.get_or_create_collection(name="dfm_knowledge_base", embedding_function=emb_fn)
+            vector_service = get_vector_service("knowledge_base")
+            coll = vector_service.collection
             vector_ids = set(coll.get()['ids'])
 
             missing = lake_id_set - vector_ids
