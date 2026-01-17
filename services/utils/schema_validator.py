@@ -2,9 +2,78 @@ import json
 import os
 import logging
 import yaml  # Kräver PyYAML. Fallback finns nedan om den saknas.
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 
 LOGGER = logging.getLogger(__name__)
+
+
+def normalize_value(value: Any, expected_type: str, item_schema: Dict = None) -> Any:
+    """
+    Normalisera värde till förväntad typ.
+
+    Args:
+        value: Värdet att normalisera
+        expected_type: Förväntad typ från schemat (string, list, integer, etc.)
+        item_schema: För listor - schema för varje element
+
+    Returns:
+        Normaliserat värde, eller None om omöjligt
+    """
+    if value is None:
+        return None
+
+    if expected_type == "string":
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return ' '.join(str(v) for v in value)
+        return str(value)
+
+    if expected_type == "integer":
+        if isinstance(value, int):
+            return value
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return None
+
+    if expected_type == "float":
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+
+    if expected_type == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ('true', '1', 'yes')
+        return bool(value)
+
+    if expected_type == "list" and item_schema:
+        if not isinstance(value, list):
+            return None
+        normalized = []
+        for item in value:
+            if isinstance(item, dict):
+                norm_item = {}
+                for field, field_def in item_schema.items():
+                    field_type = field_def.get("type", "string")
+                    field_value = item.get(field)
+                    if field_value is not None:
+                        norm_item[field] = normalize_value(field_value, field_type)
+                    elif field_def.get("required"):
+                        return None  # Saknar required field
+                    else:
+                        norm_item[field] = None
+                normalized.append(norm_item)
+            else:
+                return None  # Element är inte dict
+        return normalized
+
+    return value
 
 class SchemaValidator:
     def __init__(self, schema_path: str = None):
@@ -30,23 +99,14 @@ class SchemaValidator:
 
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
-                # Försök använda PyYAML, annars enkel parsing
-                try:
-                    config = yaml.safe_load(f)
-                    relative_path = config.get("graph_schema")
-                except NameError:
-                    # Fallback om yaml inte är importerat/installerat
-                    content = f.read()
-                    import re
-                    match = re.search(r'graph_schema:\s*["\']?([^"\']+)["\']?', content)
-                    relative_path = match.group(1) if match else None
+                config = yaml.safe_load(f)
+                relative_path = config.get("graph_schema")
 
                 if relative_path:
-                    # Hantera om sökvägen i config är relativ till root
                     return os.path.join(base_dir, relative_path)
-                    
-        except Exception as e:
-            LOGGER.error(f"Failed to read config file: {e}")
+
+        except (OSError, yaml.YAMLError) as e:
+            LOGGER.warning(f"Failed to read config file: {e}. Using default: {default_template}")
 
         return default_template
 
@@ -117,13 +177,74 @@ class SchemaValidator:
             # 1. Required Check
             if prop_def.get("required", False) and prop_name not in node_data:
                 return False, f"Missing required property: '{prop_name}'"
-            
-            # 2. Enum Check
+
+            # 2. Type and Value Check
             if prop_name in node_data:
                 value = node_data[prop_name]
-                allowed_values = prop_def.get("values") # 'values' används i schemat för enums
+
+                # Enum Check
+                allowed_values = prop_def.get("values")
                 if allowed_values and value not in allowed_values:
                     return False, f"Invalid value for '{prop_name}': '{value}'. Allowed: {allowed_values}"
+
+                # Type Check
+                expected_type = prop_def.get("type")
+                item_schema = prop_def.get("item_schema")
+                if expected_type:
+                    ok, msg = self._validate_type(value, expected_type, prop_name, item_schema)
+                    if not ok:
+                        return False, msg
+
+        return True, "OK"
+
+    def _validate_type(self, value: Any, expected_type: str, prop_name: str, item_schema: Dict = None) -> Tuple[bool, str]:
+        """
+        Validerar att värdet matchar förväntad typ från schemat.
+
+        Args:
+            value: Värdet att validera
+            expected_type: Förväntad typ (string, integer, float, boolean, list, etc.)
+            prop_name: Fältnamn för felmeddelanden
+            item_schema: För listor - schema för varje element
+
+        Returns:
+            (True, "OK") om giltig, (False, "felmeddelande") annars
+        """
+        type_map = {
+            "string": str,
+            "integer": int,
+            "float": (int, float),
+            "boolean": bool,
+            "list": list,
+            "timestamp": str,
+            "date": str,
+            "uuid": str,
+            "enum": str,
+        }
+
+        if expected_type not in type_map:
+            return True, "OK"  # Okänd typ, hoppa över
+
+        python_type = type_map[expected_type]
+        if not isinstance(value, python_type):
+            return False, f"Type mismatch for '{prop_name}': expected {expected_type}, got {type(value).__name__}"
+
+        # Validera item_schema för listor
+        if expected_type == "list" and item_schema and isinstance(value, list):
+            for i, item in enumerate(value):
+                if not isinstance(item, dict):
+                    return False, f"{prop_name}[{i}]: expected dict, got {type(item).__name__}"
+                for field, field_def in item_schema.items():
+                    field_type = field_def.get("type", "string")
+                    field_required = field_def.get("required", False)
+                    field_value = item.get(field)
+
+                    if field_required and field_value is None:
+                        return False, f"{prop_name}[{i}].{field}: required field missing"
+                    if field_value is not None:
+                        ok, msg = self._validate_type(field_value, field_type, f"{prop_name}[{i}].{field}")
+                        if not ok:
+                            return False, msg
 
         return True, "OK"
 

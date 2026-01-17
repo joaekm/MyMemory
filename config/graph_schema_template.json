@@ -104,7 +104,11 @@
         "type": "list",
         "required": true,
         "include_in_vector": false,
-        "description": "Beviskedja - lista med objekt {text, origin} som visar var noden omnämns. Används för Entity Resolution och Dreamer-förädling."
+        "item_schema": {
+          "text": {"type": "string", "required": true, "description": "Beskrivande mening om entitetens roll i dokumentet"},
+          "origin": {"type": "string", "required": true, "description": "unit_id för källdokumentet"}
+        },
+        "description": "Beviskedja - lista med objekt {text: string, origin: string} som visar var noden omnämns. Används för Entity Resolution och Dreamer-förädling."
       },
       "aliases": {
         "type": "list",

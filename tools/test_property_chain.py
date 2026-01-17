@@ -448,6 +448,30 @@ class PropertyChainTest:
                             f"Nod {node.get('id', 'UNKNOWN')} ({node_type}) har okända properties: {unknown}")
                         violations_found = True
 
+                    # Validera node_context struktur (item_schema)
+                    node_context_schema = self.graph_schema.get('base_properties', {}).get('properties', {}).get('node_context', {})
+                    item_schema = node_context_schema.get('item_schema', {})
+                    if item_schema and node_context:
+                        for i, ctx in enumerate(node_context):
+                            if not isinstance(ctx, dict):
+                                self.log_violation("STEP7",
+                                    f"Nod {node.get('id', 'UNKNOWN')}: node_context[{i}] är inte dict, utan {type(ctx).__name__}")
+                                violations_found = True
+                                continue
+                            for field, field_def in item_schema.items():
+                                field_value = ctx.get(field)
+                                field_type = field_def.get('type', 'string')
+                                field_required = field_def.get('required', False)
+
+                                if field_required and field_value is None:
+                                    self.log_violation("STEP7",
+                                        f"Nod {node.get('id', 'UNKNOWN')}: node_context[{i}].{field} saknas (required)")
+                                    violations_found = True
+                                elif field_value is not None and field_type == 'string' and not isinstance(field_value, str):
+                                    self.log_violation("STEP7",
+                                        f"Nod {node.get('id', 'UNKNOWN')}: node_context[{i}].{field} ska vara string, är {type(field_value).__name__}")
+                                    violations_found = True
+
             if not violations_found:
                 self.log_pass("STEP7", f"Graf: {len(test_entities)} entiteter har korrekta properties")
 

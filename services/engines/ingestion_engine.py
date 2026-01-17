@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from services.utils.json_parser import parse_llm_json
 from services.utils.llm_service import LLMService, TaskType
 from services.utils.graph_service import GraphService
-from services.utils.schema_validator import SchemaValidator
+from services.utils.schema_validator import SchemaValidator, normalize_value
 from services.processors.text_extractor import extract_text
 
 try:
@@ -351,7 +351,8 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
         name = node.get('name')
         type_str = node.get('type')
         confidence = node.get('confidence', 0.5)
-        node_context_text = node.get('node_context', '')
+        # Normalize node_context to string (LLM may return list)
+        node_context_text = normalize_value(node.get('node_context', ''), 'string') or ''
 
         if not name or not type_str:
             continue
