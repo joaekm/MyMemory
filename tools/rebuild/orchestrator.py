@@ -76,9 +76,9 @@ class RebuildOrchestrator:
                 pass
 
         except Exception as e:
-            _log(f"  ⚠️  Dreamer fel (Icke-kritiskt): {e}")
+            _log(f"  ❌ KRITISKT Dreamer-fel: {e}")
             LOGGER.error(f"Dreamer Error: {e}", exc_info=True)
-            # Vi låter inte Dreamer-fel stoppa hela rebuilden, men vi loggar det.
+            raise RuntimeError(f"HARDFAIL: Dreamer failed: {e}") from e
     
     def run(self, days_limit=None, use_multipass=False):
         """Kör rebuild-processen."""
@@ -185,8 +185,8 @@ class RebuildOrchestrator:
                                         # _lock_held=True eftersom vi redan har låsen
                                         process_document(f['path'], f['filename'], _lock_held=True)
                                     except Exception as doc_err:
-                                        LOGGER.error(f"Fel vid processning av {f['filename']}: {doc_err}")
-                                        # Fortsätt med nästa fil istället för att avbryta
+                                        LOGGER.error(f"HARDFAIL: Fel vid processning av {f['filename']}: {doc_err}")
+                                        raise RuntimeError(f"HARDFAIL: Document processing failed for {f['filename']}: {doc_err}") from doc_err
                 except ImportError as e:
                     LOGGER.error(f"HARDFAIL: Kunde inte importera IngestionEngine: {e}")
                     raise RuntimeError(f"IngestionEngine import failed: {e}")
