@@ -37,6 +37,11 @@ def _get_schema_validator():
     return _SCHEMA_VALIDATOR
 
 
+def get_schema_validator():
+    """Public accessor for schema validator (used in _prepare_node_for_llm)."""
+    return _get_schema_validator()
+
+
 def _load_dreamer_config() -> dict:
     """Load Dreamer config (thresholds and limits)."""
     config_path = os.path.join(
@@ -75,6 +80,53 @@ class Dreamer:
         except Exception as e:
             LOGGER.error(f"Failed to load prompts from {path}: {e}")
             return {}
+
+    def _get_node_type_description(self, node_type: str) -> str:
+        """Get schema description for a node type."""
+        schema = get_schema_validator().schema
+        node_def = schema.get("nodes", {}).get(node_type, {})
+        description = node_def.get("description", "")
+        if not description:
+            return f"(Ingen beskrivning tillgänglig för '{node_type}')"
+        return description
+
+    def _validate_edges_for_recategorize(self, node_id: str, new_type: str) -> tuple:
+        """
+        Validate that all edges remain valid after hypothetical type change.
+
+        Returns:
+            (all_valid: bool, invalid_edges: list of edge descriptions)
+        """
+        edges_out = self.graph_service.get_edges_from(node_id)
+        edges_in = self.graph_service.get_edges_to(node_id)
+        all_edges = edges_out + edges_in
+
+        if not all_edges:
+            return (True, [])
+
+        validator = get_schema_validator()
+        invalid_edges = []
+
+        for edge in all_edges:
+            # Build nodes_map with the NEW type for this node
+            source_type = new_type if edge["source"] == node_id else self._get_node_type_for_id(edge["source"])
+            target_type = new_type if edge["target"] == node_id else self._get_node_type_for_id(edge["target"])
+
+            nodes_map = {edge["source"]: source_type, edge["target"]: target_type}
+            ok, msg = validator.validate_edge(edge, nodes_map)
+
+            if not ok:
+                edge_desc = f"{edge['source']}-[{edge['type']}]->{edge['target']}: {msg}"
+                invalid_edges.append(edge_desc)
+
+        return (len(invalid_edges) == 0, invalid_edges)
+
+    def _get_node_type_for_id(self, node_id: str) -> str:
+        """Get type for a node from the graph."""
+        node = self.graph_service.get_node(node_id)
+        if node:
+            return node.get("type", "Unknown")
+        return "Unknown"
 
     def scan_candidates(self) -> List[Dict]:
         """
@@ -299,7 +351,17 @@ class Dreamer:
 
             elif action == "RE-CATEGORIZE" and not dry_run:
                 if conf >= THRESHOLD_RECATEGORIZE:
-                    self.graph_service.recategorize_node(node["id"], analysis.get("new_type"))
+                    new_type = analysis.get("new_type")
+                    # HARDFAIL: Validate edges before recategorize
+                    edges_valid, invalid_edges = self._validate_edges_for_recategorize(node["id"], new_type)
+                    if not edges_valid:
+                        LOGGER.warning(
+                            f"RE-CATEGORIZE blocked for {node['id']} -> {new_type}: "
+                            f"{len(invalid_edges)} edges would become invalid. "
+                            f"Details: {invalid_edges[:3]}{'...' if len(invalid_edges) > 3 else ''}"
+                        )
+                        continue  # Skip this operation (HARDFAIL)
+                    self.graph_service.recategorize_node(node["id"], new_type)
                     affected_units.update(self.graph_service.get_related_unit_ids(node["id"]))
                     stats["recat"] += 1
 
@@ -320,6 +382,8 @@ class Dreamer:
                         units = self.graph_service.get_related_unit_ids(node["id"])
                         self.graph_service.merge_nodes(match["id"], node["id"])
                         affected_units.update(units)
+                        # Prune context on target node after merge (may have grown large)
+                        self.prune_context(match["id"])
                     stats["merged"] += 1
                     break
 
@@ -357,9 +421,11 @@ class Dreamer:
             LOGGER.error("Missing structural_analysis prompt in config")
             return {"action": "KEEP", "confidence": 0.0}
 
+        node_type = node.get("type", "Unknown")
         prompt = prompt_template.format(
             id=node.get("id"),
-            type=node.get("type"),
+            type=node_type,
+            node_type_description=self._get_node_type_description(node_type),
             context_list=formatted_context,
             taxonomy_nodes="Person, Project, Organization, Group, Event, Roles, Business_relation"
         )
