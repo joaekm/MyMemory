@@ -155,6 +155,22 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
         - Uppdaterat: `config/graph_schema_template.json` med `include_in_vector`-flaggor
     * *Användning:* `python tools/test_property_chain.py` (kör fullständigt test), `--dry-run` (visa schema), `--keep` (behåll testdata)
 
+* **OBJEKT-69 (LÖST 2026-01-17):** Implementera **Generell Typvalidering** i SchemaValidator.
+    * *Problem:* `node_context[].text` sparades ibland som lista istället för sträng, vilket kraschade `vector_service.py` och `index_search_mcp.py` vid `' | '.join()`.
+    * *Rotorsak:* SchemaValidator saknade typvalidering - bara required och enum validerades.
+    * *Lösning:*
+        - Lade till `item_schema` i `graph_schema_template.json` för `node_context` med explicit typning `{text: string, origin: string}`
+        - Ny metod `_validate_type()` i SchemaValidator för djup typvalidering inkl. nästlade strukturer
+        - Ny funktion `normalize_value()` för typnormalisering vid ingestion
+        - Normalisering av `node_context` i `ingestion_engine.py` (LLM kan returnera lista)
+        - Strikt typvalidering i `test_property_chain.py` - FAILA om `node_context[].text` inte är sträng
+    * *Påverkade filer:*
+        - `config/graph_schema_template.json`
+        - `services/utils/schema_validator.py`
+        - `services/engines/ingestion_engine.py`
+        - `tools/test_property_chain.py`
+    * *Städning:* 5 felaktiga test-noder raderades från grafen.
+
 * **OBJEKT-44 (AKTIV):** Implementera **"Entity Resolution & Alias Learning"**.
     * *Status:* Delvis implementerat. EntityGatekeeper finns. Alias-learning saknas.
     * *Kvarstående:*
