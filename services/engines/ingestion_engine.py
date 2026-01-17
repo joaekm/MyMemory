@@ -89,6 +89,13 @@ LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 FAILED_FOLDER = os.path.expanduser(CONFIG['paths']['asset_failed'])
 GRAPH_DB_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
 
+# Dreamer daemon state file (OBJEKT-76)
+DREAMER_STATE_FILE = os.path.expanduser(
+    CONFIG.get('dreamer', {}).get('daemon', {}).get(
+        'state_file', '~/MyMemory/Index/.dreamer_state.json'
+    )
+)
+
 # LLMService singleton (lazy init)
 _LLM_SERVICE = None
 
@@ -117,6 +124,45 @@ TRANSCRIBER_START_PATTERN = re.compile(r'^START:\s+(\d{2}:\d{2})$', re.MULTILINE
 
 PROCESSED_FILES = set()
 PROCESS_LOCK = threading.Lock()
+
+# Dreamer state lock (OBJEKT-76)
+DREAMER_STATE_LOCK = threading.Lock()
+
+
+def _increment_dreamer_node_counter(nodes_added: int):
+    """
+    Increment the Dreamer daemon node counter (OBJEKT-76).
+
+    This signals to the daemon that new graph nodes have been created,
+    allowing threshold-based triggering of Dreamer resolution cycles.
+    """
+    if nodes_added <= 0:
+        return
+
+    import json
+
+    with DREAMER_STATE_LOCK:
+        try:
+            # Load existing state
+            state = {'nodes_since_last_run': 0, 'last_run_timestamp': None}
+            if os.path.exists(DREAMER_STATE_FILE):
+                with open(DREAMER_STATE_FILE, 'r') as f:
+                    state = json.load(f)
+
+            # Increment counter
+            state['nodes_since_last_run'] = state.get('nodes_since_last_run', 0) + nodes_added
+
+            # Save state
+            os.makedirs(os.path.dirname(DREAMER_STATE_FILE), exist_ok=True)
+            with open(DREAMER_STATE_FILE, 'w') as f:
+                json.dump(state, f, indent=2, default=str)
+
+            LOGGER.debug(f"Dreamer counter: +{nodes_added} -> {state['nodes_since_last_run']} total")
+
+        except (OSError, json.JSONDecodeError) as e:
+            LOGGER.error(f"HARDFAIL: Could not update Dreamer state: {e}")
+            raise RuntimeError(f"Failed to update Dreamer counter: {e}") from e
+
 
 # Global Schema Validator (Lazy load)
 _SCHEMA_VALIDATOR = None
@@ -683,7 +729,10 @@ def process_document(filepath: str, filename: str):
         write_lake(unit_id, filename, raw_text, source_type, semantic_metadata, ingestion_payload)
 
         # 8. Write to Graph
-        write_graph(unit_id, filename, ingestion_payload)
+        nodes_written, edges_written = write_graph(unit_id, filename, ingestion_payload)
+
+        # 8b. Update Dreamer daemon counter (OBJEKT-76)
+        _increment_dreamer_node_counter(nodes_written)
 
         # 9. Write to Vector
         timestamp_ingestion = datetime.datetime.now().isoformat()

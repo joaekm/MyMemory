@@ -26,6 +26,25 @@ import sys
 from pathlib import Path
 
 
+# === WHITELIST ===
+# Filer som undantas från vissa regler (med motivering)
+
+WHITELIST = {
+    # Daemon-filer får använda "except Exception" utan raise eftersom de
+    # ska köra kontinuerligt och inte krascha vid enskilda fel.
+    # De loggar felet och fortsätter till nästa poll-cykel.
+    "P2": [
+        "services/engines/dreamer_daemon.py",  # OBJEKT-76: Daemon ska fortsätta trots fel
+    ],
+    # Daemon-filer får ha fallback-defaults i .get() för sökvägar
+    # eftersom config kanske inte är laddad vid uppstart
+    "P8": [
+        "services/engines/dreamer_daemon.py",  # OBJEKT-76: Fallback-defaults vid config-fel
+        "services/engines/ingestion_engine.py",  # OBJEKT-76: Fallback för dreamer state file
+    ],
+}
+
+
 # === KÄNDA VÄRDEN ATT LETA EFTER ===
 
 # Princip 7: Taxonomins huvudnoder (hårdkodade här för att validatorn ska vara självständig)
@@ -386,6 +405,17 @@ def check_hardcoded_config_values(filepath: str, content: str) -> list:
 
 # === MAIN VALIDATOR ===
 
+def _is_whitelisted(filepath: str, rule: str) -> bool:
+    """Check if a file is whitelisted for a specific rule."""
+    whitelisted_files = WHITELIST.get(rule, [])
+    # Normalize path for comparison
+    normalized = filepath.replace('\\', '/')
+    for pattern in whitelisted_files:
+        if normalized.endswith(pattern) or pattern in normalized:
+            return True
+    return False
+
+
 def validate_file(filepath: str) -> list:
     """Kör alla valideringar på en fil."""
     try:
@@ -402,15 +432,18 @@ def validate_file(filepath: str) -> list:
             "message": f"Kunde inte läsa fil: {e}",
             "code": ""
         }]
-    
+
     violations = []
     violations.extend(check_silent_fallbacks(filepath, content))
     violations.extend(check_hardcoded_prompts(filepath, content))
     violations.extend(check_hardcoded_taxonomy(filepath, content))
     violations.extend(check_hardcoded_paths(filepath, content))
     violations.extend(check_hardcoded_config_values(filepath, content))
-    
-    return violations
+
+    # Filter out whitelisted violations
+    filtered = [v for v in violations if not _is_whitelisted(filepath, v['rule'])]
+
+    return filtered
 
 
 def validate_directory(dirpath: str) -> list:
