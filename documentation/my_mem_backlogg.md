@@ -353,6 +353,48 @@ RE-CATEGORIZE använder HARDFAIL vid ogiltiga kanter. Detta kan skapa problem f�
 
 *Prioritet:* Låg (infrastruktur, kan vänta)
 
+#### OBJEKT-72: Robust Testsvit (NY)
+*Status:* EJ PÅBÖRJAD
+*Syfte:* Skapa en 100% robust testsvit som garanterar dataintegritet och systemstabilitet.
+
+*Bakgrund:*
+`test_property_chain.py` visade att tester som returnerar PASS trots att kritiska operationer misslyckades är värdelösa. Testet uppdaterades 2026-01-17 med HARDFAIL-kontroller.
+
+*Principer:*
+1. **HARDFAIL på allt kritiskt** - Inga tysta fallbacks, inga "hoppar över" som ger PASS
+2. **Validera att operationer faktiskt kördes** - Räkna LLM-anrop, kontrollera confidence > 0
+3. **Minsta förväntade resultat** - Om test-input ska producera 3 entiteter, faila vid < 3
+4. **Explicit felmeddelanden** - Varje FAIL ska förklara exakt vad som gick fel
+
+*Scope:*
+1. **test_property_chain.py** (KLAR 2026-01-17)
+   - ✅ MIN_EXPECTED_ENTITIES validering
+   - ✅ Prompt-laddning valideras
+   - ✅ LLM-anrop räknas och valideras
+   - ✅ Alla entiteter måste få svar
+
+2. **test_mcp_search.py** (att granska)
+   - [ ] Validera att sökresultat faktiskt returneras
+   - [ ] HARDFAIL om MCP-server inte startar
+   - [ ] Validera response-struktur
+
+3. **Ny: test_ingestion_e2e.py** (att skapa)
+   - [ ] Testa hela ingestion-flödet isolerat
+   - [ ] Validera Lake-fil skapas med rätt frontmatter
+   - [ ] Validera graf-noder och kanter skapas
+   - [ ] Validera vektor-indexering
+
+4. **Ny: test_dreamer_operations.py** (att skapa)
+   - [ ] Testa MERGE, SPLIT, RENAME, DELETE, RE-CATEGORIZE isolerat
+   - [ ] Mock-data för kontrollerade scenarier
+   - [ ] Validera att operationer faktiskt ändrar grafen
+
+5. **CI-integration** (framtida)
+   - [ ] Köra tester vid varje commit
+   - [ ] Blocka push vid FAIL
+
+*Prioritet:* Medel (testinfrastruktur, men kritisk för kvalitet)
+
 ---
 
 ## Parkerade Objekt
