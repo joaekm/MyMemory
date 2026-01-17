@@ -351,8 +351,12 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
         name = node.get('name')
         type_str = node.get('type')
         confidence = node.get('confidence', 0.5)
-        # Normalize node_context to string (LLM may return list)
-        node_context_text = normalize_value(node.get('node_context', ''), 'string') or ''
+        # Extract text from node_context (validator_mcp normalizes to [{text, origin}])
+        nc = node.get('node_context', '')
+        if isinstance(nc, list) and nc and isinstance(nc[0], dict):
+            node_context_text = nc[0].get('text', '')
+        else:
+            node_context_text = normalize_value(nc, 'string') or ''
 
         if not name or not type_str:
             continue

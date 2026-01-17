@@ -136,14 +136,31 @@ def extract_and_validate_doc(initial_prompt: str, reference_timestamp: str = Non
                 if name and name in anchor_map:
                     known_uuid = anchor_map[name]
                     current_uuid = node.get('id') # Använd 'id' som primärnyckel
-                    
+
                     # Om id/uuid genererades nyss, skriv över med anchor
                     if current_uuid != known_uuid:
                          # Här kan vi antingen tvinga (auto-fix) eller klaga.
                          # Givet att vi nyss genererade ett random ID, bör vi skriva över det med anchor.
                          node['id'] = known_uuid
                          node['uuid'] = known_uuid # Legacy support
-                    
+
+                # 4. Normalize node_context to schema format [{text, origin}]
+                # LLM returns string or [{text}], we need [{text, origin}]
+                nc = node.get('node_context')
+                if nc is not None:
+                    if isinstance(nc, str):
+                        node['node_context'] = [{"text": nc, "origin": "PENDING"}]
+                    elif isinstance(nc, list):
+                        normalized = []
+                        for item in nc:
+                            if isinstance(item, str):
+                                normalized.append({"text": item, "origin": "PENDING"})
+                            elif isinstance(item, dict):
+                                if 'origin' not in item:
+                                    item['origin'] = "PENDING"
+                                normalized.append(item)
+                        node['node_context'] = normalized
+
             # Validera noder via SchemaValidator 
             for i, node in enumerate(extracted_data.get('nodes', [])):
                 is_valid, msg = validator.validate_node(node)
