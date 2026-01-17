@@ -69,12 +69,21 @@ def _parse_frontmatter(file_path: str) -> Dict:
 @mcp.tool()
 def search_graph_nodes(query: str, node_type: str = None) -> str:
     """
-    Söker efter STRUKTUR i Grafdatabasen.
-    Hittar entiteter baserat på alla lagrade egenskaper.
+    Exakt sökning i grafstrukturen – hittar specifika entiteter via namn, alias eller ID.
+
+    ANVÄND FÖR:
+    - Hitta en specifik person: query="Johan"
+    - Kolla om en organisation finns: query="Acme AB", node_type="Organization"
+    - Söka på e-post eller andra properties: query="johan@example.com"
 
     Söker i: id, aliases, och hela properties (name, email, node_context, etc.)
 
-    Används för att svara på: "Finns noden X?" eller "Hur ser relationerna ut?"
+    SKILLNAD MOT query_vector_memory:
+    - search_graph_nodes = "Finns noden X?" (exakt matchning)
+    - query_vector_memory = "Vem jobbar med AI-projekt?" (semantisk sökning)
+
+    TIPS: Börja ofta här för att hitta rätt node_id,
+    använd sedan get_entity_summary eller get_neighbor_network för detaljer.
     """
     try:
         # GraphService använder DuckDB internt och är robust
@@ -128,8 +137,25 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
 @mcp.tool()
 def query_vector_memory(query_text: str, n_results: int = 5) -> str:
     """
-    Söker i VEKTOR-minnet (Semantisk sökning).
-    Använder VectorService för att garantera rätt modell och collection.
+    Semantisk sökning i kunskapsgrafen – hittar entiteter baserat på MENING, inte bara nyckelord.
+
+    Varje entitet har en narrativ "node_context" som beskriver:
+    - Varför entiteten är relevant
+    - I vilket sammanhang den dök upp
+    - Relationer till personer och händelser
+
+    EXEMPEL PÅ NODE_CONTEXT:
+    - "Företag som [person] hade samtal med angående AI-connector"
+    - "Projekt som genererade många ofakturerbara timmar"
+    - "Customer Manager, ansvarig för dialog med kunden"
+
+    SÖK PÅ KONCEPT, INTE NAMN:
+    ✅ "vem arbetar med upphandlingar"
+    ✅ "projekt med faktureringsproblem"
+    ✅ "personer som haft kundmöten"
+    ❌ "Johan" (använd search_graph_nodes för exakta namn)
+
+    Returnerar: Entiteter rankade efter semantisk likhet med din fråga.
     """
     try:
         # 1. Hämta Singleton för Knowledge Base (samma som indexeraren använder)
@@ -179,18 +205,26 @@ def search_by_date_range(
     date_field: str = "content"
 ) -> str:
     """
-    Söker efter dokument inom ett datumintervall.
+    Tidssökning – hitta dokument och händelser från en specifik period.
+
+    TRE DATUMFÄLT:
+    - "content": När händelsen faktiskt inträffade (default)
+    - "ingestion": När filen lades till i systemet
+    - "updated": Senaste semantiska uppdatering
+
+    EXEMPEL:
+    - Vad hände förra veckan? → parse_relative_date först, sedan denna
+    - Alla dokument från Q4 2024 → start="2024-10-01", end="2024-12-31"
+
+    KOMBINERA MED ANDRA VERKTYG:
+    1. search_by_date_range → Hitta dokument från perioden
+    2. read_document_content → Läs intressanta dokument
+    3. query_vector_memory → Hitta relaterade entiteter
 
     Args:
         start_date: Startdatum (YYYY-MM-DD)
         end_date: Slutdatum (YYYY-MM-DD)
-        date_field: Vilket datumfält som ska användas:
-            - "content": timestamp_content (när innehållet hände)
-            - "ingestion": timestamp_ingestion (när filen skapades i Lake)
-            - "updated": timestamp_updated (senaste semantiska uppdatering)
-
-    Returns:
-        Lista med matchande dokument sorterade efter datum
+        date_field: "content" (default), "ingestion", eller "updated"
     """
     from datetime import datetime
 
@@ -289,8 +323,19 @@ def search_by_date_range(
 @mcp.tool()
 def search_lake_metadata(keyword: str, field: str = None) -> str:
     """
-    Söker i KÄLLFILERNAS metadata (Lake Header).
-    Skannar markdown-filer för att se hur de är taggade.
+    Sök i dokumentens YAML-metadata – hitta filer baserat på taggning.
+
+    SÖKER I FRONTMATTER:
+    - source: Var dokumentet kommer ifrån (slack, email, etc.)
+    - tags: Manuella eller automatiska taggar
+    - author: Vem som skapat dokumentet
+    - Andra custom-fält
+
+    EXEMPEL:
+    - Alla Slack-konversationer: keyword="slack", field="source"
+    - Dokument taggade med "upphandling": keyword="upphandling", field="tags"
+
+    KOMBINERA MED read_document_content för att läsa matchande filer.
     """
     matches = []
     scanned_count = 0
@@ -349,11 +394,22 @@ def search_lake_metadata(keyword: str, field: str = None) -> str:
 @mcp.tool()
 def get_neighbor_network(node_id: str) -> str:
     """
-    Utforskar relationsnätverket kring en entitet.
-    Visar både utgående och inkommande kopplingar.
+    Kartlägg relationerna kring en entitet – vem/vad är den kopplad till?
 
-    Användning: Efter att ha hittat en entitet med search_graph_nodes,
-    använd detta för att se vem/vad den är kopplad till.
+    RETURNERAR:
+    - Utgående relationer: "Person → ARBETAR_PÅ → Organisation"
+    - Inkommande relationer: "Projekt → HAR_DELTAGARE → Person"
+    - Relationstyper och riktning
+
+    ANVÄNDNINGSFLÖDE:
+    1. search_graph_nodes("Johan") → node_id
+    2. get_neighbor_network(node_id) → Se alla kopplingar
+    3. get_entity_summary(granne_id) → Djupdyk i intressant koppling
+
+    BRA FÖR:
+    - "Vilka projekt är personen inblandad i?"
+    - "Vilka personer jobbar med projektet?"
+    - "Hur hänger dessa entiteter ihop?"
     """
     try:
         graph = GraphService(GRAPH_PATH, read_only=True)
@@ -419,8 +475,20 @@ def get_neighbor_network(node_id: str) -> str:
 @mcp.tool()
 def get_entity_summary(node_id: str) -> str:
     """
-    Hämtar en komplett sammanfattning av allt vi vet om en entitet.
-    Inkluderar metadata, konfidens, användningsstatistik och bevis/kontext.
+    Djupdyk i EN entitet – hämtar allt systemet vet om den.
+
+    RETURNERAR:
+    - node_context: Narrativ beskrivning av entitetens roll och sammanhang
+    - Relationer: Vilka andra entiteter den är kopplad till
+    - Metadata: Typ, alias, properties
+    - Konfidens: Hur säker systemet är på informationen
+    - Bevis: Källhänvisningar till ursprungliga dokument/meddelanden
+
+    ANVÄNDNING:
+    1. Hitta entitet med search_graph_nodes: "Johan" → node_id="abc123"
+    2. Hämta allt om Johan: get_entity_summary(node_id="abc123")
+
+    Perfekt för att svara på "Berätta allt du vet om X".
     """
     try:
         graph = GraphService(GRAPH_PATH, read_only=True)
@@ -511,11 +579,19 @@ def get_graph_statistics() -> str:
 @mcp.tool()
 def parse_relative_date(expression: str) -> str:
     """
-    Konverterar naturliga tidsuttryck till absoluta datum.
+    Översätt mänskliga tidsuttryck till datum för search_by_date_range.
 
-    Exempel: "förra veckan", "igår", "3 dagar sedan"
-    Returnerar start_date och end_date i YYYY-MM-DD format.
-    Använd sedan search_by_date_range() med dessa datum.
+    EXEMPEL:
+    - "förra veckan" → {"start_date": "2025-01-06", "end_date": "2025-01-12"}
+    - "igår" → {"start_date": "2025-01-16", "end_date": "2025-01-16"}
+    - "senaste månaden" → {...}
+    - "3 dagar sedan" → {...}
+
+    ANVÄNDNING:
+    1. parse_relative_date("förra veckan")
+    2. search_by_date_range(start_date=..., end_date=...)
+
+    Returnerar JSON med start_date och end_date i YYYY-MM-DD format.
     """
     today = datetime.now().date()
     result = {
@@ -652,21 +728,29 @@ def _smart_truncate(content: str, max_length: int, tail_ratio: float = 0.2) -> t
 @mcp.tool()
 def read_document_content(doc_id: str, max_length: int = 8000, section: str = "smart") -> str:
     """
-    Läser dokumentinnehåll från Lake med intelligent trunkering.
+    Läs källdokument – hämta originaltext från Lake.
 
-    Bevarar:
-    - YAML frontmatter (alltid komplett)
-    - Dokumentets början (~80%)
-    - Dokumentets slut (~20%) - fångar org.nr, signaturer, fotnoter
+    SMART TRUNKERING (default):
+    - Bevarar YAML frontmatter (metadata)
+    - ~80% från dokumentets början
+    - ~20% från slutet (fångar org.nr, signaturer, fotnoter)
+
+    LÄSLÄGEN:
+    - "smart": Rekommenderat – head + tail med metadata (default)
+    - "head": Endast början
+    - "tail": Endast slutet
+    - "full": Hela dokumentet (varning: kan bli stort!)
+
+    ANVÄNDNING:
+    1. Hitta dokument via search_by_date_range eller search_lake_metadata
+    2. read_document_content(doc_id="uuid-eller-filnamn")
+
+    BRA FÖR: Verifiera information, hitta exakta citat, förstå kontext.
 
     Args:
         doc_id: Dokumentets UUID eller filnamn
         max_length: Max antal tecken (default 8000)
-        section: Läsläge:
-            - "smart": Head + tail med bevarad frontmatter (rekommenderat)
-            - "head": Endast första max_length tecken
-            - "tail": Endast sista max_length tecken
-            - "full": Ingen trunkering (varning: kan bli stort)
+        section: "smart" (default), "head", "tail", eller "full"
     """
     try:
         # Hitta filen

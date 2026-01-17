@@ -30,6 +30,11 @@ from tools.rebuild import RebuildOrchestrator
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - REBUILD - %(levelname)s - %(message)s')
 LOGGER = logging.getLogger('StagedRebuild')
 
+# Tysta brusiga loggers
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('google_genai').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
+
 # === CONFIG ===
 
 def load_config():

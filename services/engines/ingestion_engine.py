@@ -622,6 +622,17 @@ def write_graph(unit_id: str, filename: str, ingestion_payload: List) -> tuple:
     """Write entities and edges to graph."""
     graph = GraphService(GRAPH_DB_PATH)
 
+    # Skapa Document-nod för källdokumentet (krävs för MENTIONS-kanter)
+    graph.upsert_node(
+        id=unit_id,
+        type="Document",
+        properties={
+            "name": filename,
+            "status": "ACTIVE",
+            "source_system": "IngestionEngine"
+        }
+    )
+
     nodes_written = 0
     edges_written = 0
 

@@ -288,6 +288,11 @@ extract_text → extract_entities_mcp → critic_filter_entities → resolve_ent
 
 *Risk:* Nya relationer kan blockera RE-CATEGORIZE. Lösning: `source: "inferred"` för auto-borttagning.
 
+*Konceptuellt problem (2026-01-17):* RE-CATEGORIZE kan vilja ändra en nod till en typ som inte är tillåten som target för MENTIONS (t.ex. Business_relation). Detta blockeras korrekt av kant-valideringen, men indikerar att:
+1. MENTIONS target_type-listan kanske behöver utökas, ELLER
+2. Dreamer föreslår fel typ (prompten bör förtydligas), ELLER
+3. Noden borde inte ha MENTIONS-kant alls (skapades felaktigt vid ingestion)
+
 #### OBJEKT-76: Dreamer Trigger-mekanism (KLAR 2026-01-17, fd. OBJEKT-61)
 *Status:* ✅ Implementerat
 *Prioritet:* LÅG
@@ -362,16 +367,16 @@ python services/engines/dreamer_daemon.py --status
 - Extraktion av `dates_mentioned`, `actions`, `deadlines`
 - Bättre context injection i Transcriber
 
-#### OBJEKT-62: Transcription Truncation (PÅGÅENDE)
-*Status:* Design klar, ej implementerat
+#### OBJEKT-62: Transcription Truncation (KLAR 2026-01-17)
+*Status:* ✅ Implementerat
 *Prioritet:* MEDEL
-*Problem:* Långa transkriptioner trunkeras (58 MB ljud → 9 KB transkript).
+*Problem:* Långa transkriptioner trunkerades (58 MB ljud → 9 KB transkript).
 *Rotorsak:* Gemini Pro output-token-gräns (~8k tokens).
 
-*Lösning:* Pass 2 returnerar INTE `transcript`, bara:
-- `speaker_map`: {"Talare 1": "Anna"}
-- `metadata`: title, summary, keywords, entities
-- Python applicerar `speaker_map` på `raw_transcript` från Pass 1
+*Lösning (implementerad i transcriber.py):*
+- Pass 1: Hämtar `raw_transcript` (full text via Flash-modell)
+- Pass 2: Returnerar INTE full transcript, bara `speaker_map` + metadata
+- Python applicerar `speaker_map` på `raw_transcript` (rad 442-448)
 
 ---
 
@@ -382,18 +387,32 @@ python services/engines/dreamer_daemon.py --status
 *Prioritet:* MEDEL
 
 *Principer:*
-1. **HARDFAIL på allt kritiskt**
-2. **Validera att operationer faktiskt kördes**
-3. **Minsta förväntade resultat**
-4. **Explicit felmeddelanden**
+1. **HARDFAIL på allt kritiskt** - Inga tysta fel
+2. **Validera att operationer faktiskt kördes** - Inte bara "ingen exception"
+3. **Minsta förväntade resultat** - Assertions på konkreta värden
+4. **Explicit felmeddelanden** - Tydlig orsak vid failure
+5. **Referentiell integritet** - Kanter måste peka på existerande noder
 
-*Scope:*
-1. **test_property_chain.py** (KLAR 2026-01-17) ✅
-2. **test_shared_lock_stress.py** (KLAR 2026-01-17) ✅ - Process-säker låsning med 400 simultana skrivningar
-3. **test_mcp_search.py** (att granska)
-4. **test_ingestion_e2e.py** (att skapa)
-5. **test_dreamer_operations.py** (att skapa)
-6. **CI-integration** (framtida)
+*Testsvit-struktur:*
+
+| Test | Syfte | Status |
+|------|-------|--------|
+| **test_property_chain.py** | Schema → DocConverter → Lake → Vector → Graf | ✅ KLAR |
+| **test_shared_lock_stress.py** | Process-säker låsning (400 simultana skrivningar) | ✅ KLAR |
+| **test_mcp_search.py** | MCP-verktyg returnerar korrekta resultat | Att granska |
+| **test_graph_integrity.py** | Graf-konsistens och referentiell integritet | Att skapa |
+| **test_ingestion_e2e.py** | End-to-end ingestion med alla steg | Att skapa |
+| **test_dreamer_operations.py** | Dreamer MERGE/SPLIT/RENAME/RE-CATEGORIZE | Att skapa |
+
+*Identifierade testfall för test_graph_integrity.py:*
+1. **MENTIONS-kanter har giltig source:** Alla MENTIONS-kanter måste ha source som är en Document-nod
+2. **Alla kanter pekar på existerande noder:** Ingen kant får ha source/target som inte finns i nodes-tabellen
+3. **Nodtyper följer schema:** Alla noder har typ som finns i graph_schema_template.json
+4. **Kanttyper följer schema:** Alla kanter har typ som finns i schemat med giltiga source/target-typer
+5. **Inga orphan-noder:** Noder utan kanter flaggas (varning, inte fel)
+
+*Lärdomar (lägg till nya här):*
+- 2026-01-17: MENTIONS-kanter skapades utan att Document-nod existerade för source. Dreamer såg "Unknown" typ och blockerade RE-CATEGORIZE. **Fångat av:** Skulle fångats av test 1-2 ovan.
 
 #### OBJEKT-71: Loggningsarkitektur (NY)
 *Status:* EJ PÅBÖRJAD
