@@ -35,7 +35,7 @@ class GraphService:
         """
         self.db_path = db_path
         self.read_only = read_only
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # RLock allows reentrant locking (e.g. rename_node -> merge_nodes)
 
         # Skapa mappen om den inte finns
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
