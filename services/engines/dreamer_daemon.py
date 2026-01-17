@@ -26,6 +26,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from services.utils.graph_service import GraphService
 from services.utils.vector_service import VectorService
+from services.utils.shared_lock import resource_lock
 from services.engines.dreamer import Dreamer
 
 LOGGER = logging.getLogger("DreamerDaemon")
@@ -139,23 +140,35 @@ def _should_run(state: dict, daemon_config: dict) -> tuple[bool, str]:
 
 def _run_dreamer(config: dict) -> dict:
     """
-    Execute Dreamer resolution cycle.
+    Execute Dreamer resolution cycle with resource locking.
+
+    Takes exclusive locks on graph and vector to prevent conflicts
+    with concurrent ingestion processes.
 
     Returns:
         Result dict from Dreamer
     """
-    LOGGER.info("Initializing Dreamer...")
+    LOGGER.info("Acquiring locks for Dreamer cycle...")
 
     try:
-        graph_service = GraphService()
-        vector_service = VectorService()
-        dreamer = Dreamer(graph_service, vector_service)
+        # Take exclusive locks for entire cycle (OBJEKT-73)
+        with resource_lock("graph", exclusive=True):
+            with resource_lock("vector", exclusive=True):
+                LOGGER.info("Locks acquired, initializing Dreamer...")
 
-        LOGGER.info("Running resolution cycle...")
-        result = dreamer.run_resolution_cycle(dry_run=False)
+                graph_path = os.path.expanduser(
+                    config.get('paths', {}).get('graph_db', '~/MyMemory/Index/my_mem_graph.duckdb')
+                )
+                graph_service = GraphService(graph_path)
+                vector_service = VectorService()
+                dreamer = Dreamer(graph_service, vector_service)
 
-        LOGGER.info(f"Dreamer completed: {result}")
-        return result
+                LOGGER.info("Running resolution cycle...")
+                result = dreamer.run_resolution_cycle(dry_run=False)
+
+                graph_service.close()
+                LOGGER.info(f"Dreamer completed: {result}")
+                return result
 
     except Exception as e:
         LOGGER.error(f"Dreamer failed: {e}", exc_info=True)

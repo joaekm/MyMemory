@@ -28,6 +28,9 @@ python tools/test_property_chain.py
 # Validera MCP-verktyg (kör efter ändringar i index_search_mcp.py)
 python tools/test_mcp_search.py
 
+# Stresstest för shared_lock (process-säker låsning)
+python tools/test_shared_lock_stress.py
+
 # Rebuild efter hard reset
 python tools/tool_hard_reset.py
 python tools/tool_staged_rebuild.py --confirm --phase foundation

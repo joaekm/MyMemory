@@ -231,15 +231,32 @@ extract_text → extract_entities_mcp → critic_filter_entities → resolve_ent
 
 ### Prio 1 - Rebuild & Infrastruktur
 
-#### OBJEKT-73: Rebuild-process Refaktorering (NY)
-*Status:* EJ PÅBÖRJAD
+#### OBJEKT-73: Rebuild-process Refaktorering (KLAR 2026-01-17)
+*Status:* ✅ Implementerat
 *Prioritet:* HÖG
 *Bakgrund:* Efter EPIC-01 har ingestion-pipelinen genomgått omfattande förbättringar. Rebuild-processen måste synkroniseras.
 
 *Scope:*
-1. Säkerställ att rebuild använder exakt samma pipeline som realtids-ingestion
-2. Integrera Dreamer-faser i staged rebuild
-3. Lägg till validering och dokumentation
+1. ✅ Säkerställ att rebuild använder exakt samma pipeline som realtids-ingestion
+2. ✅ Integrera Dreamer-faser i staged rebuild
+3. ✅ Lägg till validering och dokumentation
+
+*Implementation:*
+- **shared_lock.py** - Process-säker låsning med `fcntl.flock()` för koordinering mellan processer
+- **orchestrator.py** - Använder nu `ingestion_engine.process_document()` direkt istället för watchdog
+- **process_manager.py** - `ServiceManager` borttagen (obsolet), `CompletionWatcher` kvar
+- **dreamer_daemon.py** - Tar lås innan Dreamer-cykel
+- **ingestion_engine.py** - `resource_lock` per dokument vid realtids-ingestion, `_lock_held` parameter för rebuild
+
+*Låsningsarkitektur (Alternativ B - anroparen tar lås):*
+| Komponent | Lås | Scope |
+|-----------|-----|-------|
+| Rebuild (orchestrator) | `graph` + `vector` | Per dag |
+| Dreamer | `graph` + `vector` | Hela cykeln |
+| Ingestion (realtid) | `graph` + `vector` | Per dokument |
+| MCP-sökningar | shared | Per query |
+
+*Stresstest:* `tools/test_shared_lock_stress.py` - 400 simultana skrivningar utan datakorruption
 
 *Relation:* Bygger på OBJEKT-66, relaterat till OBJEKT-72
 
@@ -353,10 +370,11 @@ python services/engines/dreamer_daemon.py --status
 
 *Scope:*
 1. **test_property_chain.py** (KLAR 2026-01-17) ✅
-2. **test_mcp_search.py** (att granska)
-3. **test_ingestion_e2e.py** (att skapa)
-4. **test_dreamer_operations.py** (att skapa)
-5. **CI-integration** (framtida)
+2. **test_shared_lock_stress.py** (KLAR 2026-01-17) ✅ - Process-säker låsning med 400 simultana skrivningar
+3. **test_mcp_search.py** (att granska)
+4. **test_ingestion_e2e.py** (att skapa)
+5. **test_dreamer_operations.py** (att skapa)
+6. **CI-integration** (framtida)
 
 #### OBJEKT-71: Loggningsarkitektur (NY)
 *Status:* EJ PÅBÖRJAD
@@ -389,5 +407,5 @@ Dessa objekt är fortfarande potentiellt relevanta men inte prioriterade.
 
 ---
 
-*Senast uppdaterad: 2026-01-17 (EPIC-01 konsoliderad, nya objekt 74-76)*
+*Senast uppdaterad: 2026-01-17 (OBJEKT-73 Rebuild refaktorering KLAR)*
 *Se `my_mem_koncept_logg.md` för resonemang bakom beslut.*

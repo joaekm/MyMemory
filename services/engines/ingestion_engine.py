@@ -36,6 +36,7 @@ from services.utils.llm_service import LLMService, TaskType
 from services.utils.graph_service import GraphService
 from services.utils.schema_validator import SchemaValidator, normalize_value
 from services.processors.text_extractor import extract_text
+from services.utils.shared_lock import resource_lock
 
 try:
     from services.utils.date_service import get_timestamp as date_service_timestamp
@@ -162,6 +163,34 @@ def _increment_dreamer_node_counter(nodes_added: int):
         except (OSError, json.JSONDecodeError) as e:
             LOGGER.error(f"HARDFAIL: Could not update Dreamer state: {e}")
             raise RuntimeError(f"Failed to update Dreamer counter: {e}") from e
+
+
+def reset_dreamer_counter():
+    """
+    Reset the Dreamer daemon node counter to zero.
+
+    Called by rebuild orchestrator to prevent daemon from triggering
+    during rebuild (since orchestrator runs Dreamer manually after each day).
+    """
+    import json
+
+    with DREAMER_STATE_LOCK:
+        try:
+            state = {'nodes_since_last_run': 0, 'last_run_timestamp': None}
+            if os.path.exists(DREAMER_STATE_FILE):
+                with open(DREAMER_STATE_FILE, 'r') as f:
+                    state = json.load(f)
+
+            state['nodes_since_last_run'] = 0
+
+            os.makedirs(os.path.dirname(DREAMER_STATE_FILE), exist_ok=True)
+            with open(DREAMER_STATE_FILE, 'w') as f:
+                json.dump(state, f, indent=2, default=str)
+
+            LOGGER.info("Dreamer counter reset to 0")
+
+        except (OSError, json.JSONDecodeError) as e:
+            LOGGER.warning(f"Could not reset Dreamer state: {e}")
 
 
 # Global Schema Validator (Lazy load)
@@ -670,10 +699,16 @@ def write_vector(unit_id: str, filename: str, raw_text: str, source_type: str,
     LOGGER.info(f"Vector: {filename} -> ChromaDB")
 
 
-def process_document(filepath: str, filename: str):
+def process_document(filepath: str, filename: str, _lock_held: bool = False):
     """
     Main document processing function.
     Orchestrates the full ingestion pipeline.
+
+    Args:
+        filepath: Full path to source file
+        filename: Filename (used for UUID extraction)
+        _lock_held: If True, caller already holds resource locks (e.g., rebuild).
+                    If False, this function acquires locks per document.
     """
     with PROCESS_LOCK:
         if filename in PROCESSED_FILES:
@@ -691,7 +726,9 @@ def process_document(filepath: str, filename: str):
         return  # Idempotent
 
     LOGGER.debug(f"Processing: {filename}")
-    try:
+
+    def _do_process():
+        """Inner processing logic."""
         # 1. Extract text (via text_extractor)
         raw_text = extract_text(filepath)
 
@@ -737,6 +774,16 @@ def process_document(filepath: str, filename: str):
         # 9. Write to Vector
         timestamp_ingestion = datetime.datetime.now().isoformat()
         write_vector(unit_id, filename, raw_text, source_type, semantic_metadata, timestamp_ingestion)
+
+    try:
+        if _lock_held:
+            # Caller holds locks (rebuild scenario)
+            _do_process()
+        else:
+            # Acquire locks for this document (realtime scenario)
+            with resource_lock("graph", exclusive=True):
+                with resource_lock("vector", exclusive=True):
+                    _do_process()
 
     except Exception as e:
         LOGGER.error(f"HARDFAIL {filename}: {e}")
