@@ -324,6 +324,25 @@ python services/engines/dreamer_daemon.py --status
 
 *Se:* Konflikt 61 i `my_mem_koncept_logg.md`
 
+#### OBJEKT-77: Dreamer Batch LLM-anrop (KLAR 2026-01-17)
+*Status:* ✅ Implementerat
+*Prioritet:* MEDEL
+*Problem:* Dreamer körde LLM-anrop sekventiellt - långsamt vid många kandidater.
+
+*Implementation:*
+- `batch_structural_analysis()` - Kör N prompts parallellt via `batch_generate()`
+- `batch_evaluate_merges()` - Kör M merge-par parallellt via `batch_generate()`
+- `run_resolution_cycle()` refaktorerad till 3 faser:
+  1. **Fas 1:** Batch structural analysis
+  2. **Fas 2:** Batch merge evaluation
+  3. **Fas 3:** Causal semantic update
+
+*Prestandavinst:*
+- Idag (sekventiellt): 50 kandidater × ~2s = **~100 sekunder**
+- Med batch (30 parallella): ~4 omgångar × 2s = **~8 sekunder**
+
+*Relation:* Använder `LLMService.batch_generate()` (AdaptiveThrottler, max 30 workers)
+
 #### OBJEKT-44: Entity Resolution & Alias Learning (AKTIV)
 *Status:* Delvis implementerat (EntityGatekeeper finns)
 *Prioritet:* MEDEL
@@ -407,5 +426,5 @@ Dessa objekt är fortfarande potentiellt relevanta men inte prioriterade.
 
 ---
 
-*Senast uppdaterad: 2026-01-17 (OBJEKT-73 Rebuild refaktorering KLAR)*
+*Senast uppdaterad: 2026-01-17 (OBJEKT-77 Dreamer Batch LLM-anrop KLAR)*
 *Se `my_mem_koncept_logg.md` för resonemang bakom beslut.*

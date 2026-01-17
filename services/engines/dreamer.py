@@ -205,28 +205,25 @@ class Dreamer:
 
         return clean_node
 
-    def evaluate_merge(self, primary: Dict, secondary: Dict) -> Dict:
-        """Ask LLM: Are these the same entity?"""
+    def _build_merge_prompt(self, primary: Dict, secondary: Dict) -> str:
+        """Build prompt for merge evaluation."""
         prompt_template = self.prompts.get("entity_resolution_prompt", "")
         if not prompt_template:
             LOGGER.error("Missing entity_resolution_prompt")
-            return {"decision": "IGNORE", "confidence": 0.0}
+            return ""
 
         p_clean = self._prepare_node_for_llm(primary)
         s_clean = self._prepare_node_for_llm(secondary)
 
-        prompt = prompt_template.format(
+        return prompt_template.format(
             node_a_json=json.dumps(p_clean, indent=2, ensure_ascii=False),
             node_b_json=json.dumps(s_clean, indent=2, ensure_ascii=False)
         )
 
-        response = self.llm_service.generate(prompt, TaskType.ENTITY_RESOLUTION)
-        if not response.success:
-            LOGGER.error(f"LLM Evaluation failed: {response.error}")
-            return {"decision": "IGNORE", "confidence": 0.0, "reason": "LLM Error"}
-
+    def _parse_merge_response(self, response_text: str) -> Dict:
+        """Parse LLM response for merge evaluation."""
         try:
-            cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
+            cleaned_text = response_text.replace("```json", "").replace("```", "").strip()
             result = json.loads(cleaned_text)
 
             if isinstance(result, list):
@@ -242,6 +239,62 @@ class Dreamer:
         except Exception as e:
             LOGGER.error(f"LLM Evaluation parse failed: {e}")
             return {"decision": "IGNORE", "confidence": 0.0, "reason": "LLM Parse Error"}
+
+    def batch_evaluate_merges(self, pairs: List[tuple]) -> List[Dict]:
+        """
+        Evaluate multiple merge candidates in parallel using batch_generate.
+
+        Args:
+            pairs: List of (primary_node, secondary_node) tuples
+
+        Returns:
+            List of merge evaluation results in same order as input pairs
+        """
+        if not pairs:
+            return []
+
+        prompts = []
+        valid_indices = []
+
+        for i, (primary, secondary) in enumerate(pairs):
+            prompt = self._build_merge_prompt(primary, secondary)
+            if prompt:
+                prompts.append(prompt)
+                valid_indices.append(i)
+
+        if not prompts:
+            LOGGER.warning("No valid merge prompts could be built")
+            return [{"decision": "IGNORE", "confidence": 0.0, "reason": "No prompt"} for _ in pairs]
+
+        LOGGER.info(f"Running batch merge evaluation for {len(prompts)} pairs...")
+
+        responses = self.llm_service.batch_generate(prompts, TaskType.ENTITY_RESOLUTION)
+
+        # Build results list maintaining original order
+        results = [{"decision": "IGNORE", "confidence": 0.0, "reason": "No prompt"} for _ in pairs]
+
+        for idx, response in zip(valid_indices, responses):
+            if response.startswith("ERROR:"):
+                LOGGER.error(f"Merge evaluation LLM failed: {response}")
+                results[idx] = {"decision": "IGNORE", "confidence": 0.0, "reason": f"LLM error: {response}"}
+            else:
+                results[idx] = self._parse_merge_response(response)
+
+        return results
+
+    def evaluate_merge(self, primary: Dict, secondary: Dict) -> Dict:
+        """Ask LLM: Are these the same entity? Single-pair version for backwards compatibility."""
+        prompt = self._build_merge_prompt(primary, secondary)
+
+        if not prompt:
+            return {"decision": "IGNORE", "confidence": 0.0}
+
+        response = self.llm_service.generate(prompt, TaskType.ENTITY_RESOLUTION)
+        if not response.success:
+            LOGGER.error(f"LLM Evaluation failed: {response.error}")
+            return {"decision": "IGNORE", "confidence": 0.0, "reason": "LLM Error"}
+
+        return self._parse_merge_response(response.text)
 
     def prune_context(self, node_id: str):
         """Condense node_context for a node if list is too long."""
@@ -305,10 +358,20 @@ class Dreamer:
         return any(re.match(p, name, re.I) for p in patterns)
 
     def run_resolution_cycle(self, dry_run: bool = False) -> Dict[str, int]:
-        """Main loop for cognitive maintenance with causal updates."""
+        """
+        Main loop for cognitive maintenance with causal updates.
+
+        Uses batch LLM calls for parallel processing:
+        - Phase 1: Batch structural analysis for all candidates
+        - Phase 2: Batch merge evaluation for all candidate-match pairs
+        """
         candidates = self.scan_candidates()
         stats = {"merged": 0, "split": 0, "renamed": 0, "recat": 0, "deleted": 0}
         affected_units = set()
+
+        if not candidates:
+            LOGGER.info("No candidates for resolution cycle")
+            return stats
 
         thresholds = DREAMER_CONFIG.get('thresholds', {})
         THRESHOLD_DELETE = thresholds.get('delete', 0.95)
@@ -318,100 +381,124 @@ class Dreamer:
         THRESHOLD_RECATEGORIZE = thresholds.get('recategorize', 0.90)
         THRESHOLD_MERGE = thresholds.get('merge', 0.90)
 
+        # === PHASE 1: Batch Structural Analysis ===
+        LOGGER.info(f"Phase 1: Structural analysis for {len(candidates)} candidates...")
+        structural_results = self.batch_structural_analysis(candidates)
+
+        # Track which nodes to skip in merge phase (deleted/split)
+        skip_merge_ids = set()
+
         for node in candidates:
-            # 1. Structural Analysis (Split/Rename/Recat/Delete)
-            analysis = self.check_structural_changes(node)
+            node_id = node.get("id")
+            analysis = structural_results.get(node_id, {"action": "KEEP", "confidence": 0.0})
             action = analysis.get("action", "KEEP")
             conf = analysis.get("confidence", 0.0)
 
             # --- HEURISTIC GUARDS ---
             if action == "DELETE":
-                if self.graph_service.get_node_degree(node["id"]) > 0:
+                if self.graph_service.get_node_degree(node_id) > 0:
                     action = "KEEP"
                 elif conf < THRESHOLD_DELETE:
                     action = "KEEP"
 
             elif action == "RENAME":
-                is_weak = self._is_weak_name(node["id"])
+                is_weak = self._is_weak_name(node_id)
                 target_threshold = THRESHOLD_RENAME_WEAK if is_weak else THRESHOLD_RENAME_NORMAL
                 if conf < target_threshold:
                     action = "KEEP"
 
             # --- EXECUTION ---
             if action == "DELETE" and not dry_run:
-                self.graph_service.delete_node(node["id"])
-                self.vector_service.delete(node["id"])
+                self.graph_service.delete_node(node_id)
+                self.vector_service.delete(node_id)
                 stats["deleted"] += 1
-                continue
+                skip_merge_ids.add(node_id)
 
             elif action == "RENAME" and not dry_run:
                 new_name = analysis.get("new_name")
-                units = self.graph_service.get_related_unit_ids(node["id"])
-                self.graph_service.rename_node(node["id"], new_name)
+                units = self.graph_service.get_related_unit_ids(node_id)
+                self.graph_service.rename_node(node_id, new_name)
                 affected_units.update(units)
                 stats["renamed"] += 1
-                node = self.graph_service.get_node(new_name)
+                # Update node reference for merge phase
+                node["id"] = new_name
+                node.update(self.graph_service.get_node(new_name) or {})
 
             elif action == "RE-CATEGORIZE" and not dry_run:
                 if conf >= THRESHOLD_RECATEGORIZE:
                     new_type = analysis.get("new_type")
-                    # HARDFAIL: Validate edges before recategorize
-                    edges_valid, invalid_edges = self._validate_edges_for_recategorize(node["id"], new_type)
+                    edges_valid, invalid_edges = self._validate_edges_for_recategorize(node_id, new_type)
                     if not edges_valid:
                         LOGGER.warning(
-                            f"RE-CATEGORIZE blocked for {node['id']} -> {new_type}: "
+                            f"RE-CATEGORIZE blocked for {node_id} -> {new_type}: "
                             f"{len(invalid_edges)} edges would become invalid. "
                             f"Details: {invalid_edges[:3]}{'...' if len(invalid_edges) > 3 else ''}"
                         )
-                        continue  # Skip this operation (HARDFAIL)
-                    self.graph_service.recategorize_node(node["id"], new_type)
-                    affected_units.update(self.graph_service.get_related_unit_ids(node["id"]))
-                    stats["recat"] += 1
+                    else:
+                        self.graph_service.recategorize_node(node_id, new_type)
+                        affected_units.update(self.graph_service.get_related_unit_ids(node_id))
+                        stats["recat"] += 1
 
             elif action == "SPLIT" and not dry_run:
                 if conf >= THRESHOLD_SPLIT:
-                    units = self.graph_service.get_related_unit_ids(node["id"])
-                    self.graph_service.split_node(node["id"], analysis.get("split_clusters"))
+                    units = self.graph_service.get_related_unit_ids(node_id)
+                    self.graph_service.split_node(node_id, analysis.get("split_clusters"))
                     affected_units.update(units)
                     stats["split"] += 1
-                    continue
+                    skip_merge_ids.add(node_id)
 
-            # 2. Identity Resolution (Merge)
+        # === PHASE 2: Batch Merge Evaluation ===
+        # Collect all (candidate, match) pairs first
+        merge_pairs = []
+        pair_metadata = []  # Track (node, match) for each pair
+
+        for node in candidates:
+            node_id = node.get("id")
+            if node_id in skip_merge_ids:
+                continue
+
             matches = self.find_potential_matches(node)
             for match in matches:
-                merge_eval = self.evaluate_merge(match, node)
+                merge_pairs.append((match, node))
+                pair_metadata.append({"node": node, "match": match})
+
+        if merge_pairs:
+            LOGGER.info(f"Phase 2: Merge evaluation for {len(merge_pairs)} pairs...")
+            merge_results = self.batch_evaluate_merges(merge_pairs)
+
+            # Track already-merged nodes to avoid double merges
+            merged_nodes = set()
+
+            for meta, merge_eval in zip(pair_metadata, merge_results):
+                node = meta["node"]
+                match = meta["match"]
+                node_id = node.get("id")
+
+                if node_id in merged_nodes:
+                    continue
+
                 if merge_eval.get("decision") == "MERGE" and merge_eval.get("confidence", 0) >= THRESHOLD_MERGE:
                     if not dry_run:
-                        units = self.graph_service.get_related_unit_ids(node["id"])
-                        self.graph_service.merge_nodes(match["id"], node["id"])
+                        units = self.graph_service.get_related_unit_ids(node_id)
+                        self.graph_service.merge_nodes(match["id"], node_id)
                         affected_units.update(units)
-                        # Prune context on target node after merge (may have grown large)
                         self.prune_context(match["id"])
                     stats["merged"] += 1
-                    break
+                    merged_nodes.add(node_id)
 
-        # 3. Causal Semantic Update
+        # === PHASE 3: Causal Semantic Update ===
         if affected_units and not dry_run:
-            LOGGER.info(f"Triggering semantic update for {len(affected_units)} files...")
+            LOGGER.info(f"Phase 3: Semantic update for {len(affected_units)} files...")
             self.propagate_changes(list(affected_units))
 
         return stats
 
-    def check_structural_changes(self, node: Dict) -> Dict:
-        """
-        Call LLM to analyze if node requires structural changes.
-
-        Actions:
-        - KEEP: No change needed
-        - DELETE: Node is noise and should be removed
-        - RENAME: Node has weak name, change to suggested name
-        - SPLIT: Node contains multiple distinct entities
-        - RE-CATEGORIZE: Node type doesn't match content
-        """
+    def _build_structural_prompt(self, node: Dict) -> str:
+        """Build prompt for structural analysis. Returns empty string if node has no context."""
         context_list = node.get("properties", {}).get("node_context", [])
 
         if not context_list:
-            return {"action": "KEEP", "confidence": 1.0, "reason": "No context available for analysis"}
+            return ""
 
         formatted_context = ""
         for i, ctx in enumerate(context_list[:40]):
@@ -422,10 +509,10 @@ class Dreamer:
         prompt_template = self.prompts.get("structural_analysis", "")
         if not prompt_template:
             LOGGER.error("Missing structural_analysis prompt in config")
-            return {"action": "KEEP", "confidence": 0.0}
+            return ""
 
         node_type = node.get("type", "Unknown")
-        prompt = prompt_template.format(
+        return prompt_template.format(
             id=node.get("id"),
             type=node_type,
             node_type_description=self._get_node_type_description(node_type),
@@ -433,13 +520,10 @@ class Dreamer:
             taxonomy_nodes="Person, Project, Organization, Group, Event, Roles, Business_relation"
         )
 
-        response = self.llm_service.generate(prompt, TaskType.STRUCTURAL_ANALYSIS)
-        if not response.success:
-            LOGGER.error(f"Structural analysis LLM failed for {node.get('id')}: {response.error}")
-            return {"action": "KEEP", "confidence": 0.0, "reason": f"LLM error: {response.error}"}
-
+    def _parse_structural_response(self, response_text: str, node_id: str) -> Dict:
+        """Parse LLM response for structural analysis."""
         try:
-            cleaned_json = response.text.replace("```json", "").replace("```", "").strip()
+            cleaned_json = response_text.replace("```json", "").replace("```", "").strip()
             result = json.loads(cleaned_json)
 
             if "action" not in result:
@@ -450,8 +534,72 @@ class Dreamer:
             return result
 
         except Exception as e:
-            LOGGER.error(f"Structural analysis parse failed for {node.get('id')}: {e}")
+            LOGGER.error(f"Structural analysis parse failed for {node_id}: {e}")
             return {"action": "KEEP", "confidence": 0.0, "reason": f"Parse error: {str(e)}"}
+
+    def batch_structural_analysis(self, nodes: List[Dict]) -> Dict[str, Dict]:
+        """
+        Run structural analysis for multiple nodes in parallel using batch_generate.
+
+        Returns:
+            Dict mapping node_id -> analysis result
+        """
+        # Build prompts for nodes that have context
+        prompts = []
+        node_ids = []
+        skip_results = {}
+
+        for node in nodes:
+            node_id = node.get("id", "unknown")
+            prompt = self._build_structural_prompt(node)
+
+            if not prompt:
+                skip_results[node_id] = {"action": "KEEP", "confidence": 1.0, "reason": "No context available"}
+            else:
+                prompts.append(prompt)
+                node_ids.append(node_id)
+
+        if not prompts:
+            LOGGER.info("No nodes with context for structural analysis")
+            return skip_results
+
+        LOGGER.info(f"Running batch structural analysis for {len(prompts)} nodes...")
+
+        responses = self.llm_service.batch_generate(prompts, TaskType.STRUCTURAL_ANALYSIS)
+
+        results = dict(skip_results)
+        for node_id, response in zip(node_ids, responses):
+            if response.startswith("ERROR:"):
+                LOGGER.error(f"Structural analysis LLM failed for {node_id}: {response}")
+                results[node_id] = {"action": "KEEP", "confidence": 0.0, "reason": f"LLM error: {response}"}
+            else:
+                results[node_id] = self._parse_structural_response(response, node_id)
+
+        return results
+
+    def check_structural_changes(self, node: Dict) -> Dict:
+        """
+        Call LLM to analyze if node requires structural changes.
+        Single-node version for backwards compatibility.
+
+        Actions:
+        - KEEP: No change needed
+        - DELETE: Node is noise and should be removed
+        - RENAME: Node has weak name, change to suggested name
+        - SPLIT: Node contains multiple distinct entities
+        - RE-CATEGORIZE: Node type doesn't match content
+        """
+        prompt = self._build_structural_prompt(node)
+
+        if not prompt:
+            return {"action": "KEEP", "confidence": 1.0, "reason": "No context available for analysis"}
+
+        response = self.llm_service.generate(prompt, TaskType.STRUCTURAL_ANALYSIS)
+        if not response.success:
+            LOGGER.error(f"Structural analysis LLM failed for {node.get('id')}: {response.error}")
+            return {"action": "KEEP", "confidence": 0.0, "reason": f"LLM error: {response.error}"}
+
+        return self._parse_structural_response(response.text, node.get("id", "unknown"))
 
     def propagate_changes(self, unit_ids: List[str]) -> int:
         """
