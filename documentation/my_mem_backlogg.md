@@ -292,6 +292,15 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
       | `processa_dokument()` | `process_document()` | ✅ |
       | `processa_mediafil()` | `process_audio()` | ✅ |
       | `ladda_yaml()` | `load_yaml()` | ✅ |
+    * *Genomförda steg:*
+      1. ✅ Skapa `services/engines/` katalog
+      2. ✅ Bryt ut `extract_text()` → `processors/text_extractor.py`
+      3. ✅ Flytta + byt namn: `doc_converter.py` → `engines/ingestion_engine.py`
+      4. ✅ Flytta: `dreamer.py` → `engines/dreamer.py`
+      5. ✅ Byt namn: `file_retriever.py` → `file_collector.py`
+      6. ✅ Byt klassnamn: `GraphStore` → `GraphService`, `LakeEditor` → `LakeService`, `EntityResolver` → `Dreamer`
+      7. ✅ Byt funktionsnamn: svenska → engelska
+      8. ✅ Konsolidera LLM-anrop till `LLMService`
     * *LLM-KONSOLIDERING (KLAR 2026-01-17):*
       Alla LLM-anrop går nu genom `services/utils/llm_service.py`:
       | Fil | Metod |

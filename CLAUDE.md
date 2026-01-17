@@ -175,8 +175,9 @@ Fråga innan radering/omskrivning av:
 config/my_mem_config.yaml
 config/graph_schema_template.json
 services/utils/graph_service.py
-services/processors/doc_converter.py
-services/agents/dreamer.py
+services/utils/llm_service.py
+services/engines/ingestion_engine.py
+services/engines/dreamer.py
 ```
 
 ### 11. Arbeta i Main - Aldrig i Worktrees
@@ -190,6 +191,13 @@ services/agents/dreamer.py
   - `documentation/my_mem_backlogg.md` - när objekt löses eller läggs till
   - `documentation/my_mem_koncept_logg.md` - vid arkitekturbeslut
 - Historik går förlorad om commits skjuts upp
+
+### 13. Backlogg-uppdateringar
+- **TA ALDRIG BORT information** från backloggen - lägg till, uppdatera status, markera som klar
+- När ett objekt är klart: behåll all befintlig text, lägg till status (✅) och datum
+- Ändra rubriker från "att göra" till "KLAR" med datum, t.ex. `(att göra)` → `(KLAR 2026-01-17)`
+- Lägg till nya sektioner för tillkommande arbete, ta inte bort planerade steg
+- Backloggen är projektets historik - den ska växa, inte krympa
 
 ## Felsökning & Loggar
 
