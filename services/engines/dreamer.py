@@ -274,11 +274,11 @@ class Dreamer:
         results = [{"decision": "IGNORE", "confidence": 0.0, "reason": "No prompt"} for _ in pairs]
 
         for idx, response in zip(valid_indices, responses):
-            if response.startswith("ERROR:"):
-                LOGGER.error(f"Merge evaluation LLM failed: {response}")
-                results[idx] = {"decision": "IGNORE", "confidence": 0.0, "reason": f"LLM error: {response}"}
+            if not response.success:
+                LOGGER.error(f"Merge evaluation LLM failed: {response.error}")
+                results[idx] = {"decision": "IGNORE", "confidence": 0.0, "reason": f"LLM error: {response.error}"}
             else:
-                results[idx] = self._parse_merge_response(response)
+                results[idx] = self._parse_merge_response(response.text)
 
         return results
 
@@ -569,11 +569,11 @@ class Dreamer:
 
         results = dict(skip_results)
         for node_id, response in zip(node_ids, responses):
-            if response.startswith("ERROR:"):
-                LOGGER.error(f"Structural analysis LLM failed for {node_id}: {response}")
-                results[node_id] = {"action": "KEEP", "confidence": 0.0, "reason": f"LLM error: {response}"}
+            if not response.success:
+                LOGGER.error(f"Structural analysis LLM failed for {node_id}: {response.error}")
+                results[node_id] = {"action": "KEEP", "confidence": 0.0, "reason": f"LLM error: {response.error}"}
             else:
-                results[node_id] = self._parse_structural_response(response, node_id)
+                results[node_id] = self._parse_structural_response(response.text, node_id)
 
         return results
 
