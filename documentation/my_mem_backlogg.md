@@ -205,7 +205,7 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
     * *Se:* Konflikt 61 i `my_mem_koncept_logg.md`
 
 * **OBJEKT-67 (PÅGÅENDE):** Implementera **Dream Directives** - Observational Learning för Dreamer.
-    * *Status:* Grundarbete klart 2026-01-17. Arkitekturanalys pågår.
+    * *Status:* Grundarbete klart 2026-01-17. POC-verktyg utökat 2026-01-17.
     * *Klart:*
         - Unified ingestion pipeline (DocConverter → Lake → Vector → Graf i ett flöde)
         - Borttagen `vector_indexer.py` (redundant)
@@ -215,14 +215,19 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
         - `validate_rules.py` skärpt: fångar `except Exception` med logging men utan raise
         - `node_context` prompt uppdaterad för kortare, entitets-fokuserade beskrivningar
         - ~~`structural_analysis` prompt saknas~~ KORRIGERING: Prompten finns (rad 162-190 i services_prompts.yaml)
+        - **POC: Schema-beskrivningar injiceras i structural_analysis** - LLM får nu nodtyp-definitioner från schemat för bättre RE-CATEGORIZE/DELETE-beslut
+        - **POC: Kant-validering vid RE-CATEGORIZE** - Använder `SchemaValidator.validate_edge()` för att logga vilka relationer som blir ogiltiga vid typbyte
+        - **POC: Context-pruning simulering vid MERGE** - Visar hur `node_context` skulle reduceras efter merge (triggas vid 15+ entries)
     * *Kvarstår:*
-        - **ARKITEKTURFRÅGA:** Se OBJEKT-68 nedan - behöver avgöras innan implementation fortsätter
+        - **PRODUKTIONSFIX:** `recategorize_node()` i graph_service.py validerar inte kanter efter typbyte - bör använda SchemaValidator
+        - **PRODUKTIONSFIX:** `merge_nodes()` anropar inte `prune_context()` efteråt - node_context kan växa ohämmat
         - MCP Tools: `report_observation()`, `get_pending_dreams()`, `confirm_dream()`
         - dream_candidates tabell i GraphStore
         - User confirmation workflow
     * *Koncept:* MCP-klienten (Claude Desktop) observerar brus under arbete och förbereder "dreams" för användarbekräftelse.
     * *Operationer:* MERGE, SPLIT, RENAME, DELETE, RECATEGORIZE
     * *Relation:* Bygger på OBJEKT-61 (trigger-mekanism) och kompletterar OBJEKT-66 (entity resolution)
+    * *POC-verktyg:* `tools/tool_dreamer_dryrun.py` - teknisk ritning för produktionsimplementation
 
 * **OBJEKT-68 (PÅGÅENDE):** Arkitekturanalys - **Kunskapsflödets Helhet**.
     * *Bakgrund:* Innan vi lägger till fler komponenter (Dream Directives, MCP-verktyg) behöver vi förstå helheten.

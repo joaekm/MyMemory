@@ -161,20 +161,24 @@ dreamer:
 
   structural_analysis: |
     ANALYSERA om denna nod bör delas (SPLIT), döpas om (RENAME), kategoriseras om (RE-CATEGORIZE) eller raderas (DELETE).
-    
+
     NOD: {id} ({type})
+
+    SCHEMA-REGEL FÖR "{type}":
+    {node_type_description}
+
     KONTEXT (node_context med spårbarhet):
     {context_list}
-    
+
     TILLÅTNA TYPER (från taxonomi):
     {taxonomy_nodes}
-    
+
     KRITERIER:
     - SPLIT: Om kontexten innehåller distinkt olika kluster (t.ex. olika personer med samma namn, eller ett ord som betyder två helt olika saker).
     - RENAME: Om ID:t är svagt (UUID, "Talare 1", "Fil_X") men kontexten innehåller ett tydligt egennamn.
-    - RE-CATEGORIZE: Om kontexten visar att nodtypen är felaktig (t.ex. en "Person" som beskrivs som ett "Projekt").
-    - DELETE: Om noden är brus (stoppord, verb, meningslös text) eller saknar substans.
-    - KEEP: Om noden är stabil och korrekt.
+    - RE-CATEGORIZE: Om kontexten BRYTER mot SCHEMA-REGELN ovan (t.ex. tekniska moduler som felaktigt klassats som "Project").
+    - DELETE: Om noden är brus (stoppord, verb, meningslös text), saknar substans, eller bryter mot schema-regeln utan möjlig omkategorisering.
+    - KEEP: Om noden är stabil och korrekt enligt schema-regeln.
     
     BEDÖMNING:
     Ange 'confidence' (0.0 - 1.0). Var konservativ. 1.0 = Helt säker. 0.5 = Gissning.
@@ -233,8 +237,8 @@ entity_resolver:
     
     BEDÖMNING:
     Returnera en JSON med:
-    - "decision": "MERGE" (om det är samma), "IGNORE" (om olika/osäkert), "REVIEW" (om troligt men kräver människa).
-    - "confidence": 0.0 - 1.0
+    - "decision": "MERGE" (om det är samma entitet), "IGNORE" (om olika eller osäkert).
+    - "confidence": 0.0 - 1.0 (för MERGE, måste vara >= 0.9 för att godkännas)
     - "reason": Kort förklaring.
 
     RETURNERA ENDAST JSON:
