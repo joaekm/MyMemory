@@ -203,9 +203,9 @@ class PropertyChainTest:
         self.log_info("Steg 2: Kör DocConverter...")
 
         try:
-            from services.processors.doc_converter import processa_dokument
+            from services.engines.ingestion_engine import process_document
 
-            processa_dokument(self.asset_path, self.test_filename)
+            process_document(self.asset_path, self.test_filename)
             self.log_pass("STEP2", "DocConverter körde utan fel")
             return True
         except Exception as e:
@@ -358,7 +358,7 @@ class PropertyChainTest:
         self.log_info("Steg 6: Kör Dreamer (graf-förädling)...")
 
         try:
-            from services.agents.dreamer import run_dreamer_cycle
+            from services.engines.dreamer import run_dreamer_cycle
 
             # Kör en Dreamer-cykel
             run_dreamer_cycle(max_nodes=10)

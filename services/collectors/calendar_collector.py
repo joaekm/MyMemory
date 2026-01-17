@@ -20,7 +20,7 @@ import zoneinfo
 from pathlib import Path
 
 # --- CONFIG ---
-def ladda_yaml(filnamn, strict=True):
+def load_yaml(filnamn, strict=True):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
         os.path.join(script_dir, '..', '..', 'config', filnamn),
@@ -37,7 +37,7 @@ def ladda_yaml(filnamn, strict=True):
     return {}
 
 
-CONFIG = ladda_yaml('my_mem_config.yaml', strict=True)
+CONFIG = load_yaml('my_mem_config.yaml', strict=True)
 
 TZ_NAME = CONFIG.get('system', {}).get('timezone', 'UTC')
 try:

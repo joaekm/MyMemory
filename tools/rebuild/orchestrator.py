@@ -44,7 +44,7 @@ class RebuildOrchestrator:
         try:
             from services.utils.graph_service import GraphService
             from services.utils.vector_service import VectorService
-            from services.agents.dreamer import Dreamer
+            from services.engines.dreamer import Dreamer
 
             # Ladda paths från config
             graph_path = os.path.expanduser(self.config['paths']['graph_db'])

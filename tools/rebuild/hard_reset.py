@@ -26,7 +26,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 # --- CONFIG ---
-def ladda_yaml(filnamn):
+def load_yaml(filnamn):
     """Ladda YAML-config från config-mappen."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(os.path.dirname(script_dir))
@@ -39,7 +39,7 @@ def ladda_yaml(filnamn):
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
-CONFIG = ladda_yaml('my_mem_config.yaml')
+CONFIG = load_yaml('my_mem_config.yaml')
 
 LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 TRANSCRIPTS_FOLDER = os.path.expanduser(CONFIG['paths']['asset_transcripts'])

@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.WARNING, format='%(levelname)s - %(message)s')
 LOGGER = logging.getLogger('SystemValidator')
 
 # --- CONFIG LOADER ---
-def ladda_yaml(filnamn):
+def load_yaml(filnamn):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
         os.path.join(script_dir, 'config', filnamn),
@@ -26,7 +26,7 @@ def ladda_yaml(filnamn):
     print(f"[FEL] Saknar {filnamn}")
     exit(1)
 
-CONFIG = ladda_yaml('my_mem_config.yaml')
+CONFIG = load_yaml('my_mem_config.yaml')
 
 LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 ASSET_STORE = os.path.expanduser(CONFIG['paths']['asset_store'])

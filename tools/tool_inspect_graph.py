@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from services.utils.graph_service import GraphService
 
 # --- CONFIG ---
-def ladda_yaml(filnamn):
+def load_yaml(filnamn):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
         os.path.join(script_dir, 'config', filnamn),
@@ -24,11 +24,11 @@ def ladda_yaml(filnamn):
     print(f"[FEL] Saknar {filnamn}")
     sys.exit(1)
 
-CONFIG = ladda_yaml('my_mem_config.yaml')
+CONFIG = load_yaml('my_mem_config.yaml')
 GRAPH_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
 
 
-def inspektera_graf():
+def inspect_graph():
     """Visa översikt av grafen."""
     if not os.path.exists(GRAPH_PATH):
         print(f"❌ Graf-databas finns inte: {GRAPH_PATH}")
@@ -73,7 +73,7 @@ def inspektera_graf():
         raise
 
 
-def inspektera_nod(node_id: str):
+def inspect_node(node_id: str):
     """Inspektera en specifik nod."""
     if not os.path.exists(GRAPH_PATH):
         print(f"❌ Graf-databas finns inte: {GRAPH_PATH}")
@@ -132,7 +132,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         # Inspektera specifik nod
         node_id = sys.argv[1]
-        inspektera_nod(node_id)
+        inspect_node(node_id)
     else:
         # Visa översikt
-        inspektera_graf()
+        inspect_graph()

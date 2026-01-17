@@ -29,7 +29,7 @@ from services.utils.date_service import get_timestamp
 from services.utils.graph_service import GraphService
 
 # --- CONFIG LOADER ---
-def ladda_yaml(filnamn, strict=True):
+def load_yaml(filnamn, strict=True):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paths = [
         os.path.join(script_dir, '..', '..', 'config', filnamn),
@@ -44,8 +44,8 @@ def ladda_yaml(filnamn, strict=True):
         exit(1)
     return {}
 
-CONFIG = ladda_yaml('my_mem_config.yaml', strict=True)
-PROMPTS = ladda_yaml('services_prompts.yaml', strict=True)
+CONFIG = load_yaml('my_mem_config.yaml', strict=True)
+PROMPTS = load_yaml('services_prompts.yaml', strict=True)
 
 # --- TIDSZON ---
 TZ_NAME = CONFIG.get('system', {}).get('timezone', 'UTC')
@@ -246,7 +246,7 @@ def stada_och_parsa_json(text_response):
         LOGGER.error(f"JSON Parse Fail: {text_response[:100]}...")
         raise ValueError(f"Kunde inte parsa JSON: {e}")
 
-def skapa_rich_header(filnamn, skapelsedatum, audio_duration_sec, model, data, unit_id=None):
+def create_rich_header(filnamn, skapelsedatum, audio_duration_sec, model, data, unit_id=None):
     """
     Skapar den nya, utökade headern för transkriberingsfiler.
     """
@@ -369,7 +369,7 @@ def _do_analysis(transcript, model, kort_namn, safety_settings, context_string="
 
 # --- MAIN WORKER ---
 
-def processa_mediafil(filväg, filnamn):
+def process_audio(filväg, filnamn):
     MODEL_FAST = MODELS.get('model_fast')
     MODEL_SMART = MODELS.get('model_pro')
     
@@ -443,7 +443,7 @@ def processa_mediafil(filväg, filnamn):
                 final_text = final_text.replace(generic_label, real_name)
             _log("🏷️", f"{kort_namn} → Mappade {len(speaker_map)} talare")
 
-        header = skapa_rich_header(filnamn, timestamp, dur, MODEL_SMART, result, unit_id)
+        header = create_rich_header(filnamn, timestamp, dur, MODEL_SMART, result, unit_id)
         
         with open(txt_fil, 'w', encoding='utf-8') as f:
             f.write(header + final_text)
@@ -463,7 +463,7 @@ class AudioHandler(FileSystemEventHandler):
         fname = os.path.basename(event.src_path)
         if os.path.splitext(fname)[1].lower() in MEDIA_EXTENSIONS:
             if UUID_SUFFIX_PATTERN.search(os.path.splitext(fname)[0]):
-                EXECUTOR.submit(processa_mediafil, event.src_path, fname)
+                EXECUTOR.submit(process_audio, event.src_path, fname)
 
 if __name__ == "__main__":
     pending = 0
@@ -474,7 +474,7 @@ if __name__ == "__main__":
                     base = os.path.splitext(f)[0]
                     if not os.path.exists(os.path.join(TRANSCRIPTS_FOLDER, f"{base}.txt")):
                         pending += 1
-                        EXECUTOR.submit(processa_mediafil, os.path.join(RECORDINGS_FOLDER, f), f)
+                        EXECUTOR.submit(process_audio, os.path.join(RECORDINGS_FOLDER, f), f)
     
     print(f"{_ts()} ✓ Transcriber v10 (Berikad+Header) online ({pending} pending)")
     
