@@ -227,13 +227,11 @@ Dreamer är den "sovande" intelligensen som analyserar hela kunskapsbasen och op
 - ✅ `search_graph_nodes` söker i hela properties JSON
 - ✅ Dreamer dryrun använder `batch_generate()` för parallella LLM-anrop
 - ✅ `validate_rules.py` skärpt
-- ✅ POC: Schema-beskrivningar injiceras i `structural_analysis`
-- ✅ POC: Kant-validering vid RE-CATEGORIZE
-- ✅ POC: Context-pruning simulering vid MERGE
+- ✅ POC → PROD: Schema-beskrivningar injiceras i `structural_analysis` (`dreamer.py:_get_node_type_description()`)
+- ✅ POC → PROD: Kant-validering vid RE-CATEGORIZE (`dreamer.py:_validate_edges_for_recategorize()`)
+- ✅ POC → PROD: Context-pruning efter MERGE (`dreamer.py:run_resolution_cycle()` anropar `prune_context()`)
 
 **Kvarstår:**
-- [ ] **PRODUKTIONSFIX:** `recategorize_node()` validerar inte kanter efter typbyte
-- [ ] **PRODUKTIONSFIX:** `merge_nodes()` anropar inte `prune_context()` efteråt
 - [ ] MCP Tools: `report_observation()`, `get_pending_dreams()`, `confirm_dream()`
 - [ ] `dream_candidates` tabell i GraphStore
 - [ ] User confirmation workflow
