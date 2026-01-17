@@ -159,8 +159,20 @@ edges(source TEXT, target TEXT, edge_type TEXT, properties TEXT)
 - `TaskType.ENTITY_RESOLUTION` - för merge/split-beslut
 - `TaskType.STRUCTURAL_ANALYSIS` - för strukturell optimering
 
-### Trigger
-Just nu endast vid rebuild. Designfråga att lösa (OBJEKT-61).
+### Trigger (OBJEKT-76)
+Dreamer triggas automatiskt av `dreamer_daemon.py` baserat på:
+1. **Threshold:** När ~15 nya graf-noder skapats (konfigurerbart)
+2. **Fallback:** Max 24h sedan senaste körning
+
+Daemon pollar en JSON-räknarfil (`~/MyMemory/Index/.dreamer_state.json`) som uppdateras av Ingestion Engine vid varje graf-skrivning. Körs via launchd på macOS.
+
+```bash
+# Kolla status
+python services/engines/dreamer_daemon.py --status
+
+# Kör manuellt
+python services/engines/dreamer_daemon.py --once
+```
 
 ## 7. LLMService - Central LLM-hantering
 
@@ -232,6 +244,7 @@ services/
 │   └── file_retriever.py        # DropZone → Assets
 ├── engines/                   # Centrala motorer
 │   ├── dreamer.py               # Fas 3: Batch-förädling
+│   ├── dreamer_daemon.py        # Threshold-trigger för Dreamer (OBJEKT-76)
 │   └── ingestion_engine.py      # Fas 2: Dokument-bearbetning
 ├── indexers/                  # Indexering
 │   └── vector_indexer.py        # Lake → ChromaDB
@@ -250,7 +263,8 @@ services/
 - **Datakvalitet:** ~75% klar. Property chain validerad.
 - **MCP-server:** 11 verktyg. Alfa-status. Används med Claude Desktop.
 - **OBJEKT-68:** ✅ Komplett. Tre-fas pipeline, LLM-konsolidering.
-- **Kvarstående:** Dreamer-trigger (OBJEKT-61), Extractor+Critic POC.
+- **OBJEKT-76:** ✅ Komplett. Dreamer-daemon med threshold-trigger.
+- **Kvarstående:** Extractor+Critic POC.
 
 ---
 *Senast uppdaterad: 2026-01-17*
