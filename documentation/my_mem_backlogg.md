@@ -238,6 +238,43 @@ Dreamer är den "sovande" intelligensen som analyserar hela kunskapsbasen och op
 - [ ] `dream_candidates` tabell i GraphStore
 - [ ] User confirmation workflow
 
+#### OBJEKT-70: Relation Discovery & Metadata Enrichment (NY)
+*Status:* EJ PÅBÖRJAD
+*Problem:* Dreamer städar grafen (MERGE/SPLIT/DELETE) men upptäcker inte NYA relationer eller berikar metadata på befintliga noder.
+
+*Nuläge:*
+- `run_resolution_cycle()` hanterar: MERGE, SPLIT, RENAME, DELETE, RE-CATEGORIZE
+- `propagate_changes()` uppdaterar Lake-filer som påverkats av ändringar
+- **Saknas:** Aktiv upptäckt av relationer som BORDE finnas men inte skapades vid ingestion
+
+*Exempel på vad som saknas:*
+1. **Implicit Relation Discovery:**
+   - Person A och Person B nämns i samma dokument 5 gånger → borde ha `WORKS_WITH` relation
+   - Projekt X nämns tillsammans med Organisation Y i 3 dokument → borde ha `OWNED_BY` relation
+2. **Metadata Enrichment:**
+   - Nod har `node_context` från 10 dokument men saknar `context_keywords` → LLM kan extrahera
+   - Person har många mentions men saknar `role` property → kan infereras från kontext
+3. **Cross-Document Inference:**
+   - Dokument A säger "Joakim leder projektet", Dokument B säger "Projektledare: J. Ekman" → koppla
+
+*Förslag på implementation:*
+```
+discover_relations():
+    1. Hitta nod-par som ofta co-förekommer (via node_context.origin)
+    2. Fråga LLM: "Finns implicit relation mellan A och B?"
+    3. Om ja: skapa edge med låg confidence (0.6)
+    4. Dreamer kan höja confidence vid nästa körning om mönstret bekräftas
+
+enrich_metadata():
+    1. Hitta noder med rik node_context men fattig metadata
+    2. Fråga LLM: "Extrahera role, keywords, etc. från kontext"
+    3. Uppdatera nod-properties
+```
+
+*Relation till andra objekt:*
+- Bygger på OBJEKT-67 (Dream Directives) - nya relationer kan vara "dreams" för bekräftelse
+- Kompletterar OBJEKT-66 (Extractor + Critic) - fångar vad som missades vid ingestion
+
 ---
 
 ### EPIC-01 Steg 4: Trigger & Scheduling (EJ PÅBÖRJAD)
