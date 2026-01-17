@@ -13,7 +13,7 @@ original_binary_ref: null
 
 # Projekt-Backlog
 
-Detta dokument spårar vårt aktiva arbete. Uppdaterad 2026-01-14.
+Detta dokument spårar vårt aktiva arbete. Uppdaterad 2026-01-15.
 
 ## Statusförklaring
 
@@ -106,20 +106,33 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
 
 ### Prio 1 - Datakvalitet
 
-* **OBJEKT-65 (POC):** **Extractor + Critic Pattern** för entity-extraktion.
-    * *Problem:* LLM:en skapar för många och för generösa entiteter. Projekt, Personer och Roller tolkas frikostigt.
-    * *Hypotes:* Två LLM-anrop i dialog - Extractor föreslår, Critic ifrågasätter och filtrerar.
-    * *POC-scope:*
-        - Analysera nuvarande output (kvantifiera "noise")
-        - Designa Critic-prompt med specifika filtreringsfrågor
-        - Testa på 2-3 dokument: nuvarande pipeline vs med Critic
-        - Mäta: antal entiteter före/efter, precision, recall
-    * *Critic-frågor (utkast):*
-        - "Är detta ett konkret projekt med tydligt mål och avgränsning?"
-        - "Är denna person en faktisk identifierbar individ?"
-        - "Är denna roll en formell position eller bara en beskrivning?"
-    * *Påverkan:* `services/processors/doc_converter.py`, `config/services_prompts.yaml`
-    * *Mål:* Bekräfta att team-approach är en farbar väg innan full implementation.
+* **OBJEKT-65 (LÖST - POC):** **Extractor + Critic Pattern** för entity-extraktion.
+    * *Status:* POC genomförd 2026-01-15. Resultat positiva.
+    * *Testresultat:* Se `tools/test_results/poc_extractor_critic_2026-01-15.md`
+    * *Sammanfattning:*
+        - 72% färre nya noder (47 → 13) - undviker dubbletter
+        - 40% brusreduktion via Critic
+        - 0 missade normaliseringar (baseline hade 3)
+        - 20% rikare metadata i summaries
+    * *Slutsats:* POC bekräftar att Extractor + Critic + canonical_name-injection fungerar.
+    * *Nästa steg:* Se OBJEKT-66 för implementation.
+
+* **OBJEKT-66 (AKTIV):** Implementera **Extractor + Critic Pipeline** i produktion.
+    * *Bakgrund:* POC (OBJEKT-65) visade tydliga förbättringar. Redo för implementation.
+    * *Scope:*
+        1. Låta `EntityGatekeeper.resolve_entity()` returnera `canonical_name` vid LINK
+        2. Flytta semantic metadata-generering till EFTER extraktion i `doc_converter.py`
+        3. Injicera kanoniska namn i prompten för `relations_summary`
+        4. Implementera Critic-steget mellan Extractor och Gatekeeper
+    * *Påverkan:*
+        - `services/processors/doc_converter.py` (pipeline-ordning)
+        - `services/utils/entity_gatekeeper.py` (canonical_name-retur)
+        - `config/services_prompts.yaml` (ny Critic-prompt, uppdaterad semantic-prompt)
+    * *Förväntad effekt:*
+        - Färre dubbletter i grafen
+        - Konsistenta namn i Lake metadata
+        - Renare graf med mindre brus
+    * *POC-referens:* `tools/poc_extractor_critic.py`, `tools/test_results/poc_extractor_critic_2026-01-15.md`
 
 * **OBJEKT-62 (PÅGÅENDE):** Fixa **Transcription Truncation**.
     * *Problem:* Långa transkriptioner trunkeras i Lake-filer.
@@ -170,10 +183,32 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
         - `tool_validate_system.py`: Använder nu `VectorService`
         - `export_graph_to_obsidian.py`: Använder nu relativa sökvägar
 
-* **OBJEKT-61 (AKTIV - NY):** Designa **Dreamer Trigger-mekanism**.
+* **OBJEKT-61 (AKTIV):** Designa **Dreamer Trigger-mekanism**.
     * *Problem:* Dreamer körs bara vid rebuild. Grafen blir "smutsig" mellan.
     * *Alternativ:* Schema (nattlig), Watchdog, Threshold, On-demand via MCP.
     * *Se:* Konflikt 61 i `my_mem_koncept_logg.md`
+
+* **OBJEKT-67 (AKTIV):** Implementera **Dream Directives** - Observational Learning för Dreamer.
+    * *Koncept:* MCP-klienten (Claude Desktop) observerar brus under arbete och förbereder "dreams" för användarbekräftelse.
+    * *Flöde:*
+        1. Claude noterar potentiella dubbletter/brus vid MCP-sökningar
+        2. `report_observation()` sparar som dream_candidate med full node_context
+        3. `get_pending_dreams()` returnerar väntande dreams med kontext för presentation
+        4. Claude presenterar för användaren: "Är 'Joakim Ekman' och 'Joakim' samma person?" + beviskedja
+        5. `confirm_dream()` med user confirmation → Dreamer verkställer operation
+    * *Kritiskt:* Användaren behöver se **node_context** (beviskedjan) för att fatta beslut - inte bara namn!
+    * *MCP Tools (nya):*
+        - `report_observation(node_ids, observation_type, confidence, evidence)`
+        - `get_pending_dreams(limit, include_context=True)`
+        - `confirm_dream(candidate_id, user_confirmation, user_context)`
+    * *Operationer:* MERGE, SPLIT, RENAME, DELETE, RECATEGORIZE
+    * *Confidence Boosting:* User confirmation (+0.20), multiple observations (+0.05/st)
+    * *Validering:* 15 identifierade fall i produktionsgrafen (7 tydliga dubbletter, 5 troliga, 2 brus, 1 låg konfidens)
+    * *Påverkan:*
+        - `services/utils/graph_service.py` (ny tabell: dream_candidates)
+        - `services/agents/index_search_mcp.py` (nya MCP-tools)
+        - `services/agents/dreamer.py` (execute confirmed dreams)
+    * *Relation:* Bygger på OBJEKT-61 (trigger-mekanism) och kompletterar OBJEKT-66 (entity resolution)
 
 ---
 
@@ -199,5 +234,5 @@ Dessa objekt är fortfarande potentiellt relevanta men inte prioriterade.
 
 ---
 
-*Senast uppdaterad: 2026-01-15*
+*Senast uppdaterad: 2026-01-16*
 *Se `my_mem_koncept_logg.md` för resonemang bakom beslut.*

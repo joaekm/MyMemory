@@ -23,7 +23,7 @@ SERVICES = [
     # {"path": "services/collectors/file_retriever.py", "name": "File Retriever"}, # Inte behövs vid rebuild
     {"path": "services/processors/transcriber.py", "name": "Transcriber"},
     {"path": "services/processors/doc_converter.py", "name": "Doc Converter"},
-    {"path": "services/indexers/vector_indexer.py", "name": "Vector Indexer"},
+    # vector_indexer borttagen - vektor-skrivning sker nu i DocConverter
 ]
 
 def _log(msg):

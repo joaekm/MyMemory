@@ -38,6 +38,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 class MCPSearchTest:
     """Testar alla MCP-verktyg i index_search_mcp.py"""
 
+    # Felmarkörer som indikerar misslyckad operation
+    ERROR_MARKERS = ["FEL:", "Error:", "misslyckades", "HARDFAIL", "Exception", "Traceback"]
+
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
         self.results = {}
@@ -52,6 +55,13 @@ class MCPSearchTest:
         except ImportError as e:
             print(f"HARDFAIL: Kunde inte importera index_search_mcp: {e}")
             sys.exit(1)
+
+    def _contains_error(self, result: str) -> bool:
+        """Kontrollerar om resultatet innehåller felmarkörer."""
+        for marker in self.ERROR_MARKERS:
+            if marker in result:
+                return True
+        return False
 
     def log_info(self, msg: str):
         if self.verbose:
@@ -77,8 +87,11 @@ class MCPSearchTest:
             result = self.mcp.search_graph_nodes("Joakim")
             self.log_info(f"Resultat (Joakim): {result[:100]}...")
 
-            if "GRAF" in result or "träffar" in result.lower() or "inga" in result.lower():
-                self.log_pass("graph_basic", "Funktionen returnerar korrekt format")
+            if self._contains_error(result):
+                self.log_fail("graph_basic", f"Sökning returnerade fel: {result[:150]}")
+                return False
+            elif "GRAF" in result:
+                self.log_pass("graph_basic", "Sökning lyckades utan fel")
             else:
                 self.log_fail("graph_basic", f"Oväntat resultat: {result[:100]}")
                 return False
@@ -87,19 +100,22 @@ class MCPSearchTest:
             result_typed = self.mcp.search_graph_nodes("test", node_type="Person")
             self.log_info(f"Resultat (typ-filtrerad): {result_typed[:100]}...")
 
-            if "GRAF" in result_typed or "inga" in result_typed.lower():
-                self.log_pass("graph_filtered", "Typ-filtrering fungerar")
+            if self._contains_error(result_typed):
+                self.log_fail("graph_filtered", f"Typ-filtrering returnerade fel: {result_typed[:150]}")
+                return False
+            elif "GRAF" in result_typed:
+                self.log_pass("graph_filtered", "Typ-filtrering fungerar utan fel")
             else:
                 self.log_fail("graph_filtered", "Typ-filtrering misslyckades")
                 return False
 
-            # Test 3: Felhantering (tom sträng)
+            # Test 3: Tom sökning (ska ge tomt resultat, inte krasch)
             result_empty = self.mcp.search_graph_nodes("")
-            if "misslyckades" not in result_empty.lower() or "GRAF" in result_empty:
-                self.log_pass("graph_empty", "Hanterar tom sökning")
-            else:
-                self.log_fail("graph_empty", "Tom sökning kraschade")
+            if self._contains_error(result_empty) and "Exception" in result_empty:
+                self.log_fail("graph_empty", f"Tom sökning kraschade: {result_empty[:100]}")
                 return False
+            else:
+                self.log_pass("graph_empty", "Hanterar tom sökning utan krasch")
 
             return True
 
@@ -117,18 +133,24 @@ class MCPSearchTest:
             result = self.mcp.query_vector_memory("projekt möte diskussion")
             self.log_info(f"Resultat: {result[:150]}...")
 
-            if "VEKTOR" in result or "Modell:" in result or "inga" in result.lower():
-                self.log_pass("vector_basic", "Funktionen returnerar korrekt format")
+            if self._contains_error(result):
+                self.log_fail("vector_basic", f"Vektorsökning returnerade fel: {result[:150]}")
+                return False
+            elif "VEKTOR" in result and "Modell:" in result:
+                self.log_pass("vector_basic", "Vektorsökning lyckades utan fel")
             else:
-                self.log_fail("vector_basic", f"Oväntat format: {result[:100]}")
+                self.log_fail("vector_basic", f"Oväntat format (saknar VEKTOR/Modell): {result[:100]}")
                 return False
 
             # Test 2: Begränsat antal resultat
             result_limited = self.mcp.query_vector_memory("test", n_results=2)
             self.log_info(f"Begränsad sökning: {result_limited[:100]}...")
 
-            if "VEKTOR" in result_limited or "inga" in result_limited.lower():
-                self.log_pass("vector_limited", "Resultatbegränsning fungerar")
+            if self._contains_error(result_limited):
+                self.log_fail("vector_limited", f"Begränsad sökning returnerade fel: {result_limited[:150]}")
+                return False
+            elif "VEKTOR" in result_limited:
+                self.log_pass("vector_limited", "Resultatbegränsning fungerar utan fel")
             else:
                 self.log_fail("vector_limited", "Resultatbegränsning fungerar inte")
                 return False
@@ -153,34 +175,40 @@ class MCPSearchTest:
             result = self.mcp.search_by_date_range(start, end)
             self.log_info(f"Resultat (30 dagar): {result[:150]}...")
 
-            if "DATUM" in result or "träffar" in result.lower() or "inga" in result.lower():
-                self.log_pass("date_basic", "Datumsökning returnerar korrekt format")
+            if self._contains_error(result):
+                self.log_fail("date_basic", f"Datumsökning returnerade fel: {result[:150]}")
+                return False
+            elif "DATUM" in result:
+                self.log_pass("date_basic", "Datumsökning lyckades utan fel")
             else:
                 self.log_fail("date_basic", f"Oväntat format: {result[:100]}")
                 return False
 
             # Test 2: Olika date_field
             result_ingestion = self.mcp.search_by_date_range(start, end, date_field="ingestion")
-            if "DATUM" in result_ingestion or "inga" in result_ingestion.lower():
-                self.log_pass("date_field", "date_field parameter fungerar")
+            if self._contains_error(result_ingestion):
+                self.log_fail("date_field", f"date_field returnerade fel: {result_ingestion[:150]}")
+                return False
+            elif "DATUM" in result_ingestion:
+                self.log_pass("date_field", "date_field parameter fungerar utan fel")
             else:
                 self.log_fail("date_field", "date_field fungerar inte")
                 return False
 
-            # Test 3: Ogiltigt datum
+            # Test 3: Ogiltigt datum (ska ge tydligt felmeddelande, inte krasch)
             result_invalid = self.mcp.search_by_date_range("invalid", "also-invalid")
             if "Ogiltigt" in result_invalid or "datumformat" in result_invalid.lower():
                 self.log_pass("date_invalid", "Felhantering för ogiltigt datum")
             else:
-                self.log_fail("date_invalid", "Hanterar inte ogiltigt datum korrekt")
+                self.log_fail("date_invalid", f"Hanterar inte ogiltigt datum korrekt: {result_invalid[:100]}")
                 return False
 
-            # Test 4: Ogiltigt date_field
+            # Test 4: Ogiltigt date_field (ska ge tydligt felmeddelande)
             result_bad_field = self.mcp.search_by_date_range(start, end, date_field="invalid_field")
             if "Ogiltigt date_field" in result_bad_field:
-                self.log_pass("date_bad_field", "Validerar date_field")
+                self.log_pass("date_bad_field", "Validerar date_field korrekt")
             else:
-                self.log_fail("date_bad_field", "Validerar inte date_field")
+                self.log_fail("date_bad_field", f"Validerar inte date_field: {result_bad_field[:100]}")
                 return False
 
             return True
@@ -199,16 +227,22 @@ class MCPSearchTest:
             result = self.mcp.search_lake_metadata("Digitalist")
             self.log_info(f"Resultat: {result[:150]}...")
 
-            if "LAKE" in result or "metadata" in result.lower() or "inga" in result.lower():
-                self.log_pass("lake_basic", "Lake-sökning returnerar korrekt format")
+            if self._contains_error(result):
+                self.log_fail("lake_basic", f"Lake-sökning returnerade fel: {result[:150]}")
+                return False
+            elif "LAKE" in result:
+                self.log_pass("lake_basic", "Lake-sökning lyckades utan fel")
             else:
                 self.log_fail("lake_basic", f"Oväntat format: {result[:100]}")
                 return False
 
             # Test 2: Fältspecifik sökning
             result_field = self.mcp.search_lake_metadata("Document", field="source_type")
-            if "LAKE" in result_field or "inga" in result_field.lower():
-                self.log_pass("lake_field", "Fältfiltrering fungerar")
+            if self._contains_error(result_field):
+                self.log_fail("lake_field", f"Fältfiltrering returnerade fel: {result_field[:150]}")
+                return False
+            elif "LAKE" in result_field:
+                self.log_pass("lake_field", "Fältfiltrering fungerar utan fel")
             else:
                 self.log_fail("lake_field", "Fältfiltrering fungerar inte")
                 return False
@@ -238,20 +272,26 @@ class MCPSearchTest:
                 result = self.mcp.get_neighbor_network(node_id)
                 self.log_info(f"Nätverk för {node_id[:8]}: {result[:150]}...")
 
-                if "NÄTVERK" in result or "kopplingar" in result.lower() or "hittades inte" in result.lower():
-                    self.log_pass("network_basic", "Nätverksutforskning fungerar")
+                if self._contains_error(result):
+                    self.log_fail("network_basic", f"Nätverksutforskning returnerade fel: {result[:150]}")
+                    return False
+                elif "NÄTVERK" in result or "kopplingar" in result.lower():
+                    self.log_pass("network_basic", "Nätverksutforskning fungerar utan fel")
                 else:
                     self.log_fail("network_basic", f"Oväntat format: {result[:100]}")
                     return False
             else:
-                self.log_info("Ingen nod hittad - testar med fake ID")
+                self.log_info("Ingen nod hittad - hoppar över network_basic test")
 
-            # Test med icke-existerande nod
+            # Test med icke-existerande nod (ska ge tydligt "hittades inte", inte krasch)
             result_fake = self.mcp.get_neighbor_network("fake-node-id-12345")
             if "hittades inte" in result_fake.lower():
-                self.log_pass("network_notfound", "Hanterar icke-existerande nod")
+                self.log_pass("network_notfound", "Hanterar icke-existerande nod korrekt")
+            elif self._contains_error(result_fake) and "Exception" in result_fake:
+                self.log_fail("network_notfound", f"Icke-existerande nod orsakade krasch: {result_fake[:100]}")
+                return False
             else:
-                self.log_fail("network_notfound", "Fel vid icke-existerande nod")
+                self.log_fail("network_notfound", f"Fel vid icke-existerande nod: {result_fake[:100]}")
                 return False
 
             return True
@@ -266,14 +306,38 @@ class MCPSearchTest:
         print("\n--- Test: get_entity_summary ---")
 
         try:
-            # Test med fake ID (ska returnera "hittades inte")
-            result = self.mcp.get_entity_summary("non-existent-id-xyz")
-            self.log_info(f"Resultat (fake ID): {result[:100]}...")
+            # Hitta en riktig nod att testa på
+            result_search = self.mcp.search_graph_nodes("Digitalist")
+            import re
+            id_match = re.search(r'ID:\s*([a-f0-9-]+)', result_search)
 
-            if "hittades inte" in result.lower():
-                self.log_pass("summary_notfound", "Hanterar icke-existerande nod")
+            if id_match:
+                node_id = id_match.group(1)
+                result = self.mcp.get_entity_summary(node_id)
+                self.log_info(f"Sammanfattning för {node_id[:8]}: {result[:150]}...")
+
+                if self._contains_error(result):
+                    self.log_fail("summary_basic", f"Sammanfattning returnerade fel: {result[:150]}")
+                    return False
+                elif "ENTITET" in result or "Namn:" in result:
+                    self.log_pass("summary_basic", "Entitetssammanfattning fungerar utan fel")
+                else:
+                    self.log_fail("summary_basic", f"Oväntat format: {result[:100]}")
+                    return False
             else:
-                self.log_fail("summary_notfound", f"Oväntat beteende: {result[:100]}")
+                self.log_info("Ingen nod hittad - hoppar över summary_basic test")
+
+            # Test med fake ID (ska returnera "hittades inte", inte krasch)
+            result_fake = self.mcp.get_entity_summary("non-existent-id-xyz")
+            self.log_info(f"Resultat (fake ID): {result_fake[:100]}...")
+
+            if "hittades inte" in result_fake.lower():
+                self.log_pass("summary_notfound", "Hanterar icke-existerande nod korrekt")
+            elif self._contains_error(result_fake) and "Exception" in result_fake:
+                self.log_fail("summary_notfound", f"Icke-existerande nod orsakade krasch: {result_fake[:100]}")
+                return False
+            else:
+                self.log_fail("summary_notfound", f"Oväntat beteende: {result_fake[:100]}")
                 return False
 
             return True
@@ -290,6 +354,11 @@ class MCPSearchTest:
         try:
             result = self.mcp.get_graph_statistics()
             self.log_info(f"Statistik: {result[:200]}...")
+
+            # Först: kontrollera att det inte är ett fel
+            if self._contains_error(result):
+                self.log_fail("stats_error_check", f"Statistik returnerade fel: {result[:150]}")
+                return False
 
             # Validera format
             checks = [
@@ -360,14 +429,17 @@ class MCPSearchTest:
         print("\n--- Test: read_document_content ---")
 
         try:
-            # Test med icke-existerande dokument
+            # Test med icke-existerande dokument (ska ge "EJ HITTAT", inte krasch)
             result = self.mcp.read_document_content("fake-doc-id-xyz")
             self.log_info(f"Resultat (fake): {result[:100]}...")
 
             if "EJ HITTAT" in result or "Kunde inte hitta" in result:
-                self.log_pass("doc_notfound", "Hanterar icke-existerande dokument")
+                self.log_pass("doc_notfound", "Hanterar icke-existerande dokument korrekt")
+            elif self._contains_error(result) and "Exception" in result:
+                self.log_fail("doc_notfound", f"Icke-existerande dokument orsakade krasch: {result[:100]}")
+                return False
             else:
-                self.log_fail("doc_notfound", "Fel vid icke-existerande dokument")
+                self.log_fail("doc_notfound", f"Fel vid icke-existerande dokument: {result[:100]}")
                 return False
 
             # Hitta ett faktiskt dokument att testa
@@ -387,16 +459,22 @@ class MCPSearchTest:
                     result_real = self.mcp.read_document_content(doc_id)
                     self.log_info(f"Verkligt dokument ({test_file[:20]}): {result_real[:100]}...")
 
-                    if "DOKUMENT" in result_real or "---" in result_real:
-                        self.log_pass("doc_real", "Läser verkligt dokument")
+                    if self._contains_error(result_real):
+                        self.log_fail("doc_real", f"Dokumentläsning returnerade fel: {result_real[:150]}")
+                        return False
+                    elif "DOKUMENT" in result_real or "---" in result_real:
+                        self.log_pass("doc_real", "Läser verkligt dokument utan fel")
                     else:
-                        self.log_fail("doc_real", "Kunde inte läsa dokument")
+                        self.log_fail("doc_real", f"Oväntat format: {result_real[:100]}")
                         return False
 
                     # Test smart trunkering
                     result_smart = self.mcp.read_document_content(doc_id, max_length=500, section="smart")
-                    if "LÄGE: smart" in result_smart or len(result_smart) <= 600:
-                        self.log_pass("doc_truncate", "Smart trunkering fungerar")
+                    if self._contains_error(result_smart):
+                        self.log_fail("doc_truncate", f"Smart trunkering returnerade fel: {result_smart[:150]}")
+                        return False
+                    elif "LÄGE: smart" in result_smart or len(result_smart) <= 600:
+                        self.log_pass("doc_truncate", "Smart trunkering fungerar utan fel")
                     else:
                         self.log_info("Trunkering aktiverades inte (dokument kort)")
 

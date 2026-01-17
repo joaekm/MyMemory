@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-MyMem DocConverter (v10.3 - Area C & Semantic Metadata)
+MyMem DocConverter (v11.0 - Unified Pipeline)
 
-Changes:
-- ADDED 'generate_semantic_metadata' for Summary/Keywords/AI-Model tracking.
-- REMOVED legacy 'strict_entity_extraction' (non-MCP).
-- UPDATED 'unified_processing_strategy' to return full metadata structure.
-- UPDATED 'processa_dokument' to write Area C compliant frontmatter.
+Unified ingestion: Assets → Lake → Vector → Graf i en pipeline.
+Entity resolution via GraphStore.find_node_by_name().
 """
 
 import os
@@ -20,7 +17,6 @@ import re
 import zoneinfo
 import shutil
 import uuid
-import difflib
 import pandas as pd
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -92,9 +88,9 @@ def get_setting(agent, key, default):
     return default
 
 # Settings
-LAKE_STORE = CONFIG['paths']['lake_store']
-FAILED_FOLDER = CONFIG['paths']['asset_failed']
-GRAPH_DB_PATH = CONFIG['paths']['graph_db']
+LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
+FAILED_FOLDER = os.path.expanduser(CONFIG['paths']['asset_failed'])
+GRAPH_DB_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
 
 API_KEY = CONFIG['ai_engine']['api_key']
 MODEL_NAME = CONFIG.get('ai_engine', {}).get('models', {}).get('model_lite', 'models/gemini-2.0-flash-lite-preview')
@@ -161,8 +157,8 @@ def extract_content_date(text: str) -> str:
             dt = datetime.datetime.strptime(f"{date_str} 12:00", "%Y-%m-%d %H:%M")
             LOGGER.debug(f"extract_content_date: Transcriber (endast datum) → {dt.isoformat()}")
             return dt.isoformat()
-        except ValueError:
-            pass
+        except ValueError as e:
+            LOGGER.debug(f"extract_content_date: Kunde inte parsa datum '{date_str}': {e}")
 
     # 3. Ingen källa hittades
     LOGGER.info("extract_content_date: Ingen datumkälla → UNKNOWN")
@@ -214,9 +210,9 @@ def extract_text(filepath: str, ext: str = None) -> str:
             doc = docx.Document(filepath)
             raw_text = "\n".join([p.text for p in doc.paragraphs])
     except Exception as e:
-        LOGGER.error(f"Text extraction failed for {filepath}: {e}")
-        return ""
-        
+        LOGGER.error(f"HARDFAIL: Text extraction failed for {filepath}: {e}")
+        raise RuntimeError(f"Text extraction failed for {filepath}: {e}") from e
+
     return raw_text
 
 # --- 1. SEMANTIC METADATA GENERATOR (NEW) ---
@@ -252,110 +248,10 @@ def generate_semantic_metadata(text: str) -> Dict[str, Any]:
             "ai_model": lite_model
         }
     except Exception as e:
-        LOGGER.error(f"Semantic Metadata generation failed: {e}")
-        return {"context_summary": "", "relations_summary": "", "document_keywords": [], "ai_model": "UNKNOWN_ERROR"}
-    except Exception as e:
-        LOGGER.error(f"Semantic Metadata generation failed: {e}")
-        return {"summary": "", "keywords": [], "ai_model": "UNKNOWN_ERROR"}
-
-# --- ENTITY GATEKEEPER ---
-class EntityGatekeeper:
-    """Hanterar validering av entiteter mot grafen."""
-    def __init__(self):
-        self.graph_store = None
-        if os.path.exists(GRAPH_DB_PATH):
-            try:
-                self.graph_store = GraphStore(GRAPH_DB_PATH, read_only=True)
-            except Exception as e:
-                LOGGER.warning(f"Gatekeeper could not open GraphStore: {e}")
-        
-        self.schema_validator = _get_schema_validator()
-        self.indices = {
-            "Person": {"email": {}, "slack_alias": {}, "name": {}},
-            "Organization": {"org_number": {}, "name": {}},
-            "Project": {"source_id": {}, "name": {}},
-            "Group": {"name": {}}
-        }
-        if self.graph_store: self._load_cache()
-
-    def _load_cache(self):
-        LOGGER.info("Gatekeeper: Loading entities from Graph...")
-        with self.graph_store:
-            # Person
-            for p in self.graph_store.find_nodes_by_type("Person"):
-                uuid_str = p['id']
-                props = p.get('properties', {})
-                if props.get('email'): self.indices["Person"]["email"][props['email'].lower()] = uuid_str
-                if props.get('name'):
-                    name = props['name'].strip().lower()
-                    if name not in self.indices["Person"]["name"]: self.indices["Person"]["name"][name] = []
-                    self.indices["Person"]["name"][name].append(uuid_str)
-            # (Laddar övriga typer här - kortat för tydlighet)
-
-    def _fuzzy_match(self, type_str: str, value: str) -> Optional[str]:
-        """
-        Lättviktig dubblettkontroll med difflib.
-        Returnerar UUID om en stark matchning hittas.
-        """
-        if type_str not in self.indices or "name" not in self.indices[type_str]:
-            return None
-            
-        value_lower = value.lower()
-        candidates = self.indices[type_str]["name"].keys()
-        
-        # Hitta närmaste matchningar (cutoff=0.85 betyder >85% likhet)
-        matches = difflib.get_close_matches(value_lower, candidates, n=1, cutoff=0.85)
-        
-        if matches:
-            matched_name = matches[0]
-            uuids = self.indices[type_str]["name"][matched_name]
-            LOGGER.info(f"Gatekeeper: Fuzzy hit '{value}' ~= '{matched_name}' -> {uuids[0]}")
-            return uuids[0]
-            
-        return None
-
-    def resolve_entity(self, type_str: str, value: str, source_system: str, context_props: Dict = None) -> Optional[Dict]:
-        # 1. LINK Check (Cache lookup - Exact)
-        lookup_key = "name"
-        if "@" in value and type_str == "Person": lookup_key = "email"
-        
-        uuid_hit = None
-        if type_str in self.indices and lookup_key in self.indices[type_str]:
-            hits = self.indices[type_str][lookup_key].get(value.strip().lower())
-            if hits and isinstance(hits, list) and len(hits) == 1: uuid_hit = hits[0]
-        
-        # 2. LINK Check (Fuzzy - om ingen exakt träff)
-        if not uuid_hit and lookup_key == "name":
-            uuid_hit = self._fuzzy_match(type_str, value)
-        
-        if uuid_hit:
-            return {"target_uuid": uuid_hit, "target_type": type_str, "action": "LINK", "confidence": 1.0, "source_text": value}
-        
-        # 3. CREATE (Provisional) Logic
-        # Validera mot schema först
-        dummy_props = context_props.copy() if context_props else {}
-        dummy_props['status'] = 'PROVISIONAL'
-        dummy_props['confidence'] = dummy_props.get('confidence', 0.5)
-        dummy_props['last_seen_at'] = datetime.datetime.now().isoformat()
-        if "name" not in dummy_props: dummy_props["name"] = value
-
-        is_valid, error = self.schema_validator.validate_node(dummy_props)
-        if not is_valid:
-            if "Invalid status" in str(error) or "Unknown node type" in str(error):
-                return None # Blocked by schema
-
-        # Create new UUID
-        new_uuid = str(uuid.uuid4())
-        return {
-            "target_uuid": new_uuid,
-            "target_type": type_str,
-            "action": "CREATE",
-            "confidence": dummy_props['confidence'],
-            "properties": dummy_props,
-            "source_text": value
-        }
-
-GATEKEEPER = None
+        LOGGER.warning(f"Semantic Metadata generation failed (non-critical): {e}")
+        # Returnera tomma värden - dokumentet processas ändå men utan metadata
+        return {"context_summary": "", "relations_summary": "", "document_keywords": [], "ai_model": "FAILED"}
+        # OBS: raise inte här - semantic metadata är "nice to have", inte kritiskt
 
 # --- CORE PROCESSING ---
 
@@ -471,8 +367,8 @@ def strict_entity_extraction_mcp(text: str, source_hint: str = ""):
         response_json = asyncio.run(_call_mcp_validator(final_prompt, reference_timestamp, anchors))
         return parse_llm_json(response_json)
     except Exception as e:
-        LOGGER.error(f"MCP Extraction failed: {e}")
-        return {"nodes": [], "edges": []}
+        LOGGER.error(f"HARDFAIL: MCP Extraction failed: {e}")
+        raise RuntimeError(f"MCP Entity Extraction failed: {e}") from e
 
 def unified_processing_strategy(text: str, filename: str, source_type: str) -> Dict[str, Any]:
     # 1. Semantic Metadata (Summary + Keywords + AI Model)
@@ -489,46 +385,51 @@ def unified_processing_strategy(text: str, filename: str, source_type: str) -> D
     # Mappa: Namn -> UUID (för att kunna bygga kanter senare)
     name_to_uuid = {}
 
-    # 3. Loopa genom noder och validera mot Gatekeeper
+    # 3. Resolve entities via GraphStore.find_node_by_name
+    graph = GraphStore(GRAPH_DB_PATH, read_only=True)
     seen_candidates = set()
+
     for node in nodes:
         name = node.get('name')
         type_str = node.get('type')
         confidence = node.get('confidence', 0.5)
-        ctx_keywords = node.get('context_keywords', [])
+        node_context_text = node.get('node_context', '')
 
         if not name or not type_str: continue
-        
+
         # Brusfilter baserat på confidence (Krav från Område B)
-        if confidence < 0.3: continue 
+        if confidence < 0.3: continue
 
         key = f"{name}|{type_str}"
         if key in seen_candidates: continue
         seen_candidates.add(key)
-        
-        # Bygg kontext-objekt
-        context = {
-            "name": name,
-            "status": "PROVISIONAL", 
-            "confidence": confidence,
-            "distinguishing_context": ctx_keywords
-        }
 
-        # Om källan är "Trusted" (t.ex. Slack/Mail), kan vi *höja* confidence
+        # Om källan är "Trusted" (t.ex. Slack/Mail), höj confidence
         if source_type in ["Slack Log", "Email Thread"]:
-            context['confidence'] = max(confidence, 0.8)
+            confidence = max(confidence, 0.8)
 
-        # GATEKEEPER RESOLUTION (Inklusive Fuzzy)
-        result = GATEKEEPER.resolve_entity(type_str, name, "DocConverter", context)
-        
-        if result:
-            target_uuid = result.get('target_uuid')
-            if target_uuid:
-                name_to_uuid[name] = target_uuid # Spara mapping för edges
-                
-                # Lägg till label för tydlighet i loggar/graf
-                result['label'] = name
-                mentions.append(result)
+        # Entity resolution: LINK om finns, CREATE om ny
+        existing_uuid = graph.find_node_by_name(type_str, name, fuzzy=True)
+
+        if existing_uuid:
+            action = "LINK"
+            target_uuid = existing_uuid
+        else:
+            action = "CREATE"
+            target_uuid = str(uuid.uuid4())
+
+        name_to_uuid[name] = target_uuid
+
+        mentions.append({
+            "action": action,
+            "target_uuid": target_uuid,
+            "type": type_str,
+            "label": name,
+            "node_context_text": node_context_text,
+            "confidence": confidence
+        })
+
+    graph.close()
 
     # 4. Hantera RELATIONER (Area C Requirement)
     # Vi kan bara skapa relationer om BÅDA noderna blev resolveade (fick ett UUID)
@@ -555,7 +456,7 @@ def unified_processing_strategy(text: str, filename: str, source_type: str) -> D
 
     # Returnera BÅDE mentions och semantic data
     return {
-        "validated_mentions": mentions, 
+        "ingestion_payload": mentions, 
         "semantic_metadata": semantic_data
     }
 
@@ -596,7 +497,7 @@ def processa_dokument(filväg: str, filnamn: str):
         # Ett enda anrop!
         full_result = unified_processing_strategy(raw_text, filnamn, source_type)
 
-        validated_mentions = full_result.get("validated_mentions", [])
+        ingestion_payload = full_result.get("ingestion_payload", [])
         semantic_metadata = full_result.get("semantic_metadata", {})
 
         # Spara (Area C compliant structure)
@@ -628,19 +529,111 @@ def processa_dokument(filväg: str, filnamn: str):
         with open(lake_file, 'w', encoding='utf-8') as f:
             f.write(f"---\n{fm_str}---\n\n# {filnamn}\n\n{raw_text}")
             
-        LOGGER.info(f"✅ Klar: {filnamn} ({source_type}) -> {len(validated_mentions)} mentions")
+        LOGGER.info(f"✅ Lake: {filnamn} ({source_type}) -> {len(ingestion_payload)} mentions")
+
+        # --- GRAF-SKRIVNING ---
+        # Skriv extraherade entiteter till grafen
+        from services.utils.graph_service import GraphStore
+        graph = GraphStore(GRAPH_DB_PATH)
+
+        nodes_written = 0
+        edges_written = 0
+
+        for entity in ingestion_payload:
+            action = entity.get("action")
+
+            if action in ["CREATE", "LINK"]:
+                target_uuid = entity.get("target_uuid")
+                node_type = entity.get("type")
+                label = entity.get("label", "")
+                confidence = entity.get("confidence", 0.5)
+                node_context_text = entity.get("node_context_text", "")
+
+                if not target_uuid or not node_type:
+                    continue
+
+                # Bygg node_context enligt schema: {text, origin}
+                node_context_entry = {
+                    "text": node_context_text or f"Omnämnd i {filnamn}",
+                    "origin": unit_id
+                }
+
+                # Upsert noden (aggregerar node_context om noden finns)
+                props = {
+                    "name": label,
+                    "status": "PROVISIONAL",
+                    "confidence": confidence,
+                    "node_context": [node_context_entry],
+                    "source_system": "DocConverter"
+                }
+
+                graph.upsert_node(
+                    id=target_uuid,
+                    type=node_type,
+                    properties=props
+                )
+                nodes_written += 1
+
+                # Skapa MENTIONS-kant (Document -> Entity)
+                graph.upsert_edge(
+                    source=unit_id,
+                    target=target_uuid,
+                    edge_type="MENTIONS",
+                    properties={"confidence": confidence}
+                )
+                edges_written += 1
+
+            elif action == "CREATE_EDGE":
+                source_uuid = entity.get("source_uuid")
+                target_uuid = entity.get("target_uuid")
+                edge_type = entity.get("edge_type")
+                edge_conf = entity.get("confidence", 0.5)
+
+                if source_uuid and target_uuid and edge_type:
+                    graph.upsert_edge(
+                        source=source_uuid,
+                        target=target_uuid,
+                        edge_type=edge_type,
+                        properties={"confidence": edge_conf}
+                    )
+                    edges_written += 1
+
+        LOGGER.info(f"✅ Graf: {filnamn} -> {nodes_written} noder, {edges_written} kanter")
+
+        # --- VEKTOR-SKRIVNING ---
+        # Indexera dokumentet i ChromaDB
+        from services.utils.vector_service import get_vector_service
+        vector_service = get_vector_service("knowledge_base")
+
+        # Bygg dokumenttext för embedding
+        ctx_summary = semantic_metadata.get("context_summary", "")
+        rel_summary = semantic_metadata.get("relations_summary", "")
+
+        vector_text = f"FILENAME: {filnamn}\nSUMMARY: {ctx_summary}\nRELATIONS: {rel_summary}\n\nCONTENT:\n{raw_text[:8000]}"
+
+        vector_service.upsert(
+            id=unit_id,
+            text=vector_text,
+            metadata={
+                "timestamp": frontmatter.get("timestamp_ingestion", ""),
+                "filename": filnamn,
+                "source_type": source_type
+            }
+        )
+        LOGGER.info(f"✅ Vektor: {filnamn} -> ChromaDB")
 
     except Exception as e:
-        LOGGER.error(f"FAIL {filnamn}: {e}")
-        # Säkerhetsåtgärd: Släpp låset även vid krasch så vi inte fastnar för alltid
+        LOGGER.error(f"❌ HARDFAIL {filnamn}: {e}")
+        # Släpp låset så filen kan försökas igen
         with PROCESS_LOCK:
             PROCESSED_FILES.discard(filnamn)
+        # HARDFAIL: Låt högt - datakedjan är bruten
+        raise RuntimeError(f"HARDFAIL: Dokumentbearbetning misslyckades för {filnamn}: {e}") from e
 
-# --- INIT & WATCHDOG (Kortad för översikt, samma som förr) ---
+# --- INIT & WATCHDOG ---
 if __name__ == "__main__":
-    GATEKEEPER = EntityGatekeeper()
     os.makedirs(LAKE_STORE, exist_ok=True)
-    print(f"DocConverter (v10.3 - Area C & Semantic) online.")
+    print(f"DocConverter (v11.0 - Unified Pipeline) online.")
     
     # ... (Resten av main-blocket är oförändrat) ...
     from watchdog.observers import Observer

@@ -70,26 +70,28 @@ def _parse_frontmatter(file_path: str) -> Dict:
 def search_graph_nodes(query: str, node_type: str = None) -> str:
     """
     Söker efter STRUKTUR i Grafdatabasen.
-    Hittar entiteter baserat på namn, ID eller alias.
-    
+    Hittar entiteter baserat på alla lagrade egenskaper.
+
+    Söker i: id, aliases, och hela properties (name, email, node_context, etc.)
+
     Används för att svara på: "Finns noden X?" eller "Hur ser relationerna ut?"
     """
     try:
         # GraphStore använder DuckDB internt och är robust
         graph = GraphStore(GRAPH_PATH, read_only=True)
         limit = GRAPH_SEARCH_LIMIT
-        
-        # Direkt SQL för prestanda och filtrering
-        sql = "SELECT id, type, aliases, properties FROM nodes WHERE (id ILIKE ? OR aliases ILIKE ?)"
-        params = [f"%{query}%", f"%{query}%"]
-        
+
+        # Sök i id, aliases OCH hela properties-JSON
+        sql = "SELECT id, type, aliases, properties FROM nodes WHERE (id ILIKE ? OR aliases ILIKE ? OR properties ILIKE ?)"
+        params = [f"%{query}%", f"%{query}%", f"%{query}%"]
+
         if node_type:
             sql += " AND type = ?"
             params.append(node_type)
-            
+
         sql += " LIMIT ?"
         params.append(limit)
-        
+
         rows = graph.conn.execute(sql, params).fetchall()
         graph.close()
         
@@ -104,8 +106,12 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
             
             # Formatera output för läsbarhet
             name = props.get('name', node_id)
-            ctx = props.get('context_keywords', [])
-            ctx_str = f"Context: {ctx}" if ctx else "No context"
+            node_context = props.get('node_context', [])
+            if node_context and isinstance(node_context, list):
+                ctx_texts = [c.get('text', '') for c in node_context if isinstance(c, dict)]
+                ctx_str = f"Context: {' | '.join(ctx_texts[:3])}" if ctx_texts else "No context"
+            else:
+                ctx_str = "No context"
             alias_str = f"Aliases: {len(aliases)}" if aliases else ""
             
             output.append(f"• [{n_type}] {name}")

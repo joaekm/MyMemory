@@ -20,7 +20,7 @@ SERVICES = [
     {"module": "services.collectors.slack_collector", "name": "Slack Collector"},
     {"module": "services.processors.doc_converter", "name": "Doc Converter"},
     {"module": "services.processors.transcriber", "name": "Transcriber"},
-    {"module": "services.indexers.vector_indexer", "name": "Vector Indexer"},
+    # vector_indexer borttagen - vektor-skrivning sker nu i DocConverter
 ]
 
 processes = []

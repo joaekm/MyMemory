@@ -345,6 +345,68 @@ class GraphStore:
 
             return result is not None
 
+    def find_node_by_name(self, node_type: str, name: str, fuzzy: bool = True) -> str | None:
+        """
+        Sök efter en nod baserat på namn (exakt eller fuzzy).
+
+        Args:
+            node_type: Nodtyp att söka i (Person, Organization, etc.)
+            name: Namnet att söka efter
+            fuzzy: Om True, använd fuzzy matching (difflib, 85% likhet)
+
+        Returns:
+            UUID om matchning hittas, annars None
+        """
+        import difflib
+
+        name_lower = name.strip().lower()
+
+        with self._lock:
+            # Hämta alla noder av typen
+            rows = self.conn.execute("""
+                SELECT id, properties FROM nodes WHERE type = ?
+            """, [node_type]).fetchall()
+
+        # Bygg namn-index
+        name_to_uuid: dict[str, list[str]] = {}
+        for node_id, props_raw in rows:
+            props = json.loads(props_raw) if props_raw else {}
+            node_name = props.get('name', '').strip().lower()
+            if node_name:
+                if node_name not in name_to_uuid:
+                    name_to_uuid[node_name] = []
+                name_to_uuid[node_name].append(node_id)
+
+            # Kolla även aliases
+            aliases_raw = props.get('aliases', [])
+            if aliases_raw:
+                for alias in aliases_raw:
+                    alias_lower = alias.strip().lower()
+                    if alias_lower not in name_to_uuid:
+                        name_to_uuid[alias_lower] = []
+                    name_to_uuid[alias_lower].append(node_id)
+
+        # 1. Exakt matchning
+        if name_lower in name_to_uuid:
+            hits = name_to_uuid[name_lower]
+            if len(hits) == 1:
+                return hits[0]
+            # Flera träffar - returnera första (eller None om osäkert)
+            LOGGER.warning(f"find_node_by_name: Flera träffar för '{name}' ({node_type}): {hits}")
+            return hits[0]
+
+        # 2. Fuzzy matchning (om aktiverat)
+        if fuzzy:
+            candidates = list(name_to_uuid.keys())
+            matches = difflib.get_close_matches(name_lower, candidates, n=1, cutoff=0.85)
+            if matches:
+                matched_name = matches[0]
+                hits = name_to_uuid[matched_name]
+                LOGGER.info(f"find_node_by_name: Fuzzy '{name}' ~= '{matched_name}' -> {hits[0]}")
+                return hits[0]
+
+        return None
+
     # --- EDGE OPERATIONS ---
 
     def get_edges_from(self, node_id: str) -> list[dict]:

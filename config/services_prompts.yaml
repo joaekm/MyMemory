@@ -93,7 +93,7 @@ doc_converter:
       - "confidence": Sätts baserat på "Schema-Fit" (0.0 - 1.0).
         * 0.8-1.0 (Hög): Entiteten uppfyller definitionen tydligt och har unika attribut.
         * <0.3 (Låg/Brus): Entiteten är generisk eller trivial.
-      - "context_keywords": Lista 2-4 nyckelord som beskriver entitetens roll/kontext (för deduplicering). Detta fält är OBLIGATORISKT.
+      - "node_context": En fras eller mening som beskriver vad vi lärt oss om entiteten baserat på texten.
       - "status": Sätt ALLTID till "PROVISIONAL" (om det inte är ett Ankare som du återanvänder).
       
     
@@ -115,12 +115,11 @@ doc_converter:
     RETURNERA JSON (Exakt format):
     {{
       "nodes": [
-        {{ 
-          "name": "Namn", 
-          "type": "Nodtyp", 
-          "properties": {{ "egenskap": "värde" }},  // OBS: I vår platta modell ligger egenskaperna direkt på roten, inte i ett properties-objekt.
-          "org_type": "Bolag", // Exempel på egenskap
-          "context_keywords": ["ord1", "ord2"], 
+        {{
+          "name": "Namn",
+          "type": "Nodtyp",
+          "org_type": "Bolag",
+          "node_context": "Beskrivande mening om entitetens roll i dokumentet.",
           "status": "PROVISIONAL",
           "confidence": 0.85
         }}

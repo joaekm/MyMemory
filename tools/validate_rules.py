@@ -135,35 +135,45 @@ def check_silent_fallbacks(filepath: str, content: str) -> list:
                     })
                     continue
             
-            # 3c: Kolla om except-blocket saknar LOGGER eller raise
+            # 3c: Kolla om except-blocket har korrekt felhantering
+            # SKÄRPT REGEL: LOGGER.error() utan raise är INTE tillräckligt
+            # Kritiska fel måste antingen: raise, exit, eller returnera explicit felstatus
+            has_raise = False
             has_logging = False
+            has_exit = False
             except_indent = len(line) - len(line.lstrip())
-            
-            for j in range(i, min(i + 15, len(lines))):
+            except_block_lines = []
+
+            for j in range(i, min(i + 20, len(lines))):
                 check_line = lines[j] if j < len(lines) else ""
                 check_indent = len(check_line) - len(check_line.lstrip())
-                
+
                 # Sluta om vi lämnar except-blocket (mindre eller lika indentering på icke-tom rad)
-                if check_line.strip() and check_indent <= except_indent and j > i:
+                if check_line.strip() and check_indent <= except_indent:
                     break
-                
-                if 'LOGGER.' in check_line or 'logging.' in check_line or 'raise' in check_line:
+
+                except_block_lines.append(check_line)
+
+                if 'raise' in check_line:
+                    has_raise = True
+                if 'LOGGER.' in check_line or 'logging.' in check_line:
                     has_logging = True
-                    break
-                # exit() är också en giltig hardfail
                 if 'exit(' in check_line or 'sys.exit(' in check_line:
+                    has_exit = True
+                # sys.stderr.write() är acceptabelt för tools/
+                if 'sys.stderr.write' in check_line:
                     has_logging = True
-                    break
-                # sys.stderr.write() är också acceptabelt för tools/ som saknar LOGGER
-                if 'sys.stderr.write' in check_line or 'sys.stderr' in check_line:
-                    has_logging = True
-                    break
-            
+
             # KeyboardInterrupt är OK (används för graceful shutdown)
             if 'KeyboardInterrupt' in stripped:
                 continue
-            
-            if not has_logging:
+
+            # JSONDecodeError med retry-logik är OK
+            if 'JSONDecodeError' in stripped:
+                continue
+
+            # Inget alls = violation
+            if not has_logging and not has_raise and not has_exit:
                 violations.append({
                     "file": filepath,
                     "line": i,
@@ -171,6 +181,17 @@ def check_silent_fallbacks(filepath: str, content: str) -> list:
                     "message": "except-block utan loggning eller raise",
                     "code": stripped
                 })
+            # SKÄRPT: Loggning UTAN raise i broad except = violation (sväljer fel)
+            elif has_logging and not has_raise and not has_exit:
+                # Kolla om det är "except Exception" (broad catch)
+                if re.match(r'^except\s+(Exception|BaseException)(\s+as\s+\w+)?:', stripped):
+                    violations.append({
+                        "file": filepath,
+                        "line": i,
+                        "rule": "P2",
+                        "message": "HARDFAIL-VIOLATION: 'except Exception' med loggning men utan raise sväljer kritiska fel",
+                        "code": stripped
+                    })
     
     return violations
 

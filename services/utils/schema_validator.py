@@ -90,13 +90,18 @@ class SchemaValidator:
         if not node_def:
             return False, f"Unknown node type: '{node_type}'"
 
-        for field in ["confidence", "last_seen_at", "status", "context_keywords"]:
-            if field not in node_data:
+        # Validera required base_properties från schemat
+        base_props = self.schema.get("base_properties", {}).get("properties", {})
+        for field, field_def in base_props.items():
+            if field_def.get("required", False) and field not in node_data:
                 return False, f"Missing system field: '{field}'"
 
+        # Validera status mot schema-definierade värden
         status = node_data.get("status")
-        if status not in ["VERIFIED", "PROVISIONAL"]:
-            return False, f"Invalid status: '{status}'"
+        status_def = base_props.get("status", {})
+        allowed_statuses = status_def.get("values", ["VERIFIED", "PROVISIONAL"])
+        if status not in allowed_statuses:
+            return False, f"Invalid status: '{status}'. Allowed: {allowed_statuses}"
 
         # Check name quality
         node_name = node_data.get('name', '')

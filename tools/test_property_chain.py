@@ -203,14 +203,7 @@ class PropertyChainTest:
         self.log_info("Steg 2: Kör DocConverter...")
 
         try:
-            from services.processors.doc_converter import processa_dokument, GATEKEEPER, EntityGatekeeper
-
-            # Initiera GATEKEEPER om den inte finns
-            global GATEKEEPER
-            if GATEKEEPER is None:
-                # Importera och sätt globalt
-                import services.processors.doc_converter as dc
-                dc.GATEKEEPER = EntityGatekeeper()
+            from services.processors.doc_converter import processa_dokument
 
             processa_dokument(self.asset_path, self.test_filename)
             self.log_pass("STEP2", "DocConverter körde utan fel")
@@ -274,66 +267,50 @@ class PropertyChainTest:
         self.log_pass("STEP3", f"Lake-fil har alla {len(required)} required properties")
         return True
 
-    # --- STEP 4: Run VectorIndexer ---
+    # --- STEP 4: Index to Vector ---
     def step4_run_vector_indexer(self) -> bool:
-        """Kör VectorIndexer på Lake-filen"""
-        self.log_info("Steg 4: Kör VectorIndexer...")
+        """Indexera Lake-filen till VectorDB via VectorService"""
+        self.log_info("Steg 4: Indexerar till VectorDB...")
 
         try:
-            from services.indexers.vector_indexer import index_lake_file
+            from services.utils.vector_service import VectorService
+            vs = VectorService()
 
-            if self.lake_path and os.path.exists(self.lake_path):
-                index_lake_file(self.lake_path)
-                self.log_pass("STEP4", "VectorIndexer körde utan fel")
-                return True
-            else:
-                self.log_violation("STEP4", "Lake-fil saknas")
-                return False
-        except ImportError:
-            # Fallback om vector_indexer har annan struktur
-            self.log_info("vector_indexer.index_lake_file finns inte, testar alternativ...")
-            try:
-                from services.utils.vector_service import VectorService
-                vs = VectorService()
+            # Läs Lake-fil och indexera
+            with open(self.lake_path, 'r', encoding='utf-8') as f:
+                content = f.read()
 
-                # Läs Lake-fil och indexera manuellt
-                with open(self.lake_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
+            # Extrahera frontmatter för metadata
+            end_idx = content.index('---', 3)
+            yaml_content = content[3:end_idx]
+            frontmatter = yaml.safe_load(yaml_content) or {}
 
-                # Extrahera frontmatter för metadata
-                end_idx = content.index('---', 3)
-                yaml_content = content[3:end_idx]
-                frontmatter = yaml.safe_load(yaml_content) or {}
+            # Bygg metadata enligt schema
+            lake_vector_props, _, key_mappings = get_vector_properties(
+                self.lake_schema, self.graph_schema
+            )
 
-                # Bygg metadata enligt schema
-                lake_vector_props, _, key_mappings = get_vector_properties(
-                    self.lake_schema, self.graph_schema
-                )
+            metadata = {}
+            for prop in lake_vector_props:
+                # Kolla om det finns en reverse mapping
+                original_key = prop
+                for orig, mapped in key_mappings.items():
+                    if mapped == prop:
+                        original_key = orig
+                        break
 
-                metadata = {}
-                for prop in lake_vector_props:
-                    # Kolla om det finns en reverse mapping
-                    original_key = prop
-                    for orig, mapped in key_mappings.items():
-                        if mapped == prop:
-                            original_key = orig
-                            break
+                if original_key in frontmatter:
+                    metadata[prop] = frontmatter[original_key]
 
-                    if original_key in frontmatter:
-                        metadata[prop] = frontmatter[original_key]
-
-                vs.upsert(
-                    id=self.test_uuid,
-                    text=content,
-                    metadata=metadata
-                )
-                self.log_pass("STEP4", "Indexerade manuellt via VectorService")
-                return True
-            except Exception as e:
-                self.log_violation("STEP4", f"VectorIndexer kraschade: {e}")
-                return False
+            vs.upsert(
+                id=self.test_uuid,
+                text=content,
+                metadata=metadata
+            )
+            self.log_pass("STEP4", "Indexerade via VectorService")
+            return True
         except Exception as e:
-            self.log_violation("STEP4", f"VectorIndexer kraschade: {e}")
+            self.log_violation("STEP4", f"Vektor-indexering kraschade: {e}")
             return False
 
     # --- STEP 5: Validate Vector metadata ---
@@ -397,49 +374,87 @@ class PropertyChainTest:
 
     # --- STEP 7: Validate Graph nodes ---
     def step7_validate_graph(self) -> bool:
-        """Validerar att graf-noder har rätt base_properties"""
-        self.log_info("Steg 7: Validerar graf-noder...")
+        """Validerar att entiteter från test-dokumentet skrevs till grafen med korrekta properties"""
+        self.log_info("Steg 7: Validerar graf-noder från test-dokumentet...")
 
         try:
             from services.utils.graph_service import GraphStore
 
             graph_path = self.config.get('paths', {}).get('graph_db')
             if not graph_path or not os.path.exists(graph_path):
-                self.log_info("Graf-db finns inte än, hoppar över graf-validering")
-                return True
+                self.log_violation("STEP7", "Graf-db finns inte")
+                return False
 
             graph = GraphStore(graph_path, read_only=True)
 
             required_base = get_required_graph_base_properties(self.graph_schema)
-            node_types = list(self.graph_schema.get('nodes', {}).keys())
-
-            violations_found = False
 
             with graph:
-                for node_type in node_types:
-                    nodes = graph.find_nodes_by_type(node_type)
+                # Hitta entiteter som har node_context med origin = test-dokumentets UUID
+                # Detta verifierar att DocConverter skrev entiteter till grafen
+                test_entities = []
 
-                    # Sampla max 5 noder per typ
-                    for node in nodes[:5]:
-                        props = node.get('properties', {})
+                # Kolla alla noder och hitta de som refererar till vårt test-dokument
+                all_nodes = graph.conn.execute("SELECT id, type, properties FROM nodes").fetchall()
 
-                        # Kolla required base properties
-                        # Notera: 'name' och 'type' är base_properties men lagras separat
-                        check_props = required_base - {'name', 'type', 'id', 'source'}
-                        missing = check_props - set(props.keys())
+                import json
+                for row in all_nodes:
+                    node_id, node_type, props_json = row
+                    props = json.loads(props_json) if props_json else {}
+                    node_context = props.get('node_context', [])
 
-                        if missing:
-                            self.log_violation("STEP7",
-                                f"Nod {node.get('id', 'UNKNOWN')} ({node_type}) saknar: {missing}")
-                            violations_found = True
+                    # Kolla om någon context-entry har origin = test_uuid
+                    for ctx in node_context:
+                        if isinstance(ctx, dict) and ctx.get('origin') == self.test_uuid:
+                            test_entities.append({
+                                'id': node_id,
+                                'type': node_type,
+                                'properties': props
+                            })
+                            break
+
+                # Validera att entiteter skapades
+                if not test_entities:
+                    self.log_violation("STEP7",
+                        f"Inga entiteter med origin={self.test_uuid} hittades i grafen. "
+                        "DocConverter extraherar entiteter men skriver inte till grafen.")
+                    return False
+
+                self.log_info(f"Hittade {len(test_entities)} entiteter från test-dokumentet")
+
+                violations_found = False
+
+                for node in test_entities:
+                    props = node.get('properties', {})
+                    node_type = node.get('type')
+
+                    # Kolla required base properties
+                    check_props = required_base - {'name', 'type', 'id', 'source'}
+                    missing = check_props - set(props.keys())
+
+                    if missing:
+                        self.log_violation("STEP7",
+                            f"Nod {node.get('id', 'UNKNOWN')} ({node_type}) saknar: {missing}")
+                        violations_found = True
+
+                    # Kolla okända properties
+                    allowed_base = set(self.graph_schema.get('base_properties', {}).get('properties', {}).keys())
+                    node_type_props = set(self.graph_schema.get('nodes', {}).get(node_type, {}).get('properties', {}).keys())
+                    allowed_all = allowed_base | node_type_props
+
+                    unknown = set(props.keys()) - allowed_all
+                    if unknown:
+                        self.log_violation("STEP7",
+                            f"Nod {node.get('id', 'UNKNOWN')} ({node_type}) har okända properties: {unknown}")
+                        violations_found = True
 
             if not violations_found:
-                self.log_pass("STEP7", "Graf-noder har required base_properties")
+                self.log_pass("STEP7", f"Graf: {len(test_entities)} entiteter har korrekta properties")
 
             return not violations_found
         except Exception as e:
-            self.log_info(f"Graf-validering kunde inte köras: {e}")
-            return True  # Inte kritiskt om graf inte finns
+            self.log_violation("STEP7", f"Graf-validering kraschade: {e}")
+            return False
 
     # --- CLEANUP ---
     def cleanup(self):

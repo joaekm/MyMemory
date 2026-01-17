@@ -8,6 +8,7 @@ from services.utils.graph_service import GraphStore
 from services.utils.vector_service import VectorService
 from services.utils.lake_service import LakeEditor
 from services.agents.validator_mcp import LLMClient # Reuse LLM client
+from services.utils.schema_validator import get_schema_validator
 
 # Setup logging
 LOGGER = logging.getLogger("EntityResolver")
@@ -75,9 +76,10 @@ class EntityResolver:
             
         # Bygg söksträng (Namn + Typ + Kontext)
         search_text = f"{name} {node.get('type')}"
-        keywords = node.get("properties", {}).get("context_keywords", [])
-        if keywords:
-            search_text += " " + " ".join(keywords)
+        node_context = node.get("properties", {}).get("node_context", [])
+        if node_context and isinstance(node_context, list):
+            ctx_texts = [c.get('text', '') for c in node_context if isinstance(c, dict)]
+            search_text += " " + " ".join(ctx_texts)
 
         # Semantisk sökning med KB-BERT
         vector_limit = DREAMER_CONFIG.get('vector_search_limit', 10)
@@ -114,11 +116,13 @@ class EntityResolver:
             "properties": node.get("properties", {}).copy()
         }
         
-        # Ta bort brus från properties
+        # Ta bort system-properties (include_in_vector: false) från jämförelse
         props = clean_node["properties"]
-        keys_to_remove = ["status", "confidence", "created_at", "last_seen_at", "last_synced_at", "source_system"]
-        for key in keys_to_remove:
-            props.pop(key, None)
+        schema = get_schema_validator().schema
+        base_props = schema.get("base_properties", {}).get("properties", {})
+        for key, key_def in base_props.items():
+            if not key_def.get("include_in_vector", True):
+                props.pop(key, None)
             
         return clean_node
 
@@ -161,33 +165,34 @@ class EntityResolver:
             return {"decision": "IGNORE", "confidence": 0.0, "reason": "LLM Error"}
 
     def _prune_context(self, node_id: str):
-        """Kondensera kontext-keywords för en nod om listan är för lång."""
+        """Kondensera node_context för en nod om listan är för lång."""
         node = self.graph_store.get_node(node_id)
         if not node: return
-        
-        keywords = node.get('properties', {}).get('context_keywords', [])
-        # Tröskel: 15 keywords
-        if not isinstance(keywords, list) or len(keywords) < 15:
-            return 
-            
-        LOGGER.info(f"🧹 Pruning context for {node_id} ({len(keywords)} keywords)...")
-        
+
+        node_context = node.get('properties', {}).get('node_context', [])
+        # Tröskel: 15 context entries
+        if not isinstance(node_context, list) or len(node_context) < 15:
+            return
+
+        LOGGER.info(f"🧹 Pruning node_context for {node_id} ({len(node_context)} entries)...")
+
+        # Extrahera text från context entries för LLM-analys
+        ctx_texts = [c.get('text', '') for c in node_context if isinstance(c, dict)]
+
         prompt_template = self.prompts.get("context_pruning_prompt", "")
         if not prompt_template:
             LOGGER.warning("Missing context_pruning_prompt")
             return
 
-        prompt = prompt_template.format(keywords=json.dumps(keywords, ensure_ascii=False))
-        
+        prompt = prompt_template.format(keywords=json.dumps(ctx_texts, ensure_ascii=False))
+
         try:
             response_text = self.llm_client.generate(prompt)
-            # Rensa markdown-block om det finns
             cleaned_text = response_text.replace("```json", "").replace("```", "").strip()
-            
+
             try:
                 result = json.loads(cleaned_text)
             except json.JSONDecodeError:
-                # Fallback: Försök hitta JSON inuti texten om den är "pratig"
                 import re
                 match = re.search(r'\{.*\}', cleaned_text, re.DOTALL)
                 if match:
@@ -196,14 +201,16 @@ class EntityResolver:
                     raise
 
             if isinstance(result, dict) and "pruned_keywords" in result:
-                new_keywords = result["pruned_keywords"]
-                
-                # Uppdatera noden med de nya, städade keywordsen
+                pruned_texts = set(result["pruned_keywords"])
+
+                # Behåll endast de context entries vars text finns i pruned-listan
+                new_context = [c for c in node_context if c.get('text') in pruned_texts]
+
                 props = node.get('properties', {})
-                props['context_keywords'] = new_keywords
-                self.graph_store.upsert_node(node['id'], node['type'], node['aliases'], props)
-                LOGGER.info(f"   ✨ Pruned to {len(new_keywords)} keywords.")
-                
+                props['node_context'] = new_context
+                self.graph_store.upsert_node(node['id'], node['type'], node.get('aliases'), props)
+                LOGGER.info(f"   ✨ Pruned to {len(new_context)} context entries.")
+
         except Exception as e:
             LOGGER.error(f"Context pruning failed: {e}")
 

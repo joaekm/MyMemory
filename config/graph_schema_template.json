@@ -102,7 +102,7 @@
       },
       "node_context": {
         "type": "list",
-        "required": false,
+        "required": true,
         "include_in_vector": false,
         "description": "Beviskedja - lista med objekt {text, origin} som visar var noden omnämns. Används för Entity Resolution och Dreamer-förädling."
       },
