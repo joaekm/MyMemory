@@ -335,6 +335,44 @@ RE-CATEGORIZE använder HARDFAIL vid ogiltiga kanter. Detta kan skapa problem f�
 
 ## Övriga Aktiva Objekt
 
+### Prio 1 - Rebuild-refaktorering
+
+#### OBJEKT-73: Rebuild-process Refaktorering (NY)
+*Status:* EJ PÅBÖRJAD
+*Prioritet:* HÖG
+*Bakgrund:* Efter EPIC-01 (Dreamer datakvalitets-epic) har ingestion-pipelinen genomgått omfattande förbättringar:
+- Extractor + Critic pattern (OBJEKT-66)
+- Canonical name injection
+- Entity resolution med graf-lookup
+- Schema-validering och typnormalisering (OBJEKT-69)
+
+*Problem:* `tools/rebuild/` använder fortfarande gammal logik som inte drar nytta av dessa förbättringar.
+
+*Nuläge:*
+- `tool_staged_rebuild.py` - Fasad rebuild (foundation → incremental → dreamer)
+- `tool_hard_reset.py` - Total omstart (rensar Lake/Index)
+- Rebuild kör `ingestion_engine.process_document()` men saknar integration med nya Critic-steget
+
+*Scope:*
+1. **Granska staged_rebuild vs ingestion_engine:**
+   - Säkerställ att rebuild använder exakt samma pipeline som realtids-ingestion
+   - Undvik duplicerad logik
+2. **Integrera Dreamer i rebuild:**
+   - Efter foundation-fas: kör Dreamer för initial städning
+   - Efter incremental-fas: kör Dreamer igen för cross-document resolution
+3. **Validering:**
+   - Lägg till validering att rebuild producerar samma resultat som manuell ingestion
+   - Jämför entity-counts före/efter
+4. **Dokumentation:**
+   - Uppdatera `CLAUDE.md` med rebuild-workflow
+   - Dokumentera när man ska använda hard_reset vs staged_rebuild
+
+*Relation till andra objekt:*
+- Bygger på OBJEKT-66 (Extractor + Critic) - ny pipeline måste användas
+- Relaterat till OBJEKT-72 (Robust Testsvit) - rebuild bör vara testbar
+
+---
+
 ### Prio 2 - Infrastruktur
 
 *(OBJEKT-68 detaljer finns under EPIC-01 Steg 1 ovan)*
@@ -425,5 +463,5 @@ Dessa objekt är fortfarande potentiellt relevanta men inte prioriterade.
 
 ---
 
-*Senast uppdaterad: 2026-01-17*
+*Senast uppdaterad: 2026-01-17 (OBJEKT-73 tillagt)*
 *Se `my_mem_koncept_logg.md` för resonemang bakom beslut.*
