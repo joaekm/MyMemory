@@ -102,14 +102,15 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
 
 ---
 
-## EPIC-01: Dreamer - Intelligent Grafförädling
+## EPIC-01: Dreamer - Intelligent Grafförädling (KLAR 2026-01-17)
 
-**Status:** PÅGÅENDE
+**Status:** KLAR
 **Startdatum:** 2026-01-15
-**Syfte:** Implementera ett komplett system för kontinuerlig förädling av kunskapsgrafen.
+**Slutdatum:** 2026-01-17
+**Syfte:** Implementera grundsystemet för kontinuerlig förädling av kunskapsgrafen.
 
 ### Vision
-Dreamer är den "sovande" intelligensen som analyserar hela kunskapsbasen och optimerar för användaren. Till skillnad från Ingestion (som hanterar ny data) arbetar Dreamer med helheten - hittar dubbletter, löser up entiteter, städar brus, och förbättrar datakvaliteten över tid.
+Dreamer är den "sovande" intelligensen som analyserar hela kunskapsbasen och optimerar för användaren. Till skillnad från Ingestion (som hanterar ny data) arbetar Dreamer med helheten - hittar dubbletter, löser upp entiteter, städar brus, och förbättrar datakvaliteten över tid.
 
 ### Arkitektur (beslutad 2026-01-17)
 ```
@@ -127,7 +128,7 @@ Dreamer är den "sovande" intelligensen som analyserar hela kunskapsbasen och op
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Operationer
+### Operationer (implementerade)
 | Operation | Beskrivning | Trigger |
 |-----------|-------------|---------|
 | **MERGE** | Slå ihop dubbletter | Semantisk likhet > 90% |
@@ -156,7 +157,7 @@ Dreamer är den "sovande" intelligensen som analyserar hela kunskapsbasen och op
 
 ---
 
-### EPIC-01 Steg 1: Grundinfrastruktur (KLAR)
+### EPIC-01 Leverabler (alla KLARA)
 
 #### OBJEKT-68: Arkitekturanalys (KLAR 2026-01-17)
 - ✅ Tre-fas pipeline definierad (Collect → Ingest → Dream)
@@ -184,144 +185,37 @@ Dreamer är den "sovande" intelligensen som analyserar hela kunskapsbasen och op
 - ✅ Nya config-sektioner: `search`, `collectors`, `validation`, `dreamer.thresholds`
 - ✅ Inga hårdkodade värden i Python-kod
 
----
-
-### EPIC-01 Steg 2: Entity Resolution (PÅGÅENDE)
-
 #### OBJEKT-65: Extractor + Critic POC (KLAR 2026-01-15)
 - ✅ POC genomförd med positiva resultat
 - ✅ Dokumenterat i `tools/test_results/poc_extractor_critic_2026-01-15.md`
 - *Slutsats:* Extractor + Critic + canonical_name-injection fungerar.
 
 #### OBJEKT-66: Extractor + Critic i Produktion (KLAR 2026-01-17)
-*Bakgrund:* POC (OBJEKT-65) visade tydliga förbättringar.
-
-**Implementerat:**
 - ✅ `critic_filter_entities()` - LLM-baserad filtrering av extraherade entiteter
 - ✅ `resolve_entities()` returnerar `canonical_name` vid LINK (hämtas från graf)
 - ✅ Semantic metadata genereras EFTER entity extraction (pipeline-ordning ändrad)
 - ✅ Kanoniska namn injiceras i `generate_semantic_metadata()` prompten
 - ✅ Ny prompt `entity_critic` i `config/services_prompts.yaml`
 
-**Nytt pipeline-flöde:**
+**Pipeline-flöde:**
 ```
 extract_text → extract_entities_mcp → critic_filter_entities → resolve_entities → generate_semantic_metadata → write_*
 ```
 
-**Ändrade filer:**
-- `services/engines/ingestion_engine.py` (critic_filter_entities, canonical_name, pipeline-ordning)
-- `config/services_prompts.yaml` (entity_critic prompt)
-
-*Verifierat med:* `test_property_chain.py` - PASS
-
-#### OBJEKT-44: Entity Resolution & Alias Learning (AKTIV)
-*Status:* Delvis implementerat. EntityGatekeeper finns.
-*Kvarstående:*
-- Flytande Canonical (swap-mekanism: "Jocke" → "Joakim Ekman")
-- LLM-bedömning av trovärdighet
-- Dreamer-integration för lärande
-
----
-
-### EPIC-01 Steg 3: Dreamer Operationer (PÅGÅENDE)
-
-#### OBJEKT-67: Dream Directives (PÅGÅENDE)
-*Koncept:* MCP-klienten observerar brus under arbete och förbereder "dreams" för användarbekräftelse.
-
-**Klart (2026-01-17):**
+#### OBJEKT-67: Dreamer Core Operations (KLAR 2026-01-17)
 - ✅ Unified ingestion pipeline
 - ✅ Borttagen `vector_indexer.py` (redundant)
 - ✅ EntityGatekeeper-logik flyttad till `GraphService.find_node_by_name()`
 - ✅ `search_graph_nodes` söker i hela properties JSON
 - ✅ Dreamer dryrun använder `batch_generate()` för parallella LLM-anrop
 - ✅ `validate_rules.py` skärpt
-- ✅ POC → PROD: Schema-beskrivningar injiceras i `structural_analysis` (`dreamer.py:_get_node_type_description()`)
-- ✅ POC → PROD: Kant-validering vid RE-CATEGORIZE (`dreamer.py:_validate_edges_for_recategorize()`)
-- ✅ POC → PROD: Context-pruning efter MERGE (`dreamer.py:run_resolution_cycle()` anropar `prune_context()`)
-
-**Kvarstår:**
-- [ ] MCP Tools: `report_observation()`, `get_pending_dreams()`, `confirm_dream()`
-- [ ] `dream_candidates` tabell i GraphStore
-- [ ] User confirmation workflow
-
-#### OBJEKT-70: Relation Discovery & Metadata Enrichment (NY)
-*Status:* EJ PÅBÖRJAD
-*Problem:* Dreamer städar grafen (MERGE/SPLIT/DELETE) men upptäcker inte NYA relationer eller berikar metadata på befintliga noder.
-
-*Nuläge:*
-- `run_resolution_cycle()` hanterar: MERGE, SPLIT, RENAME, DELETE, RE-CATEGORIZE
-- `propagate_changes()` uppdaterar Lake-filer som påverkats av ändringar
-- **Saknas:** Aktiv upptäckt av relationer som BORDE finnas men inte skapades vid ingestion
-
-*Exempel på vad som saknas:*
-1. **Implicit Relation Discovery:**
-   - Person A och Person B nämns i samma dokument 5 gånger → borde ha `WORKS_WITH` relation
-   - Projekt X nämns tillsammans med Organisation Y i 3 dokument → borde ha `OWNED_BY` relation
-2. **Metadata Enrichment:**
-   - Nod har `node_context` från 10 dokument men saknar `context_keywords` → LLM kan extrahera
-   - Person har många mentions men saknar `role` property → kan infereras från kontext
-3. **Cross-Document Inference:**
-   - Dokument A säger "Joakim leder projektet", Dokument B säger "Projektledare: J. Ekman" → koppla
-
-*Förslag på implementation:*
-```
-discover_relations():
-    1. Hitta nod-par som ofta co-förekommer (via node_context.origin)
-    2. Fråga LLM: "Finns implicit relation mellan A och B?"
-    3. Om ja: skapa edge med låg confidence (0.6)
-    4. Dreamer kan höja confidence vid nästa körning om mönstret bekräftas
-
-enrich_metadata():
-    1. Hitta noder med rik node_context men fattig metadata
-    2. Fråga LLM: "Extrahera role, keywords, etc. från kontext"
-    3. Uppdatera nod-properties
-```
-
-*Relation till andra objekt:*
-- Bygger på OBJEKT-67 (Dream Directives) - nya relationer kan vara "dreams" för bekräftelse
-- Kompletterar OBJEKT-66 (Extractor + Critic) - fångar vad som missades vid ingestion
-
-*Risk från kant-validering (OBJEKT-67):*
-RE-CATEGORIZE använder HARDFAIL vid ogiltiga kanter. Detta kan skapa problem för OBJEKT-70:
-- Nya relationer skapade av `discover_relations()` kan blockera framtida RE-CATEGORIZE
-- **Lösning krävs:** Antingen "soft delete" av ogiltiga kanter, eller review-queue för manuell hantering
-- Alternativt: Nya relationer från OBJEKT-70 skapas med `source: "inferred"` och kan auto-tas bort vid typbyte
+- ✅ Schema-beskrivningar injiceras i `structural_analysis`
+- ✅ Kant-validering vid RE-CATEGORIZE
+- ✅ Context-pruning efter MERGE
 
 ---
 
-### EPIC-01 Steg 4: Trigger & Scheduling (EJ PÅBÖRJAD)
-
-#### OBJEKT-61: Dreamer Trigger-mekanism (AKTIV)
-*Problem:* Dreamer körs bara vid rebuild. Grafen blir "smutsig" mellan.
-*Alternativ:*
-1. **Schema:** Kör varje natt (cron/launchd)
-2. **Watchdog:** Kör när Lake uppdateras (inotify)
-3. **Threshold:** Kör när X nya entiteter skapats
-4. **On-demand:** MCP-verktyg som triggar Dreamer
-*Status:* Öppen designfråga. Behöver beslut.
-*Se:* Konflikt 61 i `my_mem_koncept_logg.md`
-
----
-
-### EPIC-01 Steg 5: Ingestion-förbättringar (AKTIV)
-
-#### OBJEKT-45: Levande Metadata vid Insamling (AKTIV)
-*Status:* Delvis. Graf-kontext injiceras.
-*Kvarstående:*
-- Extraktion av `dates_mentioned`, `actions`, `deadlines`
-- Bättre context injection i Transcriber
-
-#### OBJEKT-62: Transcription Truncation (PÅGÅENDE)
-*Problem:* Långa transkriptioner trunkeras (58 MB ljud → 9 KB transkript).
-*Rotorsak:* Gemini Pro output-token-gräns (~8k tokens).
-*Lösning:* Pass 2 returnerar INTE `transcript`, bara:
-- `speaker_map`: {"Talare 1": "Anna"}
-- `metadata`: title, summary, keywords, entities
-- Python applicerar `speaker_map` på `raw_transcript` från Pass 1
-
----
-
-### Historik & Lärdomar
+### Historik & Lärdomar (EPIC-01)
 
 **Konflikt 46 (2025-12-03):** Statisk metadata vid insamling ledde till att viktiga fakta missades vid sökning. Insikt: Metadata måste vara "levande" - därav Dreamer.
 
@@ -333,111 +227,120 @@ RE-CATEGORIZE använder HARDFAIL vid ogiltiga kanter. Detta kan skapa problem f�
 
 ---
 
-## Övriga Aktiva Objekt
+## Aktiva Objekt
 
-### Prio 1 - Rebuild-refaktorering
+### Prio 1 - Rebuild & Infrastruktur
 
 #### OBJEKT-73: Rebuild-process Refaktorering (NY)
 *Status:* EJ PÅBÖRJAD
 *Prioritet:* HÖG
-*Bakgrund:* Efter EPIC-01 (Dreamer datakvalitets-epic) har ingestion-pipelinen genomgått omfattande förbättringar:
-- Extractor + Critic pattern (OBJEKT-66)
-- Canonical name injection
-- Entity resolution med graf-lookup
-- Schema-validering och typnormalisering (OBJEKT-69)
-
-*Problem:* `tools/rebuild/` använder fortfarande gammal logik som inte drar nytta av dessa förbättringar.
-
-*Nuläge:*
-- `tool_staged_rebuild.py` - Fasad rebuild (foundation → incremental → dreamer)
-- `tool_hard_reset.py` - Total omstart (rensar Lake/Index)
-- Rebuild kör `ingestion_engine.process_document()` men saknar integration med nya Critic-steget
+*Bakgrund:* Efter EPIC-01 har ingestion-pipelinen genomgått omfattande förbättringar. Rebuild-processen måste synkroniseras.
 
 *Scope:*
-1. **Granska staged_rebuild vs ingestion_engine:**
-   - Säkerställ att rebuild använder exakt samma pipeline som realtids-ingestion
-   - Undvik duplicerad logik
-2. **Integrera Dreamer i rebuild:**
-   - Efter foundation-fas: kör Dreamer för initial städning
-   - Efter incremental-fas: kör Dreamer igen för cross-document resolution
-3. **Validering:**
-   - Lägg till validering att rebuild producerar samma resultat som manuell ingestion
-   - Jämför entity-counts före/efter
-4. **Dokumentation:**
-   - Uppdatera `CLAUDE.md` med rebuild-workflow
-   - Dokumentera när man ska använda hard_reset vs staged_rebuild
+1. Säkerställ att rebuild använder exakt samma pipeline som realtids-ingestion
+2. Integrera Dreamer-faser i staged rebuild
+3. Lägg till validering och dokumentation
 
-*Relation till andra objekt:*
-- Bygger på OBJEKT-66 (Extractor + Critic) - ny pipeline måste användas
-- Relaterat till OBJEKT-72 (Robust Testsvit) - rebuild bör vara testbar
+*Relation:* Bygger på OBJEKT-66, relaterat till OBJEKT-72
 
 ---
 
-### Prio 2 - Infrastruktur
+### Prio 2 - Dreamer Utökningar (fd. EPIC-01 icke-påbörjade)
 
-*(OBJEKT-68 detaljer finns under EPIC-01 Steg 1 ovan)*
+#### OBJEKT-74: Dream Directives - MCP Integration (NY, fd. OBJEKT-67 kvarstående)
+*Status:* EJ PÅBÖRJAD
+*Prioritet:* MEDEL
+*Bakgrund:* Kvarstående arbete från OBJEKT-67. Core Dreamer operations är klara, men användar-interaktion saknas.
+
+*Scope:*
+- [ ] MCP Tools: `report_observation()`, `get_pending_dreams()`, `confirm_dream()`
+- [ ] `dream_candidates` tabell i GraphStore
+- [ ] User confirmation workflow
+
+*Koncept:* MCP-klienten observerar brus under arbete och förbereder "dreams" för användarbekräftelse.
+
+#### OBJEKT-75: Relation Discovery & Metadata Enrichment (NY, fd. OBJEKT-70)
+*Status:* EJ PÅBÖRJAD
+*Prioritet:* LÅG
+*Problem:* Dreamer städar grafen men upptäcker inte NYA relationer eller berikar metadata.
+
+*Scope:*
+1. **Implicit Relation Discovery:** Hitta nod-par som co-förekommer ofta → skapa edge
+2. **Metadata Enrichment:** Extrahera role, keywords från rik node_context
+3. **Cross-Document Inference:** Koppla ihop information från flera dokument
+
+*Risk:* Nya relationer kan blockera RE-CATEGORIZE. Lösning: `source: "inferred"` för auto-borttagning.
+
+#### OBJEKT-76: Dreamer Trigger-mekanism (NY, fd. OBJEKT-61)
+*Status:* EJ PÅBÖRJAD (designfråga)
+*Prioritet:* LÅG
+*Problem:* Dreamer körs bara vid rebuild. Grafen blir "smutsig" mellan körningar.
+
+*Alternativ:*
+1. **Schema:** Kör varje natt (cron/launchd)
+2. **Watchdog:** Kör när Lake uppdateras
+3. **Threshold:** Kör när X nya entiteter skapats
+4. **On-demand:** MCP-verktyg som triggar Dreamer
+
+*Se:* Konflikt 61 i `my_mem_koncept_logg.md`
+
+#### OBJEKT-44: Entity Resolution & Alias Learning (AKTIV)
+*Status:* Delvis implementerat (EntityGatekeeper finns)
+*Prioritet:* MEDEL
+*Kvarstående:*
+- Flytande Canonical (swap-mekanism: "Jocke" → "Joakim Ekman")
+- LLM-bedömning av trovärdighet
+- Dreamer-integration för lärande
+
+---
+
+### Prio 3 - Ingestion-förbättringar
+
+#### OBJEKT-45: Levande Metadata vid Insamling (AKTIV)
+*Status:* Delvis klar (graf-kontext injiceras)
+*Prioritet:* MEDEL
+*Kvarstående:*
+- Extraktion av `dates_mentioned`, `actions`, `deadlines`
+- Bättre context injection i Transcriber
+
+#### OBJEKT-62: Transcription Truncation (PÅGÅENDE)
+*Status:* Design klar, ej implementerat
+*Prioritet:* MEDEL
+*Problem:* Långa transkriptioner trunkeras (58 MB ljud → 9 KB transkript).
+*Rotorsak:* Gemini Pro output-token-gräns (~8k tokens).
+
+*Lösning:* Pass 2 returnerar INTE `transcript`, bara:
+- `speaker_map`: {"Talare 1": "Anna"}
+- `metadata`: title, summary, keywords, entities
+- Python applicerar `speaker_map` på `raw_transcript` från Pass 1
+
+---
+
+### Prio 4 - Test & Kvalitet
+
+#### OBJEKT-72: Robust Testsvit (NY)
+*Status:* Delvis klar
+*Prioritet:* MEDEL
+
+*Principer:*
+1. **HARDFAIL på allt kritiskt**
+2. **Validera att operationer faktiskt kördes**
+3. **Minsta förväntade resultat**
+4. **Explicit felmeddelanden**
+
+*Scope:*
+1. **test_property_chain.py** (KLAR 2026-01-17) ✅
+2. **test_mcp_search.py** (att granska)
+3. **test_ingestion_e2e.py** (att skapa)
+4. **test_dreamer_operations.py** (att skapa)
+5. **CI-integration** (framtida)
 
 #### OBJEKT-71: Loggningsarkitektur (NY)
 *Status:* EJ PÅBÖRJAD
-*Problem:* Systemloggen (`my_mem_system.log`) växer snabbt och blir svårhanterlig. Alla tjänster loggar till samma fil.
+*Prioritet:* LÅG
+*Problem:* Alla tjänster loggar till samma fil.
 
-*Nuläge:*
-- En enda loggfil: `~/MyMemory/Logs/my_mem_system.log`
-- Alla tjänster (TRANS, VECTOR, SLACK, RETRIEVER, GMAIL, CALENDAR, Dreamer) loggar hit
-- Svårt att filtrera och analysera
-
-*Förslag:*
-1. **Separata loggfiler per tjänst:**
-   - `dreamer.log` - Dreamer-beslut och operationer
-   - `ingestion.log` - Fil-bearbetning
-   - `mcp.log` - MCP-server-anrop
-   - `system.log` - Övergripande systemhändelser
-2. **Rotation:** Daglig rotation, behåll 7 dagar
-3. **Strukturerad loggning:** JSON-format för maskinell analys
-
-*Prioritet:* Låg (infrastruktur, kan vänta)
-
-#### OBJEKT-72: Robust Testsvit (NY)
-*Status:* EJ PÅBÖRJAD
-*Syfte:* Skapa en 100% robust testsvit som garanterar dataintegritet och systemstabilitet.
-
-*Bakgrund:*
-`test_property_chain.py` visade att tester som returnerar PASS trots att kritiska operationer misslyckades är värdelösa. Testet uppdaterades 2026-01-17 med HARDFAIL-kontroller.
-
-*Principer:*
-1. **HARDFAIL på allt kritiskt** - Inga tysta fallbacks, inga "hoppar över" som ger PASS
-2. **Validera att operationer faktiskt kördes** - Räkna LLM-anrop, kontrollera confidence > 0
-3. **Minsta förväntade resultat** - Om test-input ska producera 3 entiteter, faila vid < 3
-4. **Explicit felmeddelanden** - Varje FAIL ska förklara exakt vad som gick fel
-
-*Scope:*
-1. **test_property_chain.py** (KLAR 2026-01-17)
-   - ✅ MIN_EXPECTED_ENTITIES validering
-   - ✅ Prompt-laddning valideras
-   - ✅ LLM-anrop räknas och valideras
-   - ✅ Alla entiteter måste få svar
-
-2. **test_mcp_search.py** (att granska)
-   - [ ] Validera att sökresultat faktiskt returneras
-   - [ ] HARDFAIL om MCP-server inte startar
-   - [ ] Validera response-struktur
-
-3. **Ny: test_ingestion_e2e.py** (att skapa)
-   - [ ] Testa hela ingestion-flödet isolerat
-   - [ ] Validera Lake-fil skapas med rätt frontmatter
-   - [ ] Validera graf-noder och kanter skapas
-   - [ ] Validera vektor-indexering
-
-4. **Ny: test_dreamer_operations.py** (att skapa)
-   - [ ] Testa MERGE, SPLIT, RENAME, DELETE, RE-CATEGORIZE isolerat
-   - [ ] Mock-data för kontrollerade scenarier
-   - [ ] Validera att operationer faktiskt ändrar grafen
-
-5. **CI-integration** (framtida)
-   - [ ] Köra tester vid varje commit
-   - [ ] Blocka push vid FAIL
-
-*Prioritet:* Medel (testinfrastruktur, men kritisk för kvalitet)
+*Förslag:* Separata loggfiler per tjänst, rotation, strukturerad loggning.
 
 ---
 
@@ -463,5 +366,5 @@ Dessa objekt är fortfarande potentiellt relevanta men inte prioriterade.
 
 ---
 
-*Senast uppdaterad: 2026-01-17 (OBJEKT-73 tillagt)*
+*Senast uppdaterad: 2026-01-17 (EPIC-01 konsoliderad, nya objekt 74-76)*
 *Se `my_mem_koncept_logg.md` för resonemang bakom beslut.*
