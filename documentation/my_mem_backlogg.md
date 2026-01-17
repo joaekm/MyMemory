@@ -271,16 +271,24 @@ extract_text → extract_entities_mcp → critic_filter_entities → resolve_ent
 
 *Risk:* Nya relationer kan blockera RE-CATEGORIZE. Lösning: `source: "inferred"` för auto-borttagning.
 
-#### OBJEKT-76: Dreamer Trigger-mekanism (NY, fd. OBJEKT-61)
-*Status:* EJ PÅBÖRJAD (designfråga)
+#### OBJEKT-76: Dreamer Trigger-mekanism (DESIGN KLAR 2026-01-17, fd. OBJEKT-61)
+*Status:* Design klar, implementation ej påbörjad
 *Prioritet:* LÅG
 *Problem:* Dreamer körs bara vid rebuild. Grafen blir "smutsig" mellan körningar.
 
-*Alternativ:*
-1. **Schema:** Kör varje natt (cron/launchd)
-2. **Watchdog:** Kör när Lake uppdateras
-3. **Threshold:** Kör när X nya entiteter skapats
-4. **On-demand:** MCP-verktyg som triggar Dreamer
+*Beslutad design:*
+- **Mekanism:** Threshold-baserad triggning
+- **Räknare:** JSON-fil (`~/MyMemory/Index/.dreamer_state.json`)
+- **Trigger:** Separat daemon (`dreamer_daemon.py`) som pollar räknaren
+- **Threshold:** Konfigurerbart i `my_mem_config.yaml` (default ~15 noder)
+- **Fallback:** Max 24h sedan senaste körning
+- **Körning:** Launchd - förbereder för framtida menubar-app
+
+*Implementation:*
+1. [ ] Lägg till threshold-config i `my_mem_config.yaml`
+2. [ ] Skapa `dreamer_daemon.py` med poll-loop
+3. [ ] Uppdatera ingestion att öka räknare vid nya graf-noder
+4. [ ] Skapa `com.mymemory.dreamer.plist` för launchd
 
 *Se:* Konflikt 61 i `my_mem_koncept_logg.md`
 

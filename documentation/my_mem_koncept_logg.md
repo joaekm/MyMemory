@@ -1116,7 +1116,7 @@ Pipeline v8.x hade blivit allt mer sofistikerad: IntentRouter, Planner med ReAct
 
 ---
 
-## Konflikt 61: Dreamer Trigger (Öppen designfråga)
+## Konflikt 61: Dreamer Trigger (LÖST 2026-01-17)
 
 **Datum:** Januari 2026
 
@@ -1136,9 +1136,24 @@ Pipeline v8.x hade blivit allt mer sofistikerad: IntentRouter, Planner med ReAct
     3. **Threshold:** Kör när X nya entiteter skapats
     4. **On-demand:** MCP-verktyg som triggar Dreamer
 
-### Status
-* Öppen fråga. Behöver en god startpunkt för design.
-* Dreamer fungerar tekniskt, men trigger-mekanismen saknas.
+### Beslut (2026-01-17)
+* **Mekanism:** Threshold-baserad triggning
+* **Räknare:** JSON-fil (`~/MyMemory/Index/.dreamer_state.json`)
+* **Trigger:** Separat daemon som pollar räknaren
+* **Threshold:** Konfigurerbart värde i `my_mem_config.yaml` (default ~15 noder)
+* **Fallback:** Max 24h sedan senaste körning
+* **Körning:** Launchd (macOS) - förbereder för framtida menubar-app
+
+### Motivation
+* Threshold batchar ihop entiteter → Entity Resolution fungerar bättre med flera att jämföra
+* Launchd passar framtida macOS menubar-app som hanterar alla MyMemory-tjänster
+* Daemon-approach separerar ansvaret från ingestion-flödet
+
+### Implementation
+* `dreamer_daemon.py` - standalone script som pollar räknaren
+* `com.mymemory.dreamer.plist` - launchd-konfiguration
+* Ingestion ökar räknaren vid nya graf-noder
+* Daemon kollar threshold + tid sedan senaste körning
 
 ---
 
