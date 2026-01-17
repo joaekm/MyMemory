@@ -102,237 +102,193 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
 
 ---
 
-## Aktiva Objekt
+## EPIC-01: Dreamer - Intelligent Grafförädling
 
-### Prio 1 - Datakvalitet
+**Status:** PÅGÅENDE
+**Startdatum:** 2026-01-15
+**Syfte:** Implementera ett komplett system för kontinuerlig förädling av kunskapsgrafen.
 
-* **OBJEKT-65 (LÖST - POC):** **Extractor + Critic Pattern** för entity-extraktion.
-    * *Status:* POC genomförd 2026-01-15. Resultat positiva.
-    * *Testresultat:* Se `tools/test_results/poc_extractor_critic_2026-01-15.md`
-    * *Sammanfattning:*
-        - 72% färre nya noder (47 → 13) - undviker dubbletter
-        - 40% brusreduktion via Critic
-        - 0 missade normaliseringar (baseline hade 3)
-        - 20% rikare metadata i summaries
-    * *Slutsats:* POC bekräftar att Extractor + Critic + canonical_name-injection fungerar.
-    * *Nästa steg:* Se OBJEKT-66 för implementation.
+### Vision
+Dreamer är den "sovande" intelligensen som analyserar hela kunskapsbasen och optimerar för användaren. Till skillnad från Ingestion (som hanterar ny data) arbetar Dreamer med helheten - hittar dubbletter, löser up entiteter, städar brus, och förbättrar datakvaliteten över tid.
 
-* **OBJEKT-66 (AKTIV):** Implementera **Extractor + Critic Pipeline** i produktion.
-    * *Bakgrund:* POC (OBJEKT-65) visade tydliga förbättringar. Redo för implementation.
-    * *Scope:*
-        1. Låta `EntityGatekeeper.resolve_entity()` returnera `canonical_name` vid LINK
-        2. Flytta semantic metadata-generering till EFTER extraktion i `doc_converter.py`
-        3. Injicera kanoniska namn i prompten för `relations_summary`
-        4. Implementera Critic-steget mellan Extractor och Gatekeeper
-    * *Påverkan:*
-        - `services/processors/doc_converter.py` (pipeline-ordning)
-        - `services/utils/entity_gatekeeper.py` (canonical_name-retur)
-        - `config/services_prompts.yaml` (ny Critic-prompt, uppdaterad semantic-prompt)
-    * *Förväntad effekt:*
-        - Färre dubbletter i grafen
-        - Konsistenta namn i Lake metadata
-        - Renare graf med mindre brus
-    * *POC-referens:* `tools/poc_extractor_critic.py`, `tools/test_results/poc_extractor_critic_2026-01-15.md`
+### Arkitektur (beslutad 2026-01-17)
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ FAS 3: DREAMING                                                 │
+│ Ansvar: Förädla ALL data som helhet                            │
+│ Perspektiv: Helheten (optimera för användaren)                 │
+├─────────────────────────────────────────────────────────────────┤
+│ engines/                                                        │
+│   └── dreamer.py             # Batch-förädling                 │
+│       ├── scan_candidates()                                     │
+│       ├── structural_analysis()  # SPLIT/RENAME/DELETE         │
+│       ├── entity_resolution()    # MERGE                       │
+│       └── propagate_changes()    # Uppdatera Lake/Vektor       │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-* **OBJEKT-62 (PÅGÅENDE):** Fixa **Transcription Truncation**.
-    * *Problem:* Långa transkriptioner trunkeras i Lake-filer.
-    * *Rotorsak:* Gemini Pro (Pass 2) har output-token-gräns (~8k tokens). Prompten ber om hela transkriptet i JSON-fältet `"transcript"`, vilket kapas vid långa möten.
-    * *Bevis:* Filer som `Inspelning_20251212_1400` (58 MB ljud → 9 KB transkript) slutar mitt i en mening.
-    * *Lösning:* Ändra Pass 2 prompt så den INTE returnerar `transcript`. Returnera istället:
-        - `speaker_map`: {"Talare 1": "Anna", "Talare 2": "Erik"}
-        - `metadata`: title, summary, location, keywords, entities
-        - Python applicerar `speaker_map` på `raw_transcript` från Pass 1 (Flash)
-    * *Påverkan:* `services/processors/transcriber.py`, `config/services_prompts.yaml`
+### Operationer
+| Operation | Beskrivning | Trigger |
+|-----------|-------------|---------|
+| **MERGE** | Slå ihop dubbletter | Semantisk likhet > 90% |
+| **SPLIT** | Dela upp blandade entiteter | Motstridiga kontext-bevis |
+| **RENAME** | Uppgradera till kanoniskt namn | Bättre namnform hittad |
+| **DELETE** | Ta bort isolerade brus-noder | Låg konfidens, inga relationer |
+| **RE-CATEGORIZE** | Ändra nodtyp | Bevis tyder på felaktig typ |
 
-* **OBJEKT-63 (LÖST):** Implementera **Rigorös Metadata-testkedja**.
-    * *Lösning:* E2E-regressionstest implementerat i `tools/test_property_chain.py`.
-    * *Detaljer:*
-        - Testar hela kedjan: DocConverter → Lake → VectorIndexer → Dreamer → Graf
-        - Skapar testfil, kör pipeline, validerar properties i varje steg
-        - HARDFAIL vid brutna kedjor, okända properties, eller saknade required fields
-        - `include_in_vector`-flagga i scheman styr vilken metadata som indexeras
-        - Nya schema: `config/lake_metadata_template.json` (SSOT för Lake frontmatter)
-        - Uppdaterat: `config/graph_schema_template.json` med `include_in_vector`-flaggor
-    * *Användning:* `python tools/test_property_chain.py` (kör fullständigt test), `--dry-run` (visa schema), `--keep` (behåll testdata)
+### POC-resultat (2026-01-15)
+**OBJEKT-65: Extractor + Critic Pattern**
+- 72% färre nya noder (47 → 13) - undviker dubbletter
+- 40% brusreduktion via Critic
+- 0 missade normaliseringar (baseline hade 3)
+- 20% rikare metadata i summaries
+- *Testresultat:* `tools/test_results/poc_extractor_critic_2026-01-15.md`
 
-* **OBJEKT-69 (LÖST 2026-01-17):** Implementera **Generell Typvalidering** i SchemaValidator.
-    * *Problem:* `node_context[].text` sparades ibland som lista istället för sträng, vilket kraschade `vector_service.py` och `index_search_mcp.py` vid `' | '.join()`.
-    * *Rotorsak:* SchemaValidator saknade typvalidering - bara required och enum validerades.
-    * *Lösning:*
-        - Lade till `item_schema` i `graph_schema_template.json` för `node_context` med explicit typning `{text: string, origin: string}`
-        - Ny metod `_validate_type()` i SchemaValidator för djup typvalidering inkl. nästlade strukturer
-        - Ny funktion `normalize_value()` för typnormalisering vid ingestion
-        - Normalisering av `node_context` i `ingestion_engine.py` (LLM kan returnera lista)
-        - Strikt typvalidering i `test_property_chain.py` - FAILA om `node_context[].text` inte är sträng
-    * *Påverkade filer:*
-        - `config/graph_schema_template.json`
-        - `services/utils/schema_validator.py`
-        - `services/engines/ingestion_engine.py`
-        - `tools/test_property_chain.py`
-    * *Städning:* 5 felaktiga test-noder raderades från grafen.
+### POC-verktyg
+**`tools/tool_dreamer_dryrun.py`** - Teknisk ritning för produktionsimplementation
+- Kör Dreamer-logiken utan att skriva till grafen
+- Loggar alla beslut för analys
+- Testar tröskelvärden och spärrar
+- **Utökningar (2026-01-17):**
+  - Schema-beskrivningar injiceras i `structural_analysis`
+  - Kant-validering vid RE-CATEGORIZE via SchemaValidator
+  - Context-pruning simulering vid MERGE
 
-* **OBJEKT-44 (AKTIV):** Implementera **"Entity Resolution & Alias Learning"**.
-    * *Status:* Delvis implementerat. EntityGatekeeper finns. Alias-learning saknas.
-    * *Kvarstående:*
-        - Flytande Canonical (swap-mekanism)
-        - LLM-bedömning av trovärdighet
-        - Dreamer-integration för lärande
+---
 
-* **OBJEKT-45 (AKTIV):** Implementera **"Levande Metadata vid Insamling"**.
-    * *Status:* Delvis. Graf-kontext injiceras. Rikare extraktion saknas.
-    * *Kvarstående:*
-        - Extraktion av `dates_mentioned`, `actions`, `deadlines`
-        - Bättre context injection i Transcriber
+### EPIC-01 Steg 1: Grundinfrastruktur (KLAR)
+
+#### OBJEKT-68: Arkitekturanalys (KLAR 2026-01-17)
+- ✅ Tre-fas pipeline definierad (Collect → Ingest → Dream)
+- ✅ `services/engines/` katalog skapad
+- ✅ `dreamer.py` flyttad från `agents/` till `engines/`
+- ✅ `ingestion_engine.py` skapad (fd. `doc_converter.py`)
+- ✅ LLM-anrop konsoliderade till `LLMService`
+- ✅ Svenska → engelska funktionsnamn
+- *Se:* Konflikt 62 i `my_mem_koncept_logg.md`
+
+#### OBJEKT-63: Metadata-testkedja (KLAR 2026-01-15)
+- ✅ E2E-test: `tools/test_property_chain.py`
+- ✅ Validerar hela kedjan: Schema → DocConverter → Lake → Vector → Graf
+- ✅ HARDFAIL vid brutna kedjor
+- ✅ `include_in_vector`-flagga i scheman
+
+#### OBJEKT-69: Generell Typvalidering (KLAR 2026-01-17)
+- ✅ `item_schema` i `graph_schema_template.json` för `node_context`
+- ✅ `_validate_type()` i SchemaValidator
+- ✅ `normalize_value()` för typnormalisering vid ingestion
+- ✅ 5 felaktiga test-noder raderade
+- *Lärdom:* LLM kan returnera `text` som lista - måste normaliseras explicit.
+
+#### OBJEKT-64: Config-Driven Refaktorering (KLAR 2026-01-15)
+- ✅ Nya config-sektioner: `search`, `collectors`, `validation`, `dreamer.thresholds`
+- ✅ Inga hårdkodade värden i Python-kod
+
+---
+
+### EPIC-01 Steg 2: Entity Resolution (PÅGÅENDE)
+
+#### OBJEKT-65: Extractor + Critic POC (KLAR 2026-01-15)
+- ✅ POC genomförd med positiva resultat
+- ✅ Dokumenterat i `tools/test_results/poc_extractor_critic_2026-01-15.md`
+- *Slutsats:* Extractor + Critic + canonical_name-injection fungerar.
+
+#### OBJEKT-66: Extractor + Critic i Produktion (AKTIV)
+*Bakgrund:* POC (OBJEKT-65) visade tydliga förbättringar. Redo för implementation.
+*Scope:*
+1. Låta `EntityGatekeeper.resolve_entity()` returnera `canonical_name` vid LINK
+2. Flytta semantic metadata-generering till EFTER extraktion i `ingestion_engine.py`
+3. Injicera kanoniska namn i prompten för `relations_summary`
+4. Implementera Critic-steget mellan Extractor och Gatekeeper
+*Påverkan:*
+- `services/engines/ingestion_engine.py` (pipeline-ordning)
+- `services/utils/entity_gatekeeper.py` (canonical_name-retur)
+- `config/services_prompts.yaml` (ny Critic-prompt)
+*POC-referens:* `tools/poc_extractor_critic.py`
+
+#### OBJEKT-44: Entity Resolution & Alias Learning (AKTIV)
+*Status:* Delvis implementerat. EntityGatekeeper finns.
+*Kvarstående:*
+- Flytande Canonical (swap-mekanism: "Jocke" → "Joakim Ekman")
+- LLM-bedömning av trovärdighet
+- Dreamer-integration för lärande
+
+---
+
+### EPIC-01 Steg 3: Dreamer Operationer (PÅGÅENDE)
+
+#### OBJEKT-67: Dream Directives (PÅGÅENDE)
+*Koncept:* MCP-klienten observerar brus under arbete och förbereder "dreams" för användarbekräftelse.
+
+**Klart (2026-01-17):**
+- ✅ Unified ingestion pipeline
+- ✅ Borttagen `vector_indexer.py` (redundant)
+- ✅ EntityGatekeeper-logik flyttad till `GraphService.find_node_by_name()`
+- ✅ `search_graph_nodes` söker i hela properties JSON
+- ✅ Dreamer dryrun använder `batch_generate()` för parallella LLM-anrop
+- ✅ `validate_rules.py` skärpt
+- ✅ POC: Schema-beskrivningar injiceras i `structural_analysis`
+- ✅ POC: Kant-validering vid RE-CATEGORIZE
+- ✅ POC: Context-pruning simulering vid MERGE
+
+**Kvarstår:**
+- [ ] **PRODUKTIONSFIX:** `recategorize_node()` validerar inte kanter efter typbyte
+- [ ] **PRODUKTIONSFIX:** `merge_nodes()` anropar inte `prune_context()` efteråt
+- [ ] MCP Tools: `report_observation()`, `get_pending_dreams()`, `confirm_dream()`
+- [ ] `dream_candidates` tabell i GraphStore
+- [ ] User confirmation workflow
+
+---
+
+### EPIC-01 Steg 4: Trigger & Scheduling (EJ PÅBÖRJAD)
+
+#### OBJEKT-61: Dreamer Trigger-mekanism (AKTIV)
+*Problem:* Dreamer körs bara vid rebuild. Grafen blir "smutsig" mellan.
+*Alternativ:*
+1. **Schema:** Kör varje natt (cron/launchd)
+2. **Watchdog:** Kör när Lake uppdateras (inotify)
+3. **Threshold:** Kör när X nya entiteter skapats
+4. **On-demand:** MCP-verktyg som triggar Dreamer
+*Status:* Öppen designfråga. Behöver beslut.
+*Se:* Konflikt 61 i `my_mem_koncept_logg.md`
+
+---
+
+### EPIC-01 Steg 5: Ingestion-förbättringar (AKTIV)
+
+#### OBJEKT-45: Levande Metadata vid Insamling (AKTIV)
+*Status:* Delvis. Graf-kontext injiceras.
+*Kvarstående:*
+- Extraktion av `dates_mentioned`, `actions`, `deadlines`
+- Bättre context injection i Transcriber
+
+#### OBJEKT-62: Transcription Truncation (PÅGÅENDE)
+*Problem:* Långa transkriptioner trunkeras (58 MB ljud → 9 KB transkript).
+*Rotorsak:* Gemini Pro output-token-gräns (~8k tokens).
+*Lösning:* Pass 2 returnerar INTE `transcript`, bara:
+- `speaker_map`: {"Talare 1": "Anna"}
+- `metadata`: title, summary, keywords, entities
+- Python applicerar `speaker_map` på `raw_transcript` från Pass 1
+
+---
+
+### Historik & Lärdomar
+
+**Konflikt 46 (2025-12-03):** Statisk metadata vid insamling ledde till att viktiga fakta missades vid sökning. Insikt: Metadata måste vara "levande" - därav Dreamer.
+
+**Konflikt 42 (2025-11-XX):** Felstavade namn ("Sänk" vs "Cenk Bisgen") behandlades som olika personer. Lösning: Entity Resolution med aliases i grafen.
+
+**Konflikt 54 (2025-12-21):** One-shot classification missade nyanser. Lösning: Multipass Extraction - parallella LLM-anrop per domän.
+
+**Konflikt 56 (2025-12-23):** Automatisk extraktion skapar oundvikligen fel. Lösning: Human-in-the-loop validering (Dream Directives).
+
+---
+
+## Övriga Aktiva Objekt
 
 ### Prio 2 - Infrastruktur
 
-* **OBJEKT-64 (LÖST):** Fullständig **Config-Driven Refaktorering**.
-    * *Status:* Alla violations fixade 2026-01-15.
-    * *Lösning:* Nya config-sektioner: `search`, `collectors`, `validation`, utökad `processing`.
-    * *Fixade filer:*
-        - `index_search_mcp.py`: Använder nu `SEARCH_CONFIG`
-        - `slack_collector.py`: Använder nu `collectors.slack.page_size`
-        - `doc_converter.py`: Använder nu `processing.summary_max_chars`, `header_scan_chars`
-        - `date_service.py`: Använder nu `validation.min_year`
-        - `validator_mcp.py`: Använder nu `get_model_lite()`
-        - `dreamer.py`: Använder nu `dreamer.thresholds`
-        - `tool_validate_system.py`: Använder nu `VectorService`
-        - `export_graph_to_obsidian.py`: Använder nu relativa sökvägar
-
-* **OBJEKT-61 (AKTIV):** Designa **Dreamer Trigger-mekanism**.
-    * *Problem:* Dreamer körs bara vid rebuild. Grafen blir "smutsig" mellan.
-    * *Alternativ:* Schema (nattlig), Watchdog, Threshold, On-demand via MCP.
-    * *Se:* Konflikt 61 i `my_mem_koncept_logg.md`
-
-* **OBJEKT-67 (PÅGÅENDE):** Implementera **Dream Directives** - Observational Learning för Dreamer.
-    * *Status:* Grundarbete klart 2026-01-17. POC-verktyg utökat 2026-01-17.
-    * *Klart:*
-        - Unified ingestion pipeline (DocConverter → Lake → Vector → Graf i ett flöde)
-        - Borttagen `vector_indexer.py` (redundant)
-        - EntityGatekeeper-logik flyttad till `GraphStore.find_node_by_name()`
-        - `search_graph_nodes` söker nu i hela properties JSON (name, node_context, etc.)
-        - Dreamer dryrun använder `batch_generate()` för parallella LLM-anrop
-        - `validate_rules.py` skärpt: fångar `except Exception` med logging men utan raise
-        - `node_context` prompt uppdaterad för kortare, entitets-fokuserade beskrivningar
-        - ~~`structural_analysis` prompt saknas~~ KORRIGERING: Prompten finns (rad 162-190 i services_prompts.yaml)
-        - **POC: Schema-beskrivningar injiceras i structural_analysis** - LLM får nu nodtyp-definitioner från schemat för bättre RE-CATEGORIZE/DELETE-beslut
-        - **POC: Kant-validering vid RE-CATEGORIZE** - Använder `SchemaValidator.validate_edge()` för att logga vilka relationer som blir ogiltiga vid typbyte
-        - **POC: Context-pruning simulering vid MERGE** - Visar hur `node_context` skulle reduceras efter merge (triggas vid 15+ entries)
-    * *Kvarstår:*
-        - **PRODUKTIONSFIX:** `recategorize_node()` i graph_service.py validerar inte kanter efter typbyte - bör använda SchemaValidator
-        - **PRODUKTIONSFIX:** `merge_nodes()` anropar inte `prune_context()` efteråt - node_context kan växa ohämmat
-        - MCP Tools: `report_observation()`, `get_pending_dreams()`, `confirm_dream()`
-        - dream_candidates tabell i GraphStore
-        - User confirmation workflow
-    * *Koncept:* MCP-klienten (Claude Desktop) observerar brus under arbete och förbereder "dreams" för användarbekräftelse.
-    * *Operationer:* MERGE, SPLIT, RENAME, DELETE, RECATEGORIZE
-    * *Relation:* Bygger på OBJEKT-61 (trigger-mekanism) och kompletterar OBJEKT-66 (entity resolution)
-    * *POC-verktyg:* `tools/tool_dreamer_dryrun.py` - teknisk ritning för produktionsimplementation
-
-* **OBJEKT-68 (PÅGÅENDE):** Arkitekturanalys - **Kunskapsflödets Helhet**.
-    * *Bakgrund:* Innan vi lägger till fler komponenter (Dream Directives, MCP-verktyg) behöver vi förstå helheten.
-    * *Användarens fråga (2026-01-17):*
-      > "Vi tittar på hanteringen av ny kunskap som en 'helhet' och avgör vilka steg som behövs för att uppnå ett önskat resultat."
-    * *Kärnfrågor och SVAR:*
-      1. **Vad är det önskade resultatet?**
-         > Bra datakvalitet i samtliga datakällor (graf/vektor/Lake) för systemets grundsyfte: Hjälpa användaren att nå all samlad kunskap i vilken dimension som helst. När som helst.
-      2. **Var ska intelligensen ligga?**
-         > BÅDA. Men med olika perspektiv:
-         > - **Ingestion:** Föda NY data (för första gången) och ge den grundformat enligt systemets schema, samt koppla den till resten av datat enligt rådande ögonblicksbild.
-         > - **Dreaming:** Övergripande dataförädling för att påverka ALL data som helhet - optimera för användaren.
-      3. **Är `structural_analysis` redundant?**
-         > "Vi får se." - Avgörs efter att vi definierat stegen tydligare.
-    * *BESLUTAD ARKITEKTUR (2026-01-17):*
-      ```
-      ┌─────────────────────────────────────────────────────────────────┐
-      │ FAS 1: COLLECT & NORMALIZE                                      │
-      │ Ansvar: Hämta data från källor + normalisera till enhetligt     │
-      │ Perspektiv: Per källa                                           │
-      ├─────────────────────────────────────────────────────────────────┤
-      │ collectors/                                                     │
-      │   ├── file_retriever.py      # DropZone → Assets (UUID-namn)   │
-      │   ├── slack_collector.py     # Slack API → normaliserad text   │
-      │   ├── gmail_collector.py     # Gmail API → normaliserad text   │
-      │   ├── calendar_collector.py  # Calendar API → normaliserad text│
-      │   └── (framtida: harvest, teams, etc.)                         │
-      │                                                                 │
-      │ processors/                                                     │
-      │   ├── transcriber.py         # Ljud → text                     │
-      │   └── text_extractor.py      # PDF/DOCX/TXT → text (NY FIL)    │
-      │                                                                 │
-      │ Output: Enhetlig text + source_metadata                        │
-      └─────────────────────────────────────────────────────────────────┘
-                                    ↓
-      ┌─────────────────────────────────────────────────────────────────┐
-      │ FAS 2: INGESTION                                                │
-      │ Ansvar: Integrera normaliserad data i kunskapssystemet          │
-      │ Perspektiv: Ögonblicksbilden (koppla till befintligt)          │
-      ├─────────────────────────────────────────────────────────────────┤
-      │ engines/                                                        │
-      │   └── ingestion_engine.py    # Orchestrerar hela flödet        │
-      │       ├── generate_semantic_metadata()                          │
-      │       ├── extract_entities()                                    │
-      │       ├── resolve_against_graph()                               │
-      │       ├── write_lake()                                          │
-      │       ├── write_graph()                                         │
-      │       └── write_vector()                                        │
-      │                                                                 │
-      │ Output: Lake (.md) + Graf (noder/kanter) + Vektor (ChromaDB)   │
-      └─────────────────────────────────────────────────────────────────┘
-                                    ↓
-      ┌─────────────────────────────────────────────────────────────────┐
-      │ FAS 3: DREAMING                                                 │
-      │ Ansvar: Förädla ALL data som helhet                            │
-      │ Perspektiv: Helheten (optimera för användaren)                 │
-      ├─────────────────────────────────────────────────────────────────┤
-      │ engines/                                                        │
-      │   └── dreamer.py             # Batch-förädling                 │
-      │       ├── scan_candidates()                                     │
-      │       ├── structural_analysis()  # SPLIT/RENAME/DELETE         │
-      │       ├── entity_resolution()    # MERGE                       │
-      │       └── propagate_changes()    # Uppdatera Lake/Vektor       │
-      └─────────────────────────────────────────────────────────────────┘
-      ```
-    * *NAMNKONVENTIONER (beslutade 2026-01-17):*
-      | Kategori | Konvention | Exempel |
-      |----------|------------|---------|
-      | Språk | Engelska | `process_document()`, inte `processa_dokument()` |
-      | Services | `*Service` | `GraphService`, `VectorService`, `LakeService` |
-      | Collectors | `*_collector.py` | `file_collector.py`, `slack_collector.py` |
-      | Engines | `*_engine.py` | `ingestion_engine.py` |
-      | Funktioner | `verb_object()` | `extract_text()`, `process_audio()` |
-    * *REFAKTORERING (KLAR 2026-01-17):*
-      | Nuvarande | Nytt | Status |
-      |-----------|------|--------|
-      | `file_retriever.py` | `file_collector.py` | ✅ |
-      | `doc_converter.py` | `engines/ingestion_engine.py` | ✅ |
-      | `agents/dreamer.py` | `engines/dreamer.py` | ✅ |
-      | `GraphStore` | `GraphService` | ✅ |
-      | `LakeEditor` | `LakeService` | ✅ |
-      | `EntityResolver` | `Dreamer` | ✅ |
-      | `processa_dokument()` | `process_document()` | ✅ |
-      | `processa_mediafil()` | `process_audio()` | ✅ |
-      | `ladda_yaml()` | `load_yaml()` | ✅ |
-    * *Genomförda steg:*
-      1. ✅ Skapa `services/engines/` katalog
-      2. ✅ Bryt ut `extract_text()` → `processors/text_extractor.py`
-      3. ✅ Flytta + byt namn: `doc_converter.py` → `engines/ingestion_engine.py`
-      4. ✅ Flytta: `dreamer.py` → `engines/dreamer.py`
-      5. ✅ Byt namn: `file_retriever.py` → `file_collector.py`
-      6. ✅ Byt klassnamn: `GraphStore` → `GraphService`, `LakeEditor` → `LakeService`, `EntityResolver` → `Dreamer`
-      7. ✅ Byt funktionsnamn: svenska → engelska
-      8. ✅ Konsolidera LLM-anrop till `LLMService`
-    * *LLM-KONSOLIDERING (KLAR 2026-01-17):*
-      Alla LLM-anrop går nu genom `services/utils/llm_service.py`:
-      | Fil | Metod |
-      |-----|-------|
-      | `engines/ingestion_engine.py` | `LLMService.generate()` |
-      | `engines/dreamer.py` | `LLMService.generate()` |
-      | `processors/transcriber.py` | `LLMService.client` (multimodal audio) |
-      | `agents/validator_mcp.py` | `LLMService.client` (multi-turn) |
-
-      Borttaget: 4 separata `genai.Client`, `LLMClient` klass, duplicerad API-nyckelhantering.
-    * *Status:* OBJEKT-68 KLAR - arkitektur renodlad, namnkonventioner införda, LLM centraliserad.
+*(OBJEKT-68 detaljer finns under EPIC-01 Steg 1 ovan)*
 
 ---
 
