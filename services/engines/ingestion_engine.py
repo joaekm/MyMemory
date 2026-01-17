@@ -192,17 +192,34 @@ def extract_content_date(text: str) -> str:
     return "UNKNOWN"
 
 
-def generate_semantic_metadata(text: str) -> Dict[str, Any]:
+def generate_semantic_metadata(text: str, resolved_entities: List[Dict] = None) -> Dict[str, Any]:
     """
     Generate summary and keywords using a lightweight model.
     Used for vector indexing and searchability.
+
+    If resolved_entities is provided, canonical names are injected into
+    the prompt for better relations_summary quality.
     """
     prompt_template = get_prompt('doc_converter', 'doc_summary_prompt')
     if not prompt_template:
         LOGGER.warning("Summary prompt missing in config, returning empty metadata")
         return {"context_summary": "", "relations_summary": "", "document_keywords": []}
 
-    safe_text = text[:SUMMARY_MAX_CHARS]
+    # Bygg entity-kontext om tillgänglig
+    entity_context = ""
+    if resolved_entities:
+        entity_lines = []
+        for e in resolved_entities:
+            if e.get("action") in ["LINK", "CREATE"]:
+                canonical = e.get("canonical_name", e.get("label", ""))
+                etype = e.get("type", "Unknown")
+                if canonical:
+                    entity_lines.append(f"- {canonical} ({etype})")
+        if entity_lines:
+            entity_context = "\n\nKÄNDA ENTITETER I DOKUMENTET:\n" + "\n".join(entity_lines)
+
+    # Injicera entity-kontext i slutet av texten
+    safe_text = text[:SUMMARY_MAX_CHARS] + entity_context
     final_prompt = prompt_template.format(text=safe_text)
 
     llm = _get_llm_service()
@@ -336,13 +353,69 @@ def extract_entities_mcp(text: str, source_hint: str = "") -> Dict[str, Any]:
         raise RuntimeError(f"MCP Entity Extraction failed: {e}") from e
 
 
+def critic_filter_entities(nodes: List[Dict]) -> List[Dict]:
+    """
+    LLM-baserad filtrering av extraherade entiteter.
+    Returnerar endast godkända noder.
+
+    Fallback: Returnerar alla noder om prompt saknas eller LLM misslyckas.
+    """
+    import json
+
+    if not nodes:
+        return []
+
+    # Förbered för granskning
+    entities_for_review = [
+        {"name": n.get("name"), "type": n.get("type"), "confidence": n.get("confidence", 0.5)}
+        for n in nodes if n.get("name") and n.get("type")
+    ]
+
+    if not entities_for_review:
+        return []
+
+    prompt_template = get_prompt('doc_converter', 'entity_critic')
+    if not prompt_template:
+        LOGGER.warning("entity_critic prompt saknas - hoppar över Critic-steget")
+        return nodes  # Fallback: returnera alla
+
+    prompt = prompt_template.format(
+        entities_json=json.dumps(entities_for_review, indent=2, ensure_ascii=False)
+    )
+
+    llm = _get_llm_service()
+    response = llm.generate(prompt, TaskType.VALIDATION)
+
+    if not response.success:
+        LOGGER.error(f"Critic LLM failed: {response.error}")
+        return nodes  # Fallback vid fel
+
+    result = parse_llm_json(response.text)
+    approved_names = {e["name"] for e in result.get("approved", [])}
+
+    # Logga statistik
+    rejected = result.get("rejected", [])
+    if rejected:
+        LOGGER.info(f"Critic: {len(approved_names)} godkända, {len(rejected)} avvisade")
+        for rej in rejected[:5]:  # Logga max 5 avvisade
+            LOGGER.debug(f"  Avvisad: {rej.get('name')} ({rej.get('type')}) - {rej.get('reason', 'N/A')}")
+
+    # Filtrera original-noder baserat på godkända namn
+    return [n for n in nodes if n.get("name") in approved_names]
+
+
 def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, filename: str) -> List[Dict]:
     """
     Resolve extracted entities against existing graph.
     Returns list of mentions (actions to perform).
+
+    Includes canonical_name for each entity:
+    - LINK: canonical_name from graph (the authoritative name)
+    - CREATE: canonical_name = input name
     """
     mentions = []
     name_to_uuid = {}
+    name_to_canonical = {}  # Maps input name -> canonical name
 
     graph = GraphService(GRAPH_DB_PATH, read_only=True)
     seen_candidates = set()
@@ -380,24 +453,30 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
         if existing_uuid:
             action = "LINK"
             target_uuid = existing_uuid
+            # Hämta kanoniskt namn från grafen
+            existing_node = graph.get_node(existing_uuid)
+            canonical_name = existing_node.get("name", name) if existing_node else name
         else:
             action = "CREATE"
             target_uuid = str(uuid.uuid4())
+            canonical_name = name  # Vid CREATE = input-namn
 
         name_to_uuid[name] = target_uuid
+        name_to_canonical[name] = canonical_name
 
         mentions.append({
             "action": action,
             "target_uuid": target_uuid,
             "type": type_str,
             "label": name,
+            "canonical_name": canonical_name,
             "node_context_text": node_context_text,
             "confidence": confidence
         })
 
     graph.close()
 
-    # Handle relations
+    # Handle relations - use canonical names for source_text
     for edge in edges:
         source_name = edge.get('source')
         target_name = edge.get('target')
@@ -407,6 +486,9 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
         if source_name in name_to_uuid and target_name in name_to_uuid:
             source_uuid = name_to_uuid[source_name]
             target_uuid = name_to_uuid[target_name]
+            # Använd canonical names i source_text
+            source_canonical = name_to_canonical.get(source_name, source_name)
+            target_canonical = name_to_canonical.get(target_name, target_name)
 
             mentions.append({
                 "action": "CREATE_EDGE",
@@ -414,7 +496,7 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
                 "target_uuid": target_uuid,
                 "edge_type": rel_type,
                 "confidence": rel_conf,
-                "source_text": f"{source_name} -> {target_name}"
+                "source_text": f"{source_canonical} -> {target_canonical}"
             })
 
     return mentions
@@ -582,24 +664,28 @@ def process_document(filepath: str, filename: str):
         elif "calendar" in filepath.lower():
             source_type = "Calendar Event"
 
-        # 3. Generate semantic metadata
-        semantic_metadata = generate_semantic_metadata(raw_text)
-
-        # 4. Extract entities via MCP
+        # 3. Extract entities via MCP
         entity_data = extract_entities_mcp(raw_text, source_hint=source_type)
         nodes = entity_data.get('nodes', [])
         edges = entity_data.get('edges', [])
 
-        # 5. Resolve entities against graph
-        ingestion_payload = resolve_entities(nodes, edges, source_type, filename)
+        # 4. Critic-filtrering (LLM filtrerar brus)
+        filtered_nodes = critic_filter_entities(nodes)
+        LOGGER.info(f"Critic: {len(nodes)} → {len(filtered_nodes)} noder")
 
-        # 6. Write to Lake
+        # 5. Resolve entities against graph (returnerar canonical_name)
+        ingestion_payload = resolve_entities(filtered_nodes, edges, source_type, filename)
+
+        # 6. Generate semantic metadata MED entity-kontext (FLYTTAD hit)
+        semantic_metadata = generate_semantic_metadata(raw_text, ingestion_payload)
+
+        # 7. Write to Lake
         write_lake(unit_id, filename, raw_text, source_type, semantic_metadata, ingestion_payload)
 
-        # 7. Write to Graph
+        # 8. Write to Graph
         write_graph(unit_id, filename, ingestion_payload)
 
-        # 8. Write to Vector
+        # 9. Write to Vector
         timestamp_ingestion = datetime.datetime.now().isoformat()
         write_vector(unit_id, filename, raw_text, source_type, semantic_metadata, timestamp_ingestion)
 

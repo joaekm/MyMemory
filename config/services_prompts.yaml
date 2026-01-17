@@ -132,6 +132,28 @@ doc_converter:
     TEXT ATT ANALYSERA:
     "{text_chunk}"
 
+  entity_critic: |
+    Du är en strikt kvalitetsgranskare för Knowledge Graph-entiteter.
+
+    Granska listan nedan och FILTRERA BORT entiteter som är:
+    1. **Brus** - Generiska termer, verb, adjektiv, systemtermer
+    2. **Felkategoriserade** - Typ matchar inte definitionen
+    3. **Dubbletter** - Varianter av samma entitet
+
+    === TYPDEFINTIONER ===
+    - Person: Namngiven individ (för-/efternamn)
+    - Organization: Företag, myndighet, organisation
+    - Project: Tidsbegränsat initiativ med tydligt mål
+    - Roles: Formell yrkestitel
+
+    === ENTITETER ATT GRANSKA ===
+    {entities_json}
+
+    Returnera JSON:
+    {{
+      "approved": [{{"name": "...", "type": "...", "reason": "kort motivering"}}],
+      "rejected": [{{"name": "...", "type": "...", "reason": "varför avvisad"}}]
+    }}
 
 # --- Dreamer (Taxonomi-konsolidering) ---
 dreamer:

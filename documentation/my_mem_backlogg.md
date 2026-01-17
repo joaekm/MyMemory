@@ -193,18 +193,26 @@ Dreamer är den "sovande" intelligensen som analyserar hela kunskapsbasen och op
 - ✅ Dokumenterat i `tools/test_results/poc_extractor_critic_2026-01-15.md`
 - *Slutsats:* Extractor + Critic + canonical_name-injection fungerar.
 
-#### OBJEKT-66: Extractor + Critic i Produktion (AKTIV)
-*Bakgrund:* POC (OBJEKT-65) visade tydliga förbättringar. Redo för implementation.
-*Scope:*
-1. Låta `EntityGatekeeper.resolve_entity()` returnera `canonical_name` vid LINK
-2. Flytta semantic metadata-generering till EFTER extraktion i `ingestion_engine.py`
-3. Injicera kanoniska namn i prompten för `relations_summary`
-4. Implementera Critic-steget mellan Extractor och Gatekeeper
-*Påverkan:*
-- `services/engines/ingestion_engine.py` (pipeline-ordning)
-- `services/utils/entity_gatekeeper.py` (canonical_name-retur)
-- `config/services_prompts.yaml` (ny Critic-prompt)
-*POC-referens:* `tools/poc_extractor_critic.py`
+#### OBJEKT-66: Extractor + Critic i Produktion (KLAR 2026-01-17)
+*Bakgrund:* POC (OBJEKT-65) visade tydliga förbättringar.
+
+**Implementerat:**
+- ✅ `critic_filter_entities()` - LLM-baserad filtrering av extraherade entiteter
+- ✅ `resolve_entities()` returnerar `canonical_name` vid LINK (hämtas från graf)
+- ✅ Semantic metadata genereras EFTER entity extraction (pipeline-ordning ändrad)
+- ✅ Kanoniska namn injiceras i `generate_semantic_metadata()` prompten
+- ✅ Ny prompt `entity_critic` i `config/services_prompts.yaml`
+
+**Nytt pipeline-flöde:**
+```
+extract_text → extract_entities_mcp → critic_filter_entities → resolve_entities → generate_semantic_metadata → write_*
+```
+
+**Ändrade filer:**
+- `services/engines/ingestion_engine.py` (critic_filter_entities, canonical_name, pipeline-ordning)
+- `config/services_prompts.yaml` (entity_critic prompt)
+
+*Verifierat med:* `test_property_chain.py` - PASS
 
 #### OBJEKT-44: Entity Resolution & Alias Learning (AKTIV)
 *Status:* Delvis implementerat. EntityGatekeeper finns.
