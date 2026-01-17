@@ -23,9 +23,18 @@ from services.utils.graph_service import GraphService
 from services.utils.vector_service import VectorService
 from services.utils.lake_service import LakeService
 from services.agents.validator_mcp import LLMClient
-from services.utils.schema_validator import get_schema_validator
+from services.utils.schema_validator import SchemaValidator
 
 LOGGER = logging.getLogger("Dreamer")
+
+_SCHEMA_VALIDATOR = None
+
+def _get_schema_validator():
+    """Get cached SchemaValidator instance."""
+    global _SCHEMA_VALIDATOR
+    if _SCHEMA_VALIDATOR is None:
+        _SCHEMA_VALIDATOR = SchemaValidator()
+    return _SCHEMA_VALIDATOR
 
 
 def _load_dreamer_config() -> dict:
