@@ -76,7 +76,10 @@ class Dreamer:
         try:
             with open(path, "r") as f:
                 data = yaml.safe_load(f)
-                return data.get("entity_resolver", {})
+                # Merge dreamer and entity_resolver sections
+                prompts = data.get("dreamer", {})
+                prompts.update(data.get("entity_resolver", {}))
+                return prompts
         except Exception as e:
             LOGGER.error(f"Failed to load prompts from {path}: {e}")
             return {}

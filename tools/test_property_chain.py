@@ -144,6 +144,9 @@ The project discussed is called Test Project.
 This content is designed to trigger entity extraction and test the full pipeline.
 """
 
+# Minimum antal förväntade entiteter - test-dokumentet nämner Person, Organization, Project
+MIN_EXPECTED_ENTITIES = 2
+
 
 # === TEST STEPS ===
 
@@ -352,25 +355,123 @@ class PropertyChainTest:
             self.log_violation("STEP5", f"Vektor-validering kraschade: {e}")
             return False
 
-    # --- STEP 6: Run Dreamer (optional, if entities extracted) ---
+    # --- STEP 6: Run Dreamer (structural analysis on test entities) ---
     def step6_run_dreamer(self) -> bool:
-        """Kör Dreamer för att förädla graf-noder"""
-        self.log_info("Steg 6: Kör Dreamer (graf-förädling)...")
+        """Kör Dreamer structural_analysis på test-entiteterna"""
+        self.log_info("Steg 6: Kör Dreamer (structural_analysis)...")
 
         try:
-            from services.engines.dreamer import run_dreamer_cycle
+            from services.engines.dreamer import Dreamer
+            from services.utils.graph_service import GraphService
+            from services.utils.vector_service import VectorService
 
-            # Kör en Dreamer-cykel
-            run_dreamer_cycle(max_nodes=10)
-            self.log_pass("STEP6", "Dreamer körde utan fel")
+            graph_path = self.config.get('paths', {}).get('graph_db')
+            if not graph_path:
+                self.log_violation("STEP6", "Config saknar paths.graph_db")
+                return False
+
+            # Instansiera Dreamer med services (absolut sökväg till prompts)
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            prompts_path = os.path.join(base_dir, "config", "services_prompts.yaml")
+
+            graph = GraphService(graph_path, read_only=False)
+            vector = VectorService()
+            dreamer = Dreamer(graph, vector, config_path=prompts_path)
+
+            # HARDFAIL: Validera att kritiska prompts laddades
+            if not dreamer.prompts:
+                self.log_violation("STEP6", "Dreamer.prompts är tom - inga prompts laddades")
+                return False
+
+            if 'structural_analysis' not in dreamer.prompts:
+                self.log_violation("STEP6",
+                    f"Prompt 'structural_analysis' saknas. Tillgängliga: {list(dreamer.prompts.keys())}")
+                return False
+
+            with graph:
+                # Hitta test-entiteter (samma logik som step7)
+                all_nodes = graph.conn.execute("SELECT id, type, properties FROM nodes").fetchall()
+
+                test_entities = []
+                for row in all_nodes:
+                    node_id, node_type, props_json = row
+                    props = json.loads(props_json) if props_json else {}
+                    node_context = props.get('node_context', [])
+
+                    for ctx in node_context:
+                        if isinstance(ctx, dict) and ctx.get('origin') == self.test_uuid:
+                            test_entities.append({
+                                'id': node_id,
+                                'type': node_type,
+                                'properties': props,
+                                'node_context': node_context
+                            })
+                            break
+
+                # HARDFAIL: Test-dokumentet ska producera entiteter
+                if not test_entities:
+                    self.log_violation("STEP6",
+                        f"Inga test-entiteter hittades med origin={self.test_uuid}. "
+                        "DocConverter extraherar inte entiteter korrekt.")
+                    return False
+
+                # HARDFAIL: Minsta antal entiteter
+                if len(test_entities) < MIN_EXPECTED_ENTITIES:
+                    self.log_violation("STEP6",
+                        f"Endast {len(test_entities)} entiteter skapades, förväntade minst {MIN_EXPECTED_ENTITIES}. "
+                        "Test-dokumentet nämner Person, Organization, Project.")
+                    return False
+
+                self.log_info(f"Kör structural_analysis på {len(test_entities)} test-entiteter...")
+
+                # Kör structural_analysis på varje test-entitet
+                analyses = []
+                llm_calls_made = 0
+                for entity in test_entities:
+                    analysis = dreamer.check_structural_changes(entity)
+
+                    # Räkna LLM-anrop (confidence > 0 indikerar faktiskt svar)
+                    confidence = analysis.get('confidence', 0.0)
+                    if confidence > 0.0:
+                        llm_calls_made += 1
+
+                    analyses.append({
+                        'id': entity['id'],
+                        'type': entity['type'],
+                        'action': analysis.get('action', 'UNKNOWN'),
+                        'confidence': confidence
+                    })
+                    self.log_info(f"  {entity['id']}: {analysis.get('action')} ({confidence:.0%})")
+
+                # HARDFAIL: Validera att alla analyser returnerade giltiga actions
+                valid_actions = {'KEEP', 'MERGE', 'SPLIT', 'RENAME', 'DELETE', 'RE-CATEGORIZE'}
+                for a in analyses:
+                    if a['action'] not in valid_actions:
+                        self.log_violation("STEP6", f"Ogiltig action '{a['action']}' för {a['id']}")
+                        return False
+
+                # HARDFAIL: Validera att LLM faktiskt anropades (inte bara default-svar)
+                if llm_calls_made == 0:
+                    self.log_violation("STEP6",
+                        "Inga LLM-anrop returnerade confidence > 0. "
+                        "Antingen misslyckades anropen eller så saknas prompts.")
+                    return False
+
+                # HARDFAIL: Alla entiteter ska ha fått LLM-svar
+                if llm_calls_made < len(test_entities):
+                    self.log_violation("STEP6",
+                        f"Endast {llm_calls_made}/{len(test_entities)} entiteter fick LLM-svar. "
+                        "Vissa anrop misslyckades.")
+                    return False
+
+            self.log_pass("STEP6", f"Dreamer analyserade {len(test_entities)} entiteter med {llm_calls_made} LLM-anrop")
             return True
-        except ImportError:
-            self.log_info("Dreamer har ingen run_dreamer_cycle, hoppar över...")
-            return True  # Inte ett fel - Dreamer kanske inte har denna funktion
+
         except Exception as e:
-            # Dreamer-fel är inte kritiska för property chain
-            self.log_info(f"Dreamer-varning (ej kritiskt): {e}")
-            return True
+            self.log_violation("STEP6", f"Dreamer kraschade: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     # --- STEP 7: Validate Graph nodes ---
     def step7_validate_graph(self) -> bool:
@@ -413,11 +514,17 @@ class PropertyChainTest:
                             })
                             break
 
-                # Validera att entiteter skapades
+                # HARDFAIL: Entiteter ska finnas
                 if not test_entities:
                     self.log_violation("STEP7",
                         f"Inga entiteter med origin={self.test_uuid} hittades i grafen. "
                         "DocConverter extraherar entiteter men skriver inte till grafen.")
+                    return False
+
+                # HARDFAIL: Minsta antal entiteter
+                if len(test_entities) < MIN_EXPECTED_ENTITIES:
+                    self.log_violation("STEP7",
+                        f"Endast {len(test_entities)} entiteter skapades, förväntade minst {MIN_EXPECTED_ENTITIES}.")
                     return False
 
                 self.log_info(f"Hittade {len(test_entities)} entiteter från test-dokumentet")
@@ -502,8 +609,9 @@ class PropertyChainTest:
             from services.utils.vector_service import VectorService
             vs = VectorService()
             vs.delete(self.test_uuid)
-        except Exception:
-            pass
+        except Exception as e:
+            # Logga cleanup-fel (inte HARDFAIL, men bör synas)
+            print(f"  [WARN] Cleanup: Kunde inte ta bort från vektor-db: {e}")
 
     # --- RUN ALL ---
     def run(self) -> bool:
