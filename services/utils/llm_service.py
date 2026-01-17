@@ -167,7 +167,7 @@ class LLMService:
         )
 
         # Retry-inställningar
-        self.max_parallel = 5  # Max parallella anrop mot moln
+        self.max_parallel = 30  # Max parallella anrop mot moln
         self.retry_attempts = 3
         self.retry_delay = 1.0  # Sekunder mellan retries
 
@@ -211,7 +211,7 @@ class LLMService:
             TaskType.ENRICHMENT: tasks.get('enrichment', 'model_fast'),
             TaskType.CONSOLIDATION: tasks.get('consolidation', 'model_pro'),
             TaskType.VALIDATION: 'model_lite',
-            TaskType.STRUCTURAL_ANALYSIS: 'model_lite',
+            TaskType.STRUCTURAL_ANALYSIS: 'model_fast',  # Lite klarar ej strukturell analys
             TaskType.ENTITY_RESOLUTION: 'model_lite',
         }
 
@@ -257,6 +257,16 @@ class LLMService:
                     model=model,
                     contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
                 )
+
+                # Kontrollera att svaret inte är tomt
+                if not response.text or not response.text.strip():
+                    LOGGER.warning(f"LLM returnerade tomt svar för modell {model}")
+                    return LLMResponse(
+                        text="",
+                        success=False,
+                        error="LLM returnerade tomt svar",
+                        model=model
+                    )
 
                 # Rapportera framgång till throttler
                 self.throttler.report_success()

@@ -1139,3 +1139,102 @@ Pipeline v8.x hade blivit allt mer sofistikerad: IntentRouter, Planner med ReAct
 ### Status
 * Öppen fråga. Behöver en god startpunkt för design.
 * Dreamer fungerar tekniskt, men trigger-mekanismen saknas.
+
+---
+
+## Konflikt 62: Arkitekturrefaktorering OBJEKT-68 (Januari 2026)
+
+**Datum:** 2026-01-17
+
+### Problemet
+* Kodbasen hade blandade ansvar och inkonsekvent namngivning:
+    - `agents/dreamer.py` och `processors/doc_converter.py` var centrala motorer, inte "agenter" eller "processorer"
+    - Svenska funktionsnamn blandade med engelska
+    - LLM-anrop skedde med separata `genai.Client`-instanser i flera filer
+
+### Beslut: Tre-fas pipeline med tydlig rollfördelning
+
+**Fas 1: Collect & Normalize**
+- File Retriever: DropZone → Assets (UUID-normalisering)
+
+**Fas 2: Ingestion (NYA data)**
+- `services/engines/ingestion_engine.py`: Bearbetar NYA filer första gången
+- Ansvar: Konvertering, metadata-extraktion, initial graf-skapning, vektor-indexering
+- LLM-användning: `TaskType.ENRICHMENT`
+- Trigger: Ny fil detekterad
+
+**Fas 3: Dreaming (HELA kunskapsbasen)**
+- `services/engines/dreamer.py`: Batch-förädling av hela datan
+- Ansvar: Entity Resolution, merge/split/rename, konfidens-uppdatering
+- LLM-användning: `TaskType.ENTITY_RESOLUTION`, `TaskType.STRUCTURAL_ANALYSIS`
+- Trigger: Schemalagt / manuellt
+
+### Distinktion: Ingestion vs Dreamer
+
+| Aspekt | Ingestion Engine | Dreamer |
+|--------|------------------|---------|
+| **Trigger** | Ny fil i DropZone | Schemalagt / manuellt |
+| **Scope** | Ett dokument | Hela kunskapsbasen |
+| **LLM-användning** | `ENRICHMENT` (metadata) | `ENTITY_RESOLUTION`, `STRUCTURAL` |
+| **Graf-operationer** | Skapa noder | Merge, split, rename |
+| **Konfidens** | Initial (0.5) | Uppdateras vid bekräftelse |
+| **Fråga den besvarar** | "Vad finns i DETTA dokument?" | "Hur passar detta ihop med ALLT ANNAT?" |
+
+**Nyckelinsikt:** Ingestion är **snabb och självständig** - den behöver inte veta om resten av grafen. Dreamer är **reflekterande** - den analyserar helheten och optimerar.
+
+### Refaktorering genomförd
+
+1. **Filstruktur:**
+   - `services/engines/` ny katalog för centrala motorer
+   - `dreamer.py` flyttad från `agents/` till `engines/`
+   - `ingestion_engine.py` flyttad från `processors/` (var `doc_converter.py`)
+
+2. **Namnbyte (svenska → engelska):**
+   - `ladda_yaml` → `load_yaml`
+   - `skapa_rich_header` → `create_rich_header`
+   - `processa_mediafil` → `process_audio`
+   - `inspektera_graf` → `inspect_graph`
+   - `inspektera_nod` → `inspect_node`
+
+3. **LLM-konsolidering via LLMService:**
+   - Alla filer använder nu central `LLMService` singleton
+   - `ingestion_engine.py`: `.generate()` med `TaskType.ENRICHMENT`
+   - `dreamer.py`: `.generate()` med `TaskType.ENTITY_RESOLUTION`
+   - `transcriber.py`: `.client` för multimodal (file upload)
+   - `validator_mcp.py`: `.client` för multi-turn konversation
+
+### LLMService-arkitektur
+
+```python
+class LLMService:
+    """Singleton för centraliserade LLM-anrop."""
+
+    # Modeller (från config)
+    models = {'pro': ..., 'fast': ..., 'lite': ...}
+
+    # Task → Modell mappning
+    task_model_map = {
+        TaskType.TRANSCRIPTION: 'pro',
+        TaskType.ENRICHMENT: 'fast',
+        TaskType.VALIDATION: 'lite',
+        TaskType.ENTITY_RESOLUTION: 'lite',
+        TaskType.STRUCTURAL_ANALYSIS: 'lite',
+    }
+
+    # Centraliserad throttling och retry
+    throttler = AdaptiveThrottler(...)
+```
+
+**Användning:**
+- Enkel prompt: `llm.generate(prompt, TaskType.ENRICHMENT)`
+- Batch: `llm.batch_generate(prompts, TaskType.VALIDATION)`
+- Multimodal/Multi-turn: `llm.client` för direkt åtkomst
+
+### Fördelar med refaktoreringen
+1. **Tydlig rollfördelning** - varje motor har ett definierat ansvar
+2. **Central LLM-hantering** - throttling, retry, modellval på ett ställe
+3. **Konsekvent namngivning** - engelska funktionsnamn genomgående
+4. **Enklare test** - property chain test (`tools/test_property_chain.py`) validerar hela flödet
+
+### Status
+✅ OBJEKT-68 komplett (2026-01-17)

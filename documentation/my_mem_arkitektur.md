@@ -1,7 +1,7 @@
 
-# Systemarkitektur (v6.0 - MCP-pivot)
+# Systemarkitektur (v7.0 - Tre-fas pipeline)
 
-Detta dokument beskriver den tekniska sanningen om systemets implementation, uppdaterad efter pivoten från egen chatt till MCP-exponering (Januari 2026).
+Detta dokument beskriver den tekniska sanningen om systemets implementation, uppdaterad efter OBJEKT-68 refaktorering (Januari 2026).
 
 ## 1. Huvudprinciper
 
@@ -14,6 +14,8 @@ Detta dokument beskriver den tekniska sanningen om systemets implementation, upp
 4. **Schema som SSOT:** `graph_schema_template.json` definierar tillåtna nodtyper, relationer och properties.
 
 5. **Idempotens & Självläkning:** Alla agenter hoppar över redan klara filer och fyller automatiskt i hål.
+
+6. **Central LLM-hantering:** Alla LLM-anrop går via `LLMService` singleton med throttling och retry.
 
 ## 2. Datamodell: Trippel Lagring
 
@@ -40,36 +42,69 @@ Alla Lake-filer har tre tidsstämplar i frontmatter:
 - `timestamp_content`: När innehållet faktiskt hände (eller "UNKNOWN")
 - `timestamp_updated`: Sätts av Dreamer vid förädling
 
-## 3. Ingestion-flöde
+## 3. Tre-fas Pipeline
+
+### Översikt
 
 ```
-DropZone → File Retriever → Assets (UUID-normaliserade original)
-                ↓
-    ┌──────────┴──────────┐
-    │                     │
-Transcriber          DocConverter
-(ljud → text)        (text + metadata + graf-extraktion)
-    ↓                     ↓
-Assets/Transcripts   Lake (.md + frontmatter)
-    └─────────────────────┘
-              ↓
-      Vector Indexer (realtid) → ChromaDB
-
-      Dreamer (batch) → Graf-förädling
+┌─────────────────────────────────────────────────────────────────┐
+│ FAS 1: COLLECT & NORMALIZE                                      │
+│ DropZone → File Retriever → Assets (UUID-normaliserade)         │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ FAS 2: INGESTION (nya data, per dokument)                       │
+│     ┌──────────────────┴──────────────────┐                     │
+│     │                                     │                     │
+│ Transcriber                      Ingestion Engine               │
+│ (ljud → text)                    (text + metadata + graf)       │
+│     ↓                                     ↓                     │
+│ Assets/Transcripts               Lake (.md + frontmatter)       │
+│     └─────────────────────────────────────┘                     │
+│                       ↓                                         │
+│               Vector Indexer → ChromaDB                         │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ FAS 3: DREAMING (hela kunskapsbasen, batch)                     │
+│ Dreamer → Entity Resolution, merge/split/rename                 │
+│         → Graf-förädling (DuckDB)                               │
+│         → Lake-uppdatering (node_context)                       │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+### Fasernas roller
+
+| Fas | Trigger | Scope | Fråga |
+|-----|---------|-------|-------|
+| **1. Collect** | Ny fil i DropZone | En fil | "Var ska denna fil lagras?" |
+| **2. Ingestion** | Ny fil i Assets | Ett dokument | "Vad finns i DETTA dokument?" |
+| **3. Dreaming** | Schemalagt/manuellt | Hela kunskapsbasen | "Hur passar allt ihop?" |
 
 ### Komponenter
 
-| Komponent | Bevakar | Output | Funktion |
-|-----------|---------|--------|----------|
-| **File Retriever** | DropZone | Assets | UUID-normalisering, sortering |
-| **Transcriber** | Assets/Recordings | Assets/Transcripts | Ljud → Text via Gemini |
-| **DocConverter** | Assets/* | Lake | Text-extraktion + AI-metadata + EntityGatekeeper |
-| **Vector Indexer** | Lake | ChromaDB | Delta-scan + Watchdog |
-| **Dreamer** | (batch) | Graf + Lake | Entity Resolution, förädling |
+| Komponent | Plats | Bevakar | Output |
+|-----------|-------|---------|--------|
+| **File Retriever** | `collectors/` | DropZone | Assets (UUID-normaliserade) |
+| **Transcriber** | `processors/` | Assets/Recordings | Assets/Transcripts |
+| **Ingestion Engine** | `engines/` | Assets/* | Lake + Graf + Vektor |
+| **Vector Indexer** | `indexers/` | Lake | ChromaDB |
+| **Dreamer** | `engines/` | (batch) | Graf + Lake |
+
+### Distinktion: Ingestion vs Dreamer
+
+| Aspekt | Ingestion Engine | Dreamer |
+|--------|------------------|---------|
+| **Trigger** | Ny fil | Schemalagt/manuellt |
+| **Scope** | Ett dokument | Hela kunskapsbasen |
+| **LLM TaskType** | `ENRICHMENT` | `ENTITY_RESOLUTION` |
+| **Graf-operationer** | Skapa noder | Merge, split, rename |
+| **Konfidens** | Initial (0.5) | Uppdateras vid bekräftelse |
+
+**Nyckelprincip:** Ingestion är **snabb och självständig**. Dreamer är **reflekterande**.
 
 ### EntityGatekeeper (Dubblettkontroll)
-Vid ingestion kontrollerar DocConverter varje entitet:
+Vid ingestion kontrollerar Ingestion Engine varje entitet:
 1. **LINK:** Exakt eller fuzzy-match i grafen → återanvänd befintlig UUID
 2. **CREATE:** Ingen match → skapa ny provisional nod
 
@@ -110,7 +145,7 @@ edges(source TEXT, target TEXT, edge_type TEXT, properties TEXT)
 
 ## 6. Dreamer - Förädling
 
-EntityResolver i `dreamer.py` förädlar på tre platser:
+`services/engines/dreamer.py` förädlar på tre platser:
 
 1. **Vektor (ChromaDB):** Säkerställer att noder är indexerade för semantisk sökning
 2. **Graf (DuckDB):** Merge, split, rename av dubbletter via LLM-bedömning
@@ -120,18 +155,62 @@ EntityResolver i `dreamer.py` förädlar på tre platser:
 - **80% Relevans:** Noder som används ofta och nyligen
 - **20% Underhåll:** Noder som inte städats på länge
 
-### Trigger
-Just nu endast vid rebuild. Designfråga att lösa.
+### LLM-användning
+- `TaskType.ENTITY_RESOLUTION` - för merge/split-beslut
+- `TaskType.STRUCTURAL_ANALYSIS` - för strukturell optimering
 
-## 7. Konfiguration
+### Trigger
+Just nu endast vid rebuild. Designfråga att lösa (OBJEKT-61).
+
+## 7. LLMService - Central LLM-hantering
+
+`services/utils/llm_service.py` är en singleton som hanterar alla LLM-anrop.
+
+### Arkitektur
+
+```python
+class LLMService:
+    """Singleton för centraliserade LLM-anrop."""
+
+    # Modeller (från config)
+    models = {'pro': ..., 'fast': ..., 'lite': ...}
+
+    # Task → Modell mappning
+    task_model_map = {
+        TaskType.TRANSCRIPTION: 'pro',
+        TaskType.ENRICHMENT: 'fast',
+        TaskType.VALIDATION: 'lite',
+        TaskType.ENTITY_RESOLUTION: 'lite',
+        TaskType.STRUCTURAL_ANALYSIS: 'lite',
+    }
+
+    # Centraliserad throttling och retry
+    throttler = AdaptiveThrottler(...)
+```
+
+### Användning per komponent
+
+| Fil | Metod | TaskType | Anledning |
+|-----|-------|----------|-----------|
+| `ingestion_engine.py` | `.generate()` | `ENRICHMENT` | Metadata-generering |
+| `dreamer.py` | `.generate()` | `ENTITY_RESOLUTION` | Merge/split-beslut |
+| `transcriber.py` | `.client` | `TRANSCRIPTION` | Multimodal (file upload) |
+| `validator_mcp.py` | `.client` | `VALIDATION` | Multi-turn konversation |
+
+### Varför `.client` ibland?
+- **Multimodal:** Transcriber behöver `client.files.upload()` för ljudfiler
+- **Multi-turn:** Validator MCP behöver `contents`-lista för konversation
+
+## 8. Konfiguration
 
 | Fil | Syfte |
 |-----|-------|
 | `config/my_mem_config.yaml` | Sökvägar, API-nycklar, modeller |
 | `config/graph_schema_template.json` | SSOT: nodtyper, relationer, properties |
+| `config/lake_metadata_template.json` | SSOT: Lake frontmatter-schema |
 | `config/services_prompts.yaml` | Promptar för tjänster |
 
-## 8. Tech Stack
+## 9. Tech Stack
 
 | Kategori | Teknologi |
 |----------|-----------|
@@ -142,12 +221,37 @@ Just nu endast vid rebuild. Designfråga att lösa.
 | **Embeddings** | KBLab/sentence-bert-swedish-cased (768 dim) |
 | **MCP** | FastMCP |
 
-## 9. Status (Januari 2026)
+## 10. Filstruktur
 
-- **Datakvalitet:** ~70% klar. Principer etablerade.
+```
+services/
+├── agents/                    # MCP-servrar
+│   ├── index_search_mcp.py      # Sök-verktyg (9 st)
+│   └── validator_mcp.py         # Validerings-verktyg (2 st)
+├── collectors/                # Fas 1: Insamling
+│   └── file_retriever.py        # DropZone → Assets
+├── engines/                   # Centrala motorer
+│   ├── dreamer.py               # Fas 3: Batch-förädling
+│   └── ingestion_engine.py      # Fas 2: Dokument-bearbetning
+├── indexers/                  # Indexering
+│   └── vector_indexer.py        # Lake → ChromaDB
+├── processors/                # Specialbearbetning
+│   └── transcriber.py           # Ljud → Text
+└── utils/                     # Hjälpfunktioner
+    ├── graph_service.py         # DuckDB-wrapper
+    ├── lake_service.py          # Lake-operationer
+    ├── llm_service.py           # Central LLM-hantering
+    ├── schema_validator.py      # Schema-validering
+    └── vector_service.py        # ChromaDB-wrapper
+```
+
+## 11. Status (Januari 2026)
+
+- **Datakvalitet:** ~75% klar. Property chain validerad.
 - **MCP-server:** 11 verktyg. Alfa-status. Används med Claude Desktop.
-- **Kvarstående:** Metadata-modell, Dreamer-trigger, ingestion-validering.
+- **OBJEKT-68:** ✅ Komplett. Tre-fas pipeline, LLM-konsolidering.
+- **Kvarstående:** Dreamer-trigger (OBJEKT-61), Extractor+Critic POC.
 
 ---
-*Senast uppdaterad: 2026-01-14*
+*Senast uppdaterad: 2026-01-17*
 *Se `my_mem_koncept_logg.md` för resonemang bakom beslut.*

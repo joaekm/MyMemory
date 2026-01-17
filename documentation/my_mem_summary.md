@@ -11,7 +11,7 @@ policy_tags: []
 original_binary_ref: null
 ---
 
-# Projektets Konceptuella Sammanfattning (v10.0 - MCP-pivot)
+# Projektets Konceptuella Sammanfattning (v11.0 - Tre-fas pipeline)
 
 Detta dokument är en "torr" sammanfattning av slutsatserna. För fullständigt resonemang, se `my_mem_koncept_logg.md`.
 
@@ -37,23 +37,33 @@ Garbage in, garbage out. Bättre data ger bättre svar oavsett reasoning-logik.
 * **Lake:** Normaliserad Markdown med YAML-frontmatter.
 * **Index:** Vektor (ChromaDB) + Graf (DuckDB).
 
-## 3. Dataflöde
+## 3. Tre-fas Pipeline
 
 ```
-DropZone → File Retriever → Assets (UUID-normaliserade)
-                ↓
-    ┌──────────┴──────────┐
-    │                     │
-Transcriber          DocConverter
-(ljud → text)        (text + metadata + graf)
-    ↓                     ↓
-Assets/Transcripts   Lake
-    └─────────────────────┘
-              ↓
-      Vector Indexer (realtid) → ChromaDB
-
-      Dreamer (batch) → Graf-förädling
+┌─────────────────────────────────────────────────────────────────┐
+│ FAS 1: COLLECT & NORMALIZE                                      │
+│ DropZone → File Retriever → Assets (UUID-normaliserade)         │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ FAS 2: INGESTION (nya data, per dokument)                       │
+│ Transcriber + Ingestion Engine → Lake + Graf + Vektor           │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│ FAS 3: DREAMING (hela kunskapsbasen, batch)                     │
+│ Dreamer → Entity Resolution, merge/split/rename                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+### Rollfördelning
+
+| Fas | Motor | Fråga den besvarar |
+|-----|-------|---------------------|
+| **2. Ingestion** | `engines/ingestion_engine.py` | "Vad finns i DETTA dokument?" |
+| **3. Dreaming** | `engines/dreamer.py` | "Hur passar allt ihop?" |
+
+**Nyckelprincip:** Ingestion är snabb och självständig. Dreamer är reflekterande.
 
 ## 4. MCP-exponering
 
@@ -90,17 +100,21 @@ Förädlar på tre platser:
 | **MCP-server** | 11 verktyg. Alfa. Fungerande. Testat. |
 | **Ingestion** | Fungerar. Metadata-modell definierad i SSOT. |
 | **Dreamer** | Fungerar. Trigger-mekanism saknas. |
+| **OBJEKT-68** | ✅ Komplett. Tre-fas pipeline, LLM-konsolidering. |
 
-### Senaste framsteg (2026-01-15)
+### Senaste framsteg (2026-01-17)
+* **OBJEKT-68 (LÖST):** Arkitekturrefaktorering
+  - Tre-fas pipeline: Collect → Ingestion → Dreaming
+  - `services/engines/` ny katalog för centrala motorer
+  - LLM-konsolidering via `LLMService` singleton
+  - Svenska funktionsnamn → engelska
 * **OBJEKT-63 (LÖST):** E2E property chain test (`tools/test_property_chain.py`)
-* **OBJEKT-65 (POC):** Extractor + Critic pattern för bättre entity-extraktion
 * Nytt schema: `lake_metadata_template.json` (SSOT för Lake frontmatter)
 * MCP-testsvit: `tools/test_mcp_search.py` (27 tester, alla pass)
-* Graf-migration: 1487 noder fick `last_synced_at`, `confidence`, `status`
 
 ### Kvarstående
+* Dreamer-trigger i produktion (OBJEKT-61)
 * Extractor + Critic POC (validera hypotes)
-* Dreamer-trigger i produktion
 
 ## 8. Teknisk Stack
 
@@ -123,6 +137,6 @@ Definierade i `.cursorrules` och `CLAUDE.md`:
 4. **Ingen AI-cringe** – Professionella namn (ej "Trädgårdsmästaren")
 
 ---
-*Senast uppdaterad: 2026-01-15*
+*Senast uppdaterad: 2026-01-17*
 *Se `my_mem_arkitektur.md` för teknisk implementation.*
 *Se `my_mem_koncept_logg.md` för resonemang bakom beslut.*
