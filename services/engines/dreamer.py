@@ -449,19 +449,25 @@ class Dreamer:
 
         # === PHASE 2: Batch Merge Evaluation ===
         # Collect all (candidate, match) pairs first
+        candidates_for_merge = len(candidates) - len(skip_merge_ids)
+        LOGGER.info(f"Phase 2: Collecting merge candidates from {candidates_for_merge} nodes...")
         merge_pairs = []
         pair_metadata = []  # Track (node, match) for each pair
 
-        for node in candidates:
+        for i, node in enumerate(candidates):
             node_id = node.get("id")
             if node_id in skip_merge_ids:
                 continue
+
+            if (i + 1) % 10 == 0:
+                LOGGER.info(f"  Finding matches for node {i + 1}/{len(candidates)}...")
 
             matches = self.find_potential_matches(node)
             for match in matches:
                 merge_pairs.append((match, node))
                 pair_metadata.append({"node": node, "match": match})
 
+        LOGGER.info(f"Phase 2: Found {len(merge_pairs)} potential merge pairs")
         if merge_pairs:
             LOGGER.info(f"Phase 2: Merge evaluation for {len(merge_pairs)} pairs...")
             merge_results = self.batch_evaluate_merges(merge_pairs)
