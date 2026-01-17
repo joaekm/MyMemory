@@ -13,7 +13,7 @@ original_binary_ref: null
 
 # Projekt-Backlog
 
-Detta dokument spårar vårt aktiva arbete. Uppdaterad 2026-01-15.
+Detta dokument spårar vårt aktiva arbete. Uppdaterad 2026-01-17.
 
 ## Statusförklaring
 
@@ -188,26 +188,24 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
     * *Alternativ:* Schema (nattlig), Watchdog, Threshold, On-demand via MCP.
     * *Se:* Konflikt 61 i `my_mem_koncept_logg.md`
 
-* **OBJEKT-67 (AKTIV):** Implementera **Dream Directives** - Observational Learning för Dreamer.
+* **OBJEKT-67 (PÅGÅENDE):** Implementera **Dream Directives** - Observational Learning för Dreamer.
+    * *Status:* Grundarbete klart 2026-01-17. Unified pipeline och batch-processing implementerat.
+    * *Klart:*
+        - Unified ingestion pipeline (DocConverter → Lake → Vector → Graf i ett flöde)
+        - Borttagen `vector_indexer.py` (redundant)
+        - EntityGatekeeper-logik flyttad till `GraphStore.find_node_by_name()`
+        - `search_graph_nodes` söker nu i hela properties JSON (name, node_context, etc.)
+        - Dreamer dryrun använder `batch_generate()` för parallella LLM-anrop
+        - `validate_rules.py` skärpt: fångar `except Exception` med logging men utan raise
+        - `node_context` prompt uppdaterad för kortare, entitets-fokuserade beskrivningar
+        - `structural_analysis` prompt saknas i services_prompts.yaml - behöver läggas till
+    * *Kvarstår:*
+        - Lägg till `structural_analysis` prompt i services_prompts.yaml
+        - MCP Tools: `report_observation()`, `get_pending_dreams()`, `confirm_dream()`
+        - dream_candidates tabell i GraphStore
+        - User confirmation workflow
     * *Koncept:* MCP-klienten (Claude Desktop) observerar brus under arbete och förbereder "dreams" för användarbekräftelse.
-    * *Flöde:*
-        1. Claude noterar potentiella dubbletter/brus vid MCP-sökningar
-        2. `report_observation()` sparar som dream_candidate med full node_context
-        3. `get_pending_dreams()` returnerar väntande dreams med kontext för presentation
-        4. Claude presenterar för användaren: "Är 'Joakim Ekman' och 'Joakim' samma person?" + beviskedja
-        5. `confirm_dream()` med user confirmation → Dreamer verkställer operation
-    * *Kritiskt:* Användaren behöver se **node_context** (beviskedjan) för att fatta beslut - inte bara namn!
-    * *MCP Tools (nya):*
-        - `report_observation(node_ids, observation_type, confidence, evidence)`
-        - `get_pending_dreams(limit, include_context=True)`
-        - `confirm_dream(candidate_id, user_confirmation, user_context)`
     * *Operationer:* MERGE, SPLIT, RENAME, DELETE, RECATEGORIZE
-    * *Confidence Boosting:* User confirmation (+0.20), multiple observations (+0.05/st)
-    * *Validering:* 15 identifierade fall i produktionsgrafen (7 tydliga dubbletter, 5 troliga, 2 brus, 1 låg konfidens)
-    * *Påverkan:*
-        - `services/utils/graph_service.py` (ny tabell: dream_candidates)
-        - `services/agents/index_search_mcp.py` (nya MCP-tools)
-        - `services/agents/dreamer.py` (execute confirmed dreams)
     * *Relation:* Bygger på OBJEKT-61 (trigger-mekanism) och kompletterar OBJEKT-66 (entity resolution)
 
 ---
@@ -234,5 +232,5 @@ Dessa objekt är fortfarande potentiellt relevanta men inte prioriterade.
 
 ---
 
-*Senast uppdaterad: 2026-01-16*
+*Senast uppdaterad: 2026-01-17*
 *Se `my_mem_koncept_logg.md` för resonemang bakom beslut.*
