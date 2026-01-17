@@ -275,6 +275,12 @@ enrich_metadata():
 - Bygger på OBJEKT-67 (Dream Directives) - nya relationer kan vara "dreams" för bekräftelse
 - Kompletterar OBJEKT-66 (Extractor + Critic) - fångar vad som missades vid ingestion
 
+*Risk från kant-validering (OBJEKT-67):*
+RE-CATEGORIZE använder HARDFAIL vid ogiltiga kanter. Detta kan skapa problem för OBJEKT-70:
+- Nya relationer skapade av `discover_relations()` kan blockera framtida RE-CATEGORIZE
+- **Lösning krävs:** Antingen "soft delete" av ogiltiga kanter, eller review-queue för manuell hantering
+- Alternativt: Nya relationer från OBJEKT-70 skapas med `source: "inferred"` och kan auto-tas bort vid typbyte
+
 ---
 
 ### EPIC-01 Steg 4: Trigger & Scheduling (EJ PÅBÖRJAD)
@@ -326,6 +332,26 @@ enrich_metadata():
 ### Prio 2 - Infrastruktur
 
 *(OBJEKT-68 detaljer finns under EPIC-01 Steg 1 ovan)*
+
+#### OBJEKT-71: Loggningsarkitektur (NY)
+*Status:* EJ PÅBÖRJAD
+*Problem:* Systemloggen (`my_mem_system.log`) växer snabbt och blir svårhanterlig. Alla tjänster loggar till samma fil.
+
+*Nuläge:*
+- En enda loggfil: `~/MyMemory/Logs/my_mem_system.log`
+- Alla tjänster (TRANS, VECTOR, SLACK, RETRIEVER, GMAIL, CALENDAR, Dreamer) loggar hit
+- Svårt att filtrera och analysera
+
+*Förslag:*
+1. **Separata loggfiler per tjänst:**
+   - `dreamer.log` - Dreamer-beslut och operationer
+   - `ingestion.log` - Fil-bearbetning
+   - `mcp.log` - MCP-server-anrop
+   - `system.log` - Övergripande systemhändelser
+2. **Rotation:** Daglig rotation, behåll 7 dagar
+3. **Strukturerad loggning:** JSON-format för maskinell analys
+
+*Prioritet:* Låg (infrastruktur, kan vänta)
 
 ---
 
