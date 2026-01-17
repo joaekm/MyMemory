@@ -492,7 +492,13 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
     name_to_uuid = {}
     name_to_canonical = {}  # Maps input name -> canonical name
 
-    graph = GraphService(GRAPH_DB_PATH, read_only=True)
+    # Check if database exists before opening in read-only mode
+    # After hard reset, graph is empty - all entities will be CREATE
+    if not os.path.exists(GRAPH_DB_PATH):
+        LOGGER.info(f"Graph DB not found at {GRAPH_DB_PATH}, all entities will be CREATE")
+        graph = None
+    else:
+        graph = GraphService(GRAPH_DB_PATH, read_only=True)
     seen_candidates = set()
 
     for node in nodes:
@@ -523,7 +529,9 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
             confidence = max(confidence, 0.8)
 
         # Entity resolution: LINK if exists, CREATE if new
-        existing_uuid = graph.find_node_by_name(type_str, name, fuzzy=True)
+        existing_uuid = None
+        if graph is not None:
+            existing_uuid = graph.find_node_by_name(type_str, name, fuzzy=True)
 
         if existing_uuid:
             action = "LINK"
@@ -549,7 +557,8 @@ def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, fil
             "confidence": confidence
         })
 
-    graph.close()
+    if graph is not None:
+        graph.close()
 
     # Handle relations - use canonical names for source_text
     for edge in edges:
