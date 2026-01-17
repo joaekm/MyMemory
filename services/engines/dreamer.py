@@ -22,7 +22,7 @@ from typing import List, Dict, Any
 from services.utils.graph_service import GraphService
 from services.utils.vector_service import VectorService
 from services.utils.lake_service import LakeService
-from services.agents.validator_mcp import LLMClient
+from services.utils.llm_service import LLMService, TaskType
 from services.utils.schema_validator import SchemaValidator
 
 LOGGER = logging.getLogger("Dreamer")
@@ -64,7 +64,7 @@ class Dreamer:
                  config_path: str = "config/services_prompts.yaml"):
         self.graph_service = graph_service
         self.vector_service = vector_service
-        self.llm_client = LLMClient()
+        self.llm_service = LLMService()
         self.prompts = self._load_prompts(config_path)
 
     def _load_prompts(self, path: str) -> dict:
@@ -165,9 +165,13 @@ class Dreamer:
             node_b_json=json.dumps(s_clean, indent=2, ensure_ascii=False)
         )
 
+        response = self.llm_service.generate(prompt, TaskType.ENTITY_RESOLUTION)
+        if not response.success:
+            LOGGER.error(f"LLM Evaluation failed: {response.error}")
+            return {"decision": "IGNORE", "confidence": 0.0, "reason": "LLM Error"}
+
         try:
-            response_text = self.llm_client.generate(prompt)
-            cleaned_text = response_text.replace("```json", "").replace("```", "").strip()
+            cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
             result = json.loads(cleaned_text)
 
             if isinstance(result, list):
@@ -181,8 +185,8 @@ class Dreamer:
 
             return result
         except Exception as e:
-            LOGGER.error(f"LLM Evaluation failed: {e}")
-            return {"decision": "IGNORE", "confidence": 0.0, "reason": "LLM Error"}
+            LOGGER.error(f"LLM Evaluation parse failed: {e}")
+            return {"decision": "IGNORE", "confidence": 0.0, "reason": "LLM Parse Error"}
 
     def prune_context(self, node_id: str):
         """Condense node_context for a node if list is too long."""
@@ -205,9 +209,13 @@ class Dreamer:
 
         prompt = prompt_template.format(keywords=json.dumps(ctx_texts, ensure_ascii=False))
 
+        response = self.llm_service.generate(prompt, TaskType.ENTITY_RESOLUTION)
+        if not response.success:
+            LOGGER.error(f"Context pruning LLM failed: {response.error}")
+            return
+
         try:
-            response_text = self.llm_client.generate(prompt)
-            cleaned_text = response_text.replace("```json", "").replace("```", "").strip()
+            cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
 
             try:
                 result = json.loads(cleaned_text)
@@ -228,7 +236,7 @@ class Dreamer:
                 LOGGER.info(f"Pruned to {len(new_context)} context entries.")
 
         except Exception as e:
-            LOGGER.error(f"Context pruning failed: {e}")
+            LOGGER.error(f"Context pruning parse failed: {e}")
 
     def _is_weak_name(self, name: str) -> bool:
         """Identify UUIDs or generic placeholders."""
@@ -356,9 +364,13 @@ class Dreamer:
             taxonomy_nodes="Person, Project, Organization, Group, Event, Roles, Business_relation"
         )
 
+        response = self.llm_service.generate(prompt, TaskType.STRUCTURAL_ANALYSIS)
+        if not response.success:
+            LOGGER.error(f"Structural analysis LLM failed for {node.get('id')}: {response.error}")
+            return {"action": "KEEP", "confidence": 0.0, "reason": f"LLM error: {response.error}"}
+
         try:
-            response_text = self.llm_client.generate(prompt)
-            cleaned_json = response_text.replace("```json", "").replace("```", "").strip()
+            cleaned_json = response.text.replace("```json", "").replace("```", "").strip()
             result = json.loads(cleaned_json)
 
             if "action" not in result:
@@ -369,8 +381,8 @@ class Dreamer:
             return result
 
         except Exception as e:
-            LOGGER.error(f"Structural analysis failed for {node.get('id')}: {e}")
-            return {"action": "KEEP", "confidence": 0.0, "reason": f"Analysis error: {str(e)}"}
+            LOGGER.error(f"Structural analysis parse failed for {node.get('id')}: {e}")
+            return {"action": "KEEP", "confidence": 0.0, "reason": f"Parse error: {str(e)}"}
 
     def propagate_changes(self, unit_ids: List[str]) -> int:
         """
@@ -529,9 +541,13 @@ class Dreamer:
             graph_context=graph_context
         )
 
+        response = self.llm_service.generate(prompt, TaskType.ENRICHMENT)
+        if not response.success:
+            LOGGER.error(f"Semantic regeneration LLM failed: {response.error}")
+            return None
+
         try:
-            response_text = self.llm_client.generate(prompt)
-            cleaned_json = response_text.replace("```json", "").replace("```", "").strip()
+            cleaned_json = response.text.replace("```json", "").replace("```", "").strip()
             result = json.loads(cleaned_json)
 
             if not isinstance(result, dict):
@@ -544,5 +560,5 @@ class Dreamer:
             }
 
         except Exception as e:
-            LOGGER.error(f"Semantic regeneration failed: {e}")
+            LOGGER.error(f"Semantic regeneration parse failed: {e}")
             return None

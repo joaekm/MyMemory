@@ -19,7 +19,6 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 try:
-    from google import genai
     from google.genai import types
 except ImportError:
     print("[CRITICAL] Saknar bibliotek 'google-genai'.")
@@ -72,9 +71,17 @@ os.makedirs(RECORDINGS_FOLDER, exist_ok=True)
 os.makedirs(TRANSCRIPTS_FOLDER, exist_ok=True)
 os.makedirs(FAILED_FOLDER, exist_ok=True)
 
-API_KEY = CONFIG.get('ai_engine', {}).get('api_key', '')
-MEDIA_EXTENSIONS = CONFIG.get('processing', {}).get('audio_extensions', []) 
-MODELS = CONFIG.get('ai_engine', {}).get('models', {})
+MEDIA_EXTENSIONS = CONFIG.get('processing', {}).get('audio_extensions', [])
+
+# LLMService for centralized client and config
+from services.utils.llm_service import LLMService
+_llm_service = None
+
+def _get_llm_service():
+    global _llm_service
+    if _llm_service is None:
+        _llm_service = LLMService()
+    return _llm_service
 
 MAX_WORKERS = 5 
 EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
@@ -108,10 +115,6 @@ def _log(emoji, msg):
     print(f"{_ts()} {emoji} TRANS: {msg}")
     LOGGER.info(msg)
 
-if not API_KEY:
-    print("[CRITICAL] Ingen API-nyckel hittad.")
-    exit(1)
-AI_CLIENT = genai.Client(api_key=API_KEY)
 
 # --- CONTEXT BUILDERS ---
 
@@ -229,7 +232,7 @@ def safe_upload(filväg, original_namn):
             safe_path = os.path.join(TMP_UPLOAD_FOLDER, safe_name)
             try: os.symlink(filväg, safe_path)
             except OSError: shutil.copy2(filväg, safe_path)
-            upload_file = AI_CLIENT.files.upload(file=safe_path, config={'display_name': original_namn})
+            upload_file = _get_llm_service().client.files.upload(file=safe_path, config={'display_name': original_namn})
             if os.path.exists(safe_path): os.remove(safe_path)
             return upload_file
         except Exception as e:
@@ -321,7 +324,7 @@ def _do_transcription(upload_file, model, kort_namn, safety_settings):
     start = time.time()
     for attempt in range(5):
         try:
-            response = AI_CLIENT.models.generate_content(
+            response = _get_llm_service().client.models.generate_content(
                 model=model,
                 contents=[types.Content(role="user", parts=[
                     types.Part.from_uri(file_uri=upload_file.uri, mime_type=upload_file.mime_type),
@@ -352,7 +355,7 @@ def _do_analysis(transcript, model, kort_namn, safety_settings, context_string="
 
     for attempt in range(5):
         try:
-            response = AI_CLIENT.models.generate_content(
+            response = _get_llm_service().client.models.generate_content(
                 model=model,
                 contents=[types.Content(role="user", parts=[
                     types.Part.from_text(text=f"{final_prompt}\n\nTRANSCRIPT TO ENRICH:\n{analysis_context}")])],
@@ -370,8 +373,9 @@ def _do_analysis(transcript, model, kort_namn, safety_settings, context_string="
 # --- MAIN WORKER ---
 
 def process_audio(filväg, filnamn):
-    MODEL_FAST = MODELS.get('model_fast')
-    MODEL_SMART = MODELS.get('model_pro')
+    llm = _get_llm_service()
+    MODEL_FAST = llm.models.get('fast')
+    MODEL_SMART = llm.models.get('pro')
     
     SAFETY = [types.SafetySetting(category=cat, threshold="BLOCK_NONE") for cat in 
               ["HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_DANGEROUS_CONTENT", 
@@ -418,7 +422,7 @@ def process_audio(filväg, filnamn):
             if upload_file.state.name == "ACTIVE": break
             if upload_file.state.name == "FAILED": raise Exception("File processing FAILED")
             time.sleep(2)
-            upload_file = AI_CLIENT.files.get(name=upload_file.name)
+            upload_file = _get_llm_service().client.files.get(name=upload_file.name)
         
         # 4. PASS 1: Rå Transkribering
         raw_transcript, dur = _do_transcription(upload_file, MODEL_FAST, kort_namn, SAFETY)

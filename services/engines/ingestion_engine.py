@@ -31,9 +31,8 @@ from mcp.client.stdio import stdio_client
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from google import genai
-from google.genai import types
 from services.utils.json_parser import parse_llm_json
+from services.utils.llm_service import LLMService, TaskType
 from services.utils.graph_service import GraphService
 from services.utils.schema_validator import SchemaValidator
 from services.processors.text_extractor import extract_text
@@ -90,8 +89,14 @@ LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
 FAILED_FOLDER = os.path.expanduser(CONFIG['paths']['asset_failed'])
 GRAPH_DB_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
 
-API_KEY = CONFIG['ai_engine']['api_key']
-MODEL_NAME = CONFIG.get('ai_engine', {}).get('models', {}).get('model_lite', 'models/gemini-2.0-flash-lite-preview')
+# LLMService singleton (lazy init)
+_LLM_SERVICE = None
+
+def _get_llm_service():
+    global _LLM_SERVICE
+    if _LLM_SERVICE is None:
+        _LLM_SERVICE = LLMService()
+    return _LLM_SERVICE
 
 # Processing limits from config
 PROCESSING_CONFIG = CONFIG.get('processing', {})
@@ -102,7 +107,6 @@ HEADER_SCAN_CHARS = PROCESSING_CONFIG.get('header_scan_chars', 3000)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - INGESTION - %(levelname)s - %(message)s')
 LOGGER = logging.getLogger('IngestionEngine')
 
-CLIENT = genai.Client(api_key=API_KEY)
 UUID_SUFFIX_PATTERN = re.compile(
     r'_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(txt|md|pdf|docx|csv|xlsx)$',
     re.IGNORECASE
@@ -201,25 +205,20 @@ def generate_semantic_metadata(text: str) -> Dict[str, Any]:
     safe_text = text[:SUMMARY_MAX_CHARS]
     final_prompt = prompt_template.format(text=safe_text)
 
-    try:
-        lite_model = CONFIG.get('ai_engine', {}).get('models', {}).get('model_lite', 'gemini-2.0-flash-lite-preview')
+    llm = _get_llm_service()
+    response = llm.generate(final_prompt, TaskType.ENRICHMENT)
 
-        response = CLIENT.models.generate_content(
-            model=lite_model,
-            contents=[types.Content(role="user", parts=[types.Part.from_text(text=final_prompt)])],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-
-        data = parse_llm_json(response.text)
-        return {
-            "context_summary": data.get("context_summary", ""),
-            "relations_summary": data.get("relations_summary", ""),
-            "document_keywords": data.get("document_keywords", []) or data.get("keywords", []),
-            "ai_model": lite_model
-        }
-    except Exception as e:
-        LOGGER.warning(f"Semantic metadata generation failed (non-critical): {e}")
+    if not response.success:
+        LOGGER.warning(f"Semantic metadata generation failed: {response.error}")
         return {"context_summary": "", "relations_summary": "", "document_keywords": [], "ai_model": "FAILED"}
+
+    data = parse_llm_json(response.text)
+    return {
+        "context_summary": data.get("context_summary", ""),
+        "relations_summary": data.get("relations_summary", ""),
+        "document_keywords": data.get("document_keywords", []) or data.get("keywords", []),
+        "ai_model": response.model
+    }
 
 
 async def _call_mcp_validator(initial_prompt: str, reference_timestamp: str, anchors: dict = None):

@@ -23,70 +23,24 @@ project_root = str(Path(__file__).parent.parent.parent)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+from google.genai import types
+
 from mcp.server.fastmcp import FastMCP
 from services.utils.schema_validator import SchemaValidator
 from services.utils.json_parser import parse_llm_json
-from google import genai
-from google.genai import types
+from services.utils.llm_service import LLMService, TaskType
 
 mcp = FastMCP("DigitalistValidator")
 validator = SchemaValidator()
 
-def load_config():
-    """Ladda config och returnera hela dict."""
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    config_path = os.path.join(base_dir, "config", "my_mem_config.yaml")
+# Centralized LLM access via LLMService
+_llm_service = None
 
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
-    except Exception as e:
-        print(f"Kunde inte ladda config: {e}")
-        return {}
-
-CONFIG = load_config()
-
-def get_api_key():
-    return CONFIG.get('ai_engine', {}).get('api_key')
-
-def get_model_lite():
-    """Hämta model_lite från config."""
-    return CONFIG.get('ai_engine', {}).get('models', {}).get('model_lite', 'models/gemini-flash-lite-latest')
-
-# --- INITIERA KLIENT ---
-api_key = get_api_key()
-if not api_key:
-    logging.error("HARDFAIL: API-nyckel saknas i config! MCP kommer inte kunna köra LLM-anrop.")
-    client = None
-else:
-    client = genai.Client(api_key=api_key)
-
-# --- LADDA PROMPTAR ---
-def load_prompts():
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    prompt_path = os.path.join(base_dir, "config", "services_prompts.yaml")
-    with open(prompt_path, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f)
-
-PROMPTS = load_prompts()
-
-# Bakåtkompatibilitet för Dreamer
-class LLMClient:
-    def __init__(self):
-        self.client = client
-
-    def generate(self, prompt: str) -> str:
-        if not self.client:
-            return ""
-        try:
-            response = self.client.models.generate_content(
-                model=get_model_lite(),
-                contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
-            )
-            return response.text
-        except Exception as e:
-            logging.error(f"LLMClient generate failed: {e}")
-            return ""
+def _get_llm_service():
+    global _llm_service
+    if _llm_service is None:
+        _llm_service = LLMService()
+    return _llm_service
 
 @mcp.tool()
 def validate_extraction(data: dict) -> str:
@@ -111,11 +65,12 @@ def extract_and_validate_doc(initial_prompt: str, reference_timestamp: str = Non
     """
     Huvudverktyg som exekverar en färdig prompt, validerar svaret mot schemat,
     och loopar internt tills validering lyckas.
-    
+
     anchors: Dict[str, str] = Mappning { "Namn": "UUID" } för kända entiteter som SKA återanvändas.
     """
-    if not client:
-        return {"error": "Server configuration error: No API Key available"}
+    llm = _get_llm_service()
+    if not llm.client:
+        return {"error": "Server configuration error: No LLM client available"}
 
     # Fallback för timestamp om den inte skickas
     if not reference_timestamp:
@@ -130,10 +85,12 @@ def extract_and_validate_doc(initial_prompt: str, reference_timestamp: str = Non
         types.Content(role="user", parts=[types.Part.from_text(text=initial_prompt)])
     ]
 
+    model = llm.models.get('lite')
+
     for attempt in range(max_attempts):
         try:
-            response = client.models.generate_content(
-                model=get_model_lite(),
+            response = llm.client.models.generate_content(
+                model=model,
                 contents=current_messages,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
