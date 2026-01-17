@@ -33,6 +33,18 @@ from services.utils.llm_service import LLMService, TaskType
 mcp = FastMCP("DigitalistValidator")
 validator = SchemaValidator()
 
+# Load config for validation settings
+def _load_config():
+    config_path = os.path.join(project_root, 'config', 'my_mem_config.yaml')
+    try:
+        with open(config_path, 'r') as f:
+            return yaml.safe_load(f)
+    except Exception as e:
+        logging.warning(f"Could not load config: {e}")
+        return {}
+
+_CONFIG = _load_config()
+
 # Centralized LLM access via LLMService
 _llm_service = None
 
@@ -80,7 +92,8 @@ def extract_and_validate_doc(initial_prompt: str, reference_timestamp: str = Non
     # Normalisera anchors
     anchor_map = anchors or {}
 
-    max_attempts = 10
+    # Max attempts from config (default 15)
+    max_attempts = _CONFIG.get('validation', {}).get('entity_extraction_max_attempts', 15)
     current_messages = [
         types.Content(role="user", parts=[types.Part.from_text(text=initial_prompt)])
     ]
