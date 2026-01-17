@@ -134,18 +134,35 @@ def get_required_graph_base_properties(graph_schema: Dict) -> Set[str]:
 TEST_DOCUMENT_CONTENT = """
 DATUM_TID: 2026-01-15T10:00:00+01:00
 
-# Test Document for Property Chain Validation
+# Test Document for Dreamer Operations
 
-This is a test document created by test_property_chain.py.
+## Scenario 1: RENAME trigger
+Talare 1 presenterade projektet. Senare framgick att Talare 1 heter Anna Andersson.
+Anna är projektledare på Acme AB.
 
-It mentions a person named Test Person who works at Test Organization.
-The project discussed is called Test Project.
+## Scenario 2: RE-CATEGORIZE trigger
+Kubernetes är ett viktigt projekt för teamet.
+Docker används också som verktyg i projektet.
 
-This content is designed to trigger entity extraction and test the full pipeline.
+## Scenario 3: KEEP trigger
+Anna Andersson från Acme AB ledde mötet om Budget 2026-projektet.
+Erik Svensson deltog som representant för IT-avdelningen.
+
+## Scenario 4: DELETE trigger (brus som Critic eller Dreamer kan filtrera)
+Mötet handlade om att diskutera olika saker.
+
+This test document is designed to trigger multiple Dreamer operations:
+- RENAME: "Talare 1" should be renamed to "Anna Andersson"
+- RE-CATEGORIZE: "Kubernetes" might be extracted as Project but should be Technology
+- KEEP: Well-formed entities like "Anna Andersson", "Acme AB"
+- DELETE: Noise words that slip through Critic
 """
 
-# Minimum antal förväntade entiteter - test-dokumentet nämner Person, Organization, Project
-MIN_EXPECTED_ENTITIES = 2
+# Minimum antal förväntade entiteter
+MIN_EXPECTED_ENTITIES = 3
+
+# Förväntade Dreamer-operationer (minst en av dessa typer)
+EXPECTED_IMPROVEMENT_OPERATIONS = {"RENAME", "RE-CATEGORIZE", "DELETE"}
 
 
 # === TEST STEPS ===
@@ -463,6 +480,27 @@ class PropertyChainTest:
                         f"Endast {llm_calls_made}/{len(test_entities)} entiteter fick LLM-svar. "
                         "Vissa anrop misslyckades.")
                     return False
+
+                # Räkna operationer per typ
+                operation_counts = {}
+                for a in analyses:
+                    action = a.get('action', 'UNKNOWN')
+                    operation_counts[action] = operation_counts.get(action, 0) + 1
+
+                self.log_info(f"Operationer: {operation_counts}")
+
+                # Validera att vi fick minst en förbättringsoperation (inte bara KEEP)
+                improvement_found = any(
+                    op in operation_counts
+                    for op in EXPECTED_IMPROVEMENT_OPERATIONS
+                )
+
+                if not improvement_found and operation_counts.get("KEEP", 0) == len(analyses):
+                    self.log_info(
+                        "INFO: Alla entiteter fick KEEP. Test-dokumentet triggar kanske inte "
+                        "förbättringsoperationer med nuvarande LLM-svar."
+                    )
+                    # Inte HARDFAIL - LLM kan variera, men logga för manuell granskning
 
             self.log_pass("STEP6", f"Dreamer analyserade {len(test_entities)} entiteter med {llm_calls_made} LLM-anrop")
             return True
