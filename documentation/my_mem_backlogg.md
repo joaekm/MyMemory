@@ -271,8 +271,8 @@ extract_text → extract_entities_mcp → critic_filter_entities → resolve_ent
 
 *Risk:* Nya relationer kan blockera RE-CATEGORIZE. Lösning: `source: "inferred"` för auto-borttagning.
 
-#### OBJEKT-76: Dreamer Trigger-mekanism (DESIGN KLAR 2026-01-17, fd. OBJEKT-61)
-*Status:* Design klar, implementation ej påbörjad
+#### OBJEKT-76: Dreamer Trigger-mekanism (KLAR 2026-01-17, fd. OBJEKT-61)
+*Status:* ✅ Implementerat
 *Prioritet:* LÅG
 *Problem:* Dreamer körs bara vid rebuild. Grafen blir "smutsig" mellan körningar.
 
@@ -284,11 +284,26 @@ extract_text → extract_entities_mcp → critic_filter_entities → resolve_ent
 - **Fallback:** Max 24h sedan senaste körning
 - **Körning:** Launchd - förbereder för framtida menubar-app
 
-*Implementation:*
-1. [ ] Lägg till threshold-config i `my_mem_config.yaml`
-2. [ ] Skapa `dreamer_daemon.py` med poll-loop
-3. [ ] Uppdatera ingestion att öka räknare vid nya graf-noder
-4. [ ] Skapa `com.mymemory.dreamer.plist` för launchd
+*Implementation (KLAR 2026-01-17):*
+1. [x] Lägg till threshold-config i `my_mem_config.yaml`
+2. [x] Skapa `dreamer_daemon.py` med poll-loop
+3. [x] Uppdatera ingestion att öka räknare vid nya graf-noder
+4. [x] Skapa `com.mymemory.dreamer.plist` för launchd
+
+*Filer:*
+- `config/my_mem_config.yaml` - daemon-sektion under `dreamer:`
+- `services/engines/dreamer_daemon.py` - daemon med `--status`, `--once` flaggor
+- `config/launchd/com.mymemory.dreamer.plist` - launchd-konfiguration
+
+*Installation:*
+```bash
+# Installera daemon
+cp config/launchd/com.mymemory.dreamer.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.mymemory.dreamer.plist
+
+# Kolla status
+python services/engines/dreamer_daemon.py --status
+```
 
 *Se:* Konflikt 61 i `my_mem_koncept_logg.md`
 
