@@ -280,25 +280,29 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
       | Collectors | `*_collector.py` | `file_collector.py`, `slack_collector.py` |
       | Engines | `*_engine.py` | `ingestion_engine.py` |
       | Funktioner | `verb_object()` | `extract_text()`, `process_audio()` |
-    * *REFAKTORERING (att göra):*
-      | Nuvarande | Nytt |
-      |-----------|------|
-      | `file_retriever.py` | `file_collector.py` |
-      | `doc_converter.py` | `engines/ingestion_engine.py` |
-      | `dreamer.py` | `engines/dreamer.py` |
-      | `GraphStore` | `GraphService` |
-      | `LakeEditor` | `LakeService` |
-      | `EntityResolver` | `Dreamer` |
-      | `processa_dokument()` | `process_document()` |
-      | `processa_mediafil()` | `process_audio()` |
-    * *Nästa steg:*
-      1. Skapa `services/engines/` katalog
-      2. Bryt ut `extract_text()` → `processors/text_extractor.py`
-      3. Flytta + byt namn: `doc_converter.py` → `engines/ingestion_engine.py`
-      4. Flytta: `dreamer.py` → `engines/dreamer.py`
-      5. Byt namn: `file_retriever.py` → `file_collector.py`
-      6. Byt klassnamn: `GraphStore` → `GraphService`, `LakeEditor` → `LakeService`, `EntityResolver` → `Dreamer`
-      7. Byt funktionsnamn: svenska → engelska
+    * *REFAKTORERING (KLAR 2026-01-17):*
+      | Nuvarande | Nytt | Status |
+      |-----------|------|--------|
+      | `file_retriever.py` | `file_collector.py` | ✅ |
+      | `doc_converter.py` | `engines/ingestion_engine.py` | ✅ |
+      | `agents/dreamer.py` | `engines/dreamer.py` | ✅ |
+      | `GraphStore` | `GraphService` | ✅ |
+      | `LakeEditor` | `LakeService` | ✅ |
+      | `EntityResolver` | `Dreamer` | ✅ |
+      | `processa_dokument()` | `process_document()` | ✅ |
+      | `processa_mediafil()` | `process_audio()` | ✅ |
+      | `ladda_yaml()` | `load_yaml()` | ✅ |
+    * *LLM-KONSOLIDERING (KLAR 2026-01-17):*
+      Alla LLM-anrop går nu genom `services/utils/llm_service.py`:
+      | Fil | Metod |
+      |-----|-------|
+      | `engines/ingestion_engine.py` | `LLMService.generate()` |
+      | `engines/dreamer.py` | `LLMService.generate()` |
+      | `processors/transcriber.py` | `LLMService.client` (multimodal audio) |
+      | `agents/validator_mcp.py` | `LLMService.client` (multi-turn) |
+
+      Borttaget: 4 separata `genai.Client`, `LLMClient` klass, duplicerad API-nyckelhantering.
+    * *Status:* OBJEKT-68 KLAR - arkitektur renodlad, namnkonventioner införda, LLM centraliserad.
 
 ---
 
