@@ -1,8 +1,8 @@
 """
-GraphStore - DuckDB-baserad grafdatabas.
+GraphService - DuckDB-based graph database.
 
-Relationell graf-modell med nodes/edges-tabeller.
-Ersätter KuzuDB (LÖST-54).
+Relational graph model with nodes/edges tables.
+Replaces KuzuDB (SOLVED-54).
 """
 
 import os
@@ -13,10 +13,10 @@ import duckdb
 from datetime import datetime
 
 # --- LOGGING ---
-LOGGER = logging.getLogger('GraphStore')
+LOGGER = logging.getLogger('GraphService')
 
 
-class GraphStore:
+class GraphService:
     """
     Thread-safe grafdatabas med DuckDB backend.
 
@@ -47,7 +47,7 @@ class GraphStore:
             self.conn = duckdb.connect(db_path)
             self._init_schema()
 
-        LOGGER.info(f"GraphStore öppnad: {db_path} (read_only={read_only})")
+        LOGGER.info(f"GraphService öppnad: {db_path} (read_only={read_only})")
 
     def _init_schema(self):
         """Skapa tabeller om de inte finns."""
@@ -80,7 +80,7 @@ class GraphStore:
             if self.conn:
                 self.conn.close()
                 self.conn = None
-                LOGGER.info(f"GraphStore stängd: {self.db_path}")
+                LOGGER.info(f"GraphService stängd: {self.db_path}")
 
     def __enter__(self):
         return self

@@ -26,7 +26,7 @@ except ImportError:
     exit(1)
 
 from services.utils.date_service import get_timestamp
-from services.utils.graph_service import GraphStore
+from services.utils.graph_service import GraphService
 
 # --- CONFIG LOADER ---
 def ladda_yaml(filnamn, strict=True):
@@ -123,7 +123,7 @@ def _build_graph_context() -> str:
         return ""
 
     try:
-        gs = GraphStore(GRAPH_PATH, read_only=True)
+        gs = GraphService(GRAPH_PATH, read_only=True)
         persons = gs.find_nodes_by_type("Person")
         
         lines = ["KÄNDA TALARE (från Grafen):"]

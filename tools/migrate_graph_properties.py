@@ -21,7 +21,7 @@ from datetime import datetime
 # Lägg till projektroten för imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.utils.graph_service import GraphStore
+from services.utils.graph_service import GraphService
 import yaml
 
 
@@ -40,7 +40,7 @@ def load_config():
     return config
 
 
-def migrate_nodes(graph: GraphStore, dry_run: bool = True):
+def migrate_nodes(graph: GraphService, dry_run: bool = True):
     """
     Migrerar alla noder till nytt schema.
 
@@ -165,7 +165,7 @@ def main():
 
     # Öppna i write-mode om vi ska ändra
     read_only = args.dry_run
-    graph = GraphStore(graph_path, read_only=read_only)
+    graph = GraphService(graph_path, read_only=read_only)
 
     try:
         stats = migrate_nodes(graph, dry_run=args.dry_run)

@@ -21,7 +21,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from mcp.server.fastmcp import FastMCP
-from services.utils.graph_service import GraphStore
+from services.utils.graph_service import GraphService
 # NY IMPORT: Använd VectorService (Single Source of Truth)
 from services.utils.vector_service import get_vector_service
 
@@ -77,8 +77,8 @@ def search_graph_nodes(query: str, node_type: str = None) -> str:
     Används för att svara på: "Finns noden X?" eller "Hur ser relationerna ut?"
     """
     try:
-        # GraphStore använder DuckDB internt och är robust
-        graph = GraphStore(GRAPH_PATH, read_only=True)
+        # GraphService använder DuckDB internt och är robust
+        graph = GraphService(GRAPH_PATH, read_only=True)
         limit = GRAPH_SEARCH_LIMIT
 
         # Sök i id, aliases OCH hela properties-JSON
@@ -356,7 +356,7 @@ def get_neighbor_network(node_id: str) -> str:
     använd detta för att se vem/vad den är kopplad till.
     """
     try:
-        graph = GraphStore(GRAPH_PATH, read_only=True)
+        graph = GraphService(GRAPH_PATH, read_only=True)
 
         # Hämta huvudnoden
         center_node = graph.get_node(node_id)
@@ -423,7 +423,7 @@ def get_entity_summary(node_id: str) -> str:
     Inkluderar metadata, konfidens, användningsstatistik och bevis/kontext.
     """
     try:
-        graph = GraphStore(GRAPH_PATH, read_only=True)
+        graph = GraphService(GRAPH_PATH, read_only=True)
         node = graph.get_node(node_id)
 
         if not node:
@@ -484,7 +484,7 @@ def get_graph_statistics() -> str:
     Visar antal noder och kanter per typ.
     """
     try:
-        graph = GraphStore(GRAPH_PATH, read_only=True)
+        graph = GraphService(GRAPH_PATH, read_only=True)
         stats = graph.get_stats()
         graph.close()
 

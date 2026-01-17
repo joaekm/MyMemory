@@ -36,7 +36,7 @@ from google import genai
 from google.genai import types
 from services.utils.json_parser import parse_llm_json
 from services.utils.schema_validator import SchemaValidator
-from services.utils.graph_service import GraphStore
+from services.utils.graph_service import GraphService
 
 # --- CONFIG ---
 def _load_config():
@@ -225,7 +225,7 @@ class GatekeeperSimulator:
 
     def __init__(self):
         graph_path = os.path.expanduser(CONFIG['paths']['graph_db'])
-        self.graph = GraphStore(graph_path, read_only=True)
+        self.graph = GraphService(graph_path, read_only=True)
         self.indices = self._build_indices()
         self.schema_validator = SchemaValidator()
 

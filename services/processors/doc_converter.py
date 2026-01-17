@@ -3,7 +3,7 @@
 MyMem DocConverter (v11.0 - Unified Pipeline)
 
 Unified ingestion: Assets → Lake → Vector → Graf i en pipeline.
-Entity resolution via GraphStore.find_node_by_name().
+Entity resolution via GraphService.find_node_by_name().
 """
 
 import os
@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from google import genai
 from google.genai import types
 from services.utils.json_parser import parse_llm_json
-from services.utils.graph_service import GraphStore
+from services.utils.graph_service import GraphService
 from services.utils.schema_validator import SchemaValidator
 
 try:
@@ -385,8 +385,8 @@ def unified_processing_strategy(text: str, filename: str, source_type: str) -> D
     # Mappa: Namn -> UUID (för att kunna bygga kanter senare)
     name_to_uuid = {}
 
-    # 3. Resolve entities via GraphStore.find_node_by_name
-    graph = GraphStore(GRAPH_DB_PATH, read_only=True)
+    # 3. Resolve entities via GraphService.find_node_by_name
+    graph = GraphService(GRAPH_DB_PATH, read_only=True)
     seen_candidates = set()
 
     for node in nodes:
@@ -533,8 +533,8 @@ def processa_dokument(filväg: str, filnamn: str):
 
         # --- GRAF-SKRIVNING ---
         # Skriv extraherade entiteter till grafen
-        from services.utils.graph_service import GraphStore
-        graph = GraphStore(GRAPH_DB_PATH)
+        from services.utils.graph_service import GraphService
+        graph = GraphService(GRAPH_DB_PATH)
 
         nodes_written = 0
         edges_written = 0

@@ -13,7 +13,7 @@ original_binary_ref: null
 
 # Projekt-Backlog
 
-Detta dokument spårar vårt aktiva arbete. Uppdaterad 2026-01-17.
+Detta dokument spårar vårt aktiva arbete. Uppdaterad 2026-01-17 (arkitekturanalys OBJEKT-68).
 
 ## Statusförklaring
 
@@ -189,7 +189,7 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
     * *Se:* Konflikt 61 i `my_mem_koncept_logg.md`
 
 * **OBJEKT-67 (PÅGÅENDE):** Implementera **Dream Directives** - Observational Learning för Dreamer.
-    * *Status:* Grundarbete klart 2026-01-17. Unified pipeline och batch-processing implementerat.
+    * *Status:* Grundarbete klart 2026-01-17. Arkitekturanalys pågår.
     * *Klart:*
         - Unified ingestion pipeline (DocConverter → Lake → Vector → Graf i ett flöde)
         - Borttagen `vector_indexer.py` (redundant)
@@ -198,15 +198,107 @@ Dessa objekt är inte längre relevanta efter pivoten från egen chatt till MCP-
         - Dreamer dryrun använder `batch_generate()` för parallella LLM-anrop
         - `validate_rules.py` skärpt: fångar `except Exception` med logging men utan raise
         - `node_context` prompt uppdaterad för kortare, entitets-fokuserade beskrivningar
-        - `structural_analysis` prompt saknas i services_prompts.yaml - behöver läggas till
+        - ~~`structural_analysis` prompt saknas~~ KORRIGERING: Prompten finns (rad 162-190 i services_prompts.yaml)
     * *Kvarstår:*
-        - Lägg till `structural_analysis` prompt i services_prompts.yaml
+        - **ARKITEKTURFRÅGA:** Se OBJEKT-68 nedan - behöver avgöras innan implementation fortsätter
         - MCP Tools: `report_observation()`, `get_pending_dreams()`, `confirm_dream()`
         - dream_candidates tabell i GraphStore
         - User confirmation workflow
     * *Koncept:* MCP-klienten (Claude Desktop) observerar brus under arbete och förbereder "dreams" för användarbekräftelse.
     * *Operationer:* MERGE, SPLIT, RENAME, DELETE, RECATEGORIZE
     * *Relation:* Bygger på OBJEKT-61 (trigger-mekanism) och kompletterar OBJEKT-66 (entity resolution)
+
+* **OBJEKT-68 (PÅGÅENDE):** Arkitekturanalys - **Kunskapsflödets Helhet**.
+    * *Bakgrund:* Innan vi lägger till fler komponenter (Dream Directives, MCP-verktyg) behöver vi förstå helheten.
+    * *Användarens fråga (2026-01-17):*
+      > "Vi tittar på hanteringen av ny kunskap som en 'helhet' och avgör vilka steg som behövs för att uppnå ett önskat resultat."
+    * *Kärnfrågor och SVAR:*
+      1. **Vad är det önskade resultatet?**
+         > Bra datakvalitet i samtliga datakällor (graf/vektor/Lake) för systemets grundsyfte: Hjälpa användaren att nå all samlad kunskap i vilken dimension som helst. När som helst.
+      2. **Var ska intelligensen ligga?**
+         > BÅDA. Men med olika perspektiv:
+         > - **Ingestion:** Föda NY data (för första gången) och ge den grundformat enligt systemets schema, samt koppla den till resten av datat enligt rådande ögonblicksbild.
+         > - **Dreaming:** Övergripande dataförädling för att påverka ALL data som helhet - optimera för användaren.
+      3. **Är `structural_analysis` redundant?**
+         > "Vi får se." - Avgörs efter att vi definierat stegen tydligare.
+    * *BESLUTAD ARKITEKTUR (2026-01-17):*
+      ```
+      ┌─────────────────────────────────────────────────────────────────┐
+      │ FAS 1: COLLECT & NORMALIZE                                      │
+      │ Ansvar: Hämta data från källor + normalisera till enhetligt     │
+      │ Perspektiv: Per källa                                           │
+      ├─────────────────────────────────────────────────────────────────┤
+      │ collectors/                                                     │
+      │   ├── file_retriever.py      # DropZone → Assets (UUID-namn)   │
+      │   ├── slack_collector.py     # Slack API → normaliserad text   │
+      │   ├── gmail_collector.py     # Gmail API → normaliserad text   │
+      │   ├── calendar_collector.py  # Calendar API → normaliserad text│
+      │   └── (framtida: harvest, teams, etc.)                         │
+      │                                                                 │
+      │ processors/                                                     │
+      │   ├── transcriber.py         # Ljud → text                     │
+      │   └── text_extractor.py      # PDF/DOCX/TXT → text (NY FIL)    │
+      │                                                                 │
+      │ Output: Enhetlig text + source_metadata                        │
+      └─────────────────────────────────────────────────────────────────┘
+                                    ↓
+      ┌─────────────────────────────────────────────────────────────────┐
+      │ FAS 2: INGESTION                                                │
+      │ Ansvar: Integrera normaliserad data i kunskapssystemet          │
+      │ Perspektiv: Ögonblicksbilden (koppla till befintligt)          │
+      ├─────────────────────────────────────────────────────────────────┤
+      │ engines/                                                        │
+      │   └── ingestion_engine.py    # Orchestrerar hela flödet        │
+      │       ├── generate_semantic_metadata()                          │
+      │       ├── extract_entities()                                    │
+      │       ├── resolve_against_graph()                               │
+      │       ├── write_lake()                                          │
+      │       ├── write_graph()                                         │
+      │       └── write_vector()                                        │
+      │                                                                 │
+      │ Output: Lake (.md) + Graf (noder/kanter) + Vektor (ChromaDB)   │
+      └─────────────────────────────────────────────────────────────────┘
+                                    ↓
+      ┌─────────────────────────────────────────────────────────────────┐
+      │ FAS 3: DREAMING                                                 │
+      │ Ansvar: Förädla ALL data som helhet                            │
+      │ Perspektiv: Helheten (optimera för användaren)                 │
+      ├─────────────────────────────────────────────────────────────────┤
+      │ engines/                                                        │
+      │   └── dreamer.py             # Batch-förädling                 │
+      │       ├── scan_candidates()                                     │
+      │       ├── structural_analysis()  # SPLIT/RENAME/DELETE         │
+      │       ├── entity_resolution()    # MERGE                       │
+      │       └── propagate_changes()    # Uppdatera Lake/Vektor       │
+      └─────────────────────────────────────────────────────────────────┘
+      ```
+    * *NAMNKONVENTIONER (beslutade 2026-01-17):*
+      | Kategori | Konvention | Exempel |
+      |----------|------------|---------|
+      | Språk | Engelska | `process_document()`, inte `processa_dokument()` |
+      | Services | `*Service` | `GraphService`, `VectorService`, `LakeService` |
+      | Collectors | `*_collector.py` | `file_collector.py`, `slack_collector.py` |
+      | Engines | `*_engine.py` | `ingestion_engine.py` |
+      | Funktioner | `verb_object()` | `extract_text()`, `process_audio()` |
+    * *REFAKTORERING (att göra):*
+      | Nuvarande | Nytt |
+      |-----------|------|
+      | `file_retriever.py` | `file_collector.py` |
+      | `doc_converter.py` | `engines/ingestion_engine.py` |
+      | `dreamer.py` | `engines/dreamer.py` |
+      | `GraphStore` | `GraphService` |
+      | `LakeEditor` | `LakeService` |
+      | `EntityResolver` | `Dreamer` |
+      | `processa_dokument()` | `process_document()` |
+      | `processa_mediafil()` | `process_audio()` |
+    * *Nästa steg:*
+      1. Skapa `services/engines/` katalog
+      2. Bryt ut `extract_text()` → `processors/text_extractor.py`
+      3. Flytta + byt namn: `doc_converter.py` → `engines/ingestion_engine.py`
+      4. Flytta: `dreamer.py` → `engines/dreamer.py`
+      5. Byt namn: `file_retriever.py` → `file_collector.py`
+      6. Byt klassnamn: `GraphStore` → `GraphService`, `LakeEditor` → `LakeService`, `EntityResolver` → `Dreamer`
+      7. Byt funktionsnamn: svenska → engelska
 
 ---
 

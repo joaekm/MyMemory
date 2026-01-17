@@ -378,14 +378,14 @@ class PropertyChainTest:
         self.log_info("Steg 7: Validerar graf-noder från test-dokumentet...")
 
         try:
-            from services.utils.graph_service import GraphStore
+            from services.utils.graph_service import GraphService
 
             graph_path = self.config.get('paths', {}).get('graph_db')
             if not graph_path or not os.path.exists(graph_path):
                 self.log_violation("STEP7", "Graf-db finns inte")
                 return False
 
-            graph = GraphStore(graph_path, read_only=True)
+            graph = GraphService(graph_path, read_only=True)
 
             required_base = get_required_graph_base_properties(self.graph_schema)
 

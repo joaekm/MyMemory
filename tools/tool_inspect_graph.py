@@ -8,7 +8,7 @@ import yaml
 
 # Lägg till services i path för import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from services.utils.graph_service import GraphStore
+from services.utils.graph_service import GraphService
 
 # --- CONFIG ---
 def ladda_yaml(filnamn):
@@ -36,7 +36,7 @@ def inspektera_graf():
         return
     
     try:
-        graph = GraphStore(GRAPH_PATH, read_only=True)
+        graph = GraphService(GRAPH_PATH, read_only=True)
         stats = graph.get_stats()
         
         print("=" * 60)
@@ -80,7 +80,7 @@ def inspektera_nod(node_id: str):
         return
     
     try:
-        graph = GraphStore(GRAPH_PATH, read_only=True)
+        graph = GraphService(GRAPH_PATH, read_only=True)
         
         print(f"\n🔍 Inspekterar nod: {node_id}")
         print("=" * 60)

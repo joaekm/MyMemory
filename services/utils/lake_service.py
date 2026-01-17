@@ -4,12 +4,12 @@ import logging
 import threading
 from typing import Dict, Any, Optional, List
 
-LOGGER = logging.getLogger("LakeEditor")
+LOGGER = logging.getLogger("LakeService")
 
-class LakeEditor:
+class LakeService:
     """
-    LakeEditor - Kirurgiska ingrepp i Lake-filer.
-    
+    LakeService - Kirurgiska ingrepp i Lake-filer.
+
     Ansvar:
     - Läsa och skriva YAML-frontmatter säkert.
     - Aldrig röra brödtexten (content).

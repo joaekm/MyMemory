@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from tools.rebuild.file_manager import FileManager
 from tools.rebuild.process_manager import ServiceManager, CompletionWatcher
-from services.utils.graph_service import GraphStore
+from services.utils.graph_service import GraphService
 
 LOGGER = logging.getLogger('RebuildOrchestrator')
 
@@ -42,23 +42,23 @@ class RebuildOrchestrator:
         """Kör Dreamer (Entity Resolver) för att städa grafen."""
         _log("  😴 Kör Dreamer (Städning & Länkning)...")
         try:
-            from services.utils.graph_service import GraphStore
+            from services.utils.graph_service import GraphService
             from services.utils.vector_service import VectorService
-            from services.agents.dreamer import EntityResolver
-            
+            from services.agents.dreamer import Dreamer
+
             # Ladda paths från config
             graph_path = os.path.expanduser(self.config['paths']['graph_db'])
-            
+
             # Initiera tjänster
-            store = GraphStore(graph_path)
-            vector_service = VectorService() # Använder config internt
-            resolver = EntityResolver(store, vector_service)
-            
+            graph_service = GraphService(graph_path)
+            vector_service = VectorService()
+            dreamer = Dreamer(graph_service, vector_service)
+
             # Kör cykel
-            stats = resolver.run_resolution_cycle(dry_run=False) # Auto-merge
+            stats = dreamer.run_resolution_cycle(dry_run=False)
             
             _log(f"  ✅ Dreamer klar: Merged={stats['merged']}, Reviewed={stats['reviewed']}")
-            store.close()
+            graph_service.close()
             
         except Exception as e:
             _log(f"  ⚠️  Dreamer fel (Icke-kritiskt): {e}")

@@ -1,0 +1,656 @@
+#!/usr/bin/env python3
+"""
+Ingestion Engine (v12.0)
+
+Integrates normalized data into the knowledge system.
+Phase 2 of the pipeline: Collect & Normalize -> INGESTION -> Dreaming
+
+Responsibilities:
+- Generate semantic metadata (summary, keywords)
+- Extract entities via MCP
+- Resolve entities against existing graph
+- Write to Lake, Graph, Vector
+"""
+
+import os
+import sys
+import time
+import yaml
+import logging
+import datetime
+import threading
+import re
+import uuid
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, Any, List
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from google import genai
+from google.genai import types
+from services.utils.json_parser import parse_llm_json
+from services.utils.graph_service import GraphService
+from services.utils.schema_validator import SchemaValidator
+from services.processors.text_extractor import extract_text
+
+try:
+    from services.utils.date_service import get_timestamp as date_service_timestamp
+except ImportError:
+    sys.stderr.write("[INFO] date_service not available, using datetime.now()\n")
+    date_service_timestamp = lambda x: datetime.datetime.now()
+
+
+# --- CONFIG LOADER ---
+def _load_config():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    paths = [
+        os.path.join(script_dir, '..', '..', 'config', 'my_mem_config.yaml'),
+        os.path.join(script_dir, '..', 'config', 'my_mem_config.yaml'),
+        os.path.join(script_dir, 'config', 'my_mem_config.yaml'),
+    ]
+    main_conf = {}
+    for p in paths:
+        if os.path.exists(p):
+            with open(p, 'r') as f:
+                main_conf = yaml.safe_load(f)
+            for k, v in main_conf.get('paths', {}).items():
+                main_conf['paths'][k] = os.path.expanduser(v)
+
+            config_dir = os.path.dirname(p)
+            prompts_conf = {}
+            for name in ['services_prompts.yaml', 'service_prompts.yaml']:
+                pp = os.path.join(config_dir, name)
+                if os.path.exists(pp):
+                    with open(pp, 'r') as f:
+                        prompts_conf = yaml.safe_load(f)
+                    break
+
+            return main_conf, prompts_conf
+
+    raise FileNotFoundError("HARDFAIL: Config missing")
+
+
+CONFIG, PROMPTS_RAW = _load_config()
+
+
+def get_prompt(agent: str, key: str) -> str:
+    """Get prompt from config."""
+    if 'prompts' in PROMPTS_RAW:
+        return PROMPTS_RAW['prompts'].get(agent, {}).get(key)
+    return PROMPTS_RAW.get(agent, {}).get(key)
+
+
+# Settings
+LAKE_STORE = os.path.expanduser(CONFIG['paths']['lake_store'])
+FAILED_FOLDER = os.path.expanduser(CONFIG['paths']['asset_failed'])
+GRAPH_DB_PATH = os.path.expanduser(CONFIG['paths']['graph_db'])
+
+API_KEY = CONFIG['ai_engine']['api_key']
+MODEL_NAME = CONFIG.get('ai_engine', {}).get('models', {}).get('model_lite', 'models/gemini-2.0-flash-lite-preview')
+
+# Processing limits from config
+PROCESSING_CONFIG = CONFIG.get('processing', {})
+SUMMARY_MAX_CHARS = PROCESSING_CONFIG.get('summary_max_chars', 30000)
+HEADER_SCAN_CHARS = PROCESSING_CONFIG.get('header_scan_chars', 3000)
+
+# Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - INGESTION - %(levelname)s - %(message)s')
+LOGGER = logging.getLogger('IngestionEngine')
+
+CLIENT = genai.Client(api_key=API_KEY)
+UUID_SUFFIX_PATTERN = re.compile(
+    r'_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(txt|md|pdf|docx|csv|xlsx)$',
+    re.IGNORECASE
+)
+STANDARD_TIMESTAMP_PATTERN = re.compile(r'^DATUM_TID:\s+(.+)$', re.MULTILINE)
+TRANSCRIBER_DATE_PATTERN = re.compile(r'^DATUM:\s+(\d{4}-\d{2}-\d{2})$', re.MULTILINE)
+TRANSCRIBER_START_PATTERN = re.compile(r'^START:\s+(\d{2}:\d{2})$', re.MULTILINE)
+
+PROCESSED_FILES = set()
+PROCESS_LOCK = threading.Lock()
+
+# Global Schema Validator (Lazy load)
+_SCHEMA_VALIDATOR = None
+
+
+def _get_schema_validator():
+    global _SCHEMA_VALIDATOR
+    if _SCHEMA_VALIDATOR is None:
+        try:
+            _SCHEMA_VALIDATOR = SchemaValidator()
+        except Exception as e:
+            LOGGER.error(f"Could not load SchemaValidator: {e}")
+            raise
+    return _SCHEMA_VALIDATOR
+
+
+# MCP Server Configuration
+VALIDATOR_PARAMS = StdioServerParameters(
+    command=sys.executable,
+    args=[os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "agents", "validator_mcp.py"))]
+)
+
+
+def extract_content_date(text: str) -> str:
+    """
+    Extract timestamp_content - when the content actually happened.
+
+    Strict extraction without fallbacks:
+    1. DATUM_TID header (from collectors: Slack, Calendar, Gmail) -> ISO string
+    2. Transcriber format DATUM + START -> combined to ISO string
+    3. Otherwise -> "UNKNOWN"
+
+    Returns:
+        ISO format string or "UNKNOWN"
+    """
+    header_section = text[:HEADER_SCAN_CHARS]
+
+    # 1. Try DATUM_TID (collectors: Slack, Calendar, Gmail)
+    match = STANDARD_TIMESTAMP_PATTERN.search(header_section)
+    if match:
+        ts_str = match.group(1).strip()
+        try:
+            dt = datetime.datetime.fromisoformat(ts_str)
+            LOGGER.debug(f"extract_content_date: DATUM_TID -> {dt.isoformat()}")
+            return dt.isoformat()
+        except ValueError:
+            LOGGER.warning(f"extract_content_date: Invalid DATUM_TID '{ts_str}'")
+
+    # 2. Try Transcriber format (DATUM + START)
+    date_match = TRANSCRIBER_DATE_PATTERN.search(header_section)
+    start_match = TRANSCRIBER_START_PATTERN.search(header_section)
+
+    if date_match and start_match:
+        date_str = date_match.group(1)
+        time_str = start_match.group(1)
+        try:
+            dt = datetime.datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+            LOGGER.debug(f"extract_content_date: Transcriber -> {dt.isoformat()}")
+            return dt.isoformat()
+        except ValueError:
+            LOGGER.warning(f"extract_content_date: Invalid Transcriber format '{date_str} {time_str}'")
+    elif date_match:
+        date_str = date_match.group(1)
+        try:
+            dt = datetime.datetime.strptime(f"{date_str} 12:00", "%Y-%m-%d %H:%M")
+            LOGGER.debug(f"extract_content_date: Transcriber (date only) -> {dt.isoformat()}")
+            return dt.isoformat()
+        except ValueError as e:
+            LOGGER.debug(f"extract_content_date: Could not parse date '{date_str}': {e}")
+
+    # 3. No source found
+    LOGGER.info("extract_content_date: No date source -> UNKNOWN")
+    return "UNKNOWN"
+
+
+def generate_semantic_metadata(text: str) -> Dict[str, Any]:
+    """
+    Generate summary and keywords using a lightweight model.
+    Used for vector indexing and searchability.
+    """
+    prompt_template = get_prompt('doc_converter', 'doc_summary_prompt')
+    if not prompt_template:
+        LOGGER.warning("Summary prompt missing in config, returning empty metadata")
+        return {"context_summary": "", "relations_summary": "", "document_keywords": []}
+
+    safe_text = text[:SUMMARY_MAX_CHARS]
+    final_prompt = prompt_template.format(text=safe_text)
+
+    try:
+        lite_model = CONFIG.get('ai_engine', {}).get('models', {}).get('model_lite', 'gemini-2.0-flash-lite-preview')
+
+        response = CLIENT.models.generate_content(
+            model=lite_model,
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=final_prompt)])],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+
+        data = parse_llm_json(response.text)
+        return {
+            "context_summary": data.get("context_summary", ""),
+            "relations_summary": data.get("relations_summary", ""),
+            "document_keywords": data.get("document_keywords", []) or data.get("keywords", []),
+            "ai_model": lite_model
+        }
+    except Exception as e:
+        LOGGER.warning(f"Semantic metadata generation failed (non-critical): {e}")
+        return {"context_summary": "", "relations_summary": "", "document_keywords": [], "ai_model": "FAILED"}
+
+
+async def _call_mcp_validator(initial_prompt: str, reference_timestamp: str, anchors: dict = None):
+    """Internal async helper to communicate with MCP server."""
+    async with stdio_client(VALIDATOR_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            result = await session.call_tool(
+                "extract_and_validate_doc",
+                arguments={
+                    "initial_prompt": initial_prompt,
+                    "reference_timestamp": reference_timestamp,
+                    "anchors": anchors or {}
+                }
+            )
+            return result.content[0].text if result.content else "{}"
+
+
+def extract_entities_mcp(text: str, source_hint: str = "") -> Dict[str, Any]:
+    """
+    Extract entities via MCP server.
+    Builds the prompt (order), MCP executes and validates.
+    """
+    LOGGER.info(f"Preparing MCP prompt for {source_hint}...")
+
+    raw_prompt = get_prompt('doc_converter', 'strict_entity_extraction')
+    if not raw_prompt:
+        return {"nodes": [], "edges": []}
+
+    validator = _get_schema_validator()
+    schema = validator.schema
+
+    # --- SCHEMA CONTEXT ---
+    all_node_types = set(schema.get('nodes', {}).keys())
+    valid_graph_nodes = all_node_types - {'Document', 'Source', 'File'}
+
+    filtered_nodes = {k: v for k, v in schema.get('nodes', {}).items() if k not in {'Document'}}
+    node_lines = []
+    for k, v in filtered_nodes.items():
+        desc = v.get('description', '')
+        props = v.get('properties', {})
+
+        prop_info = []
+        for prop_name, prop_def in props.items():
+            if prop_name in ['id', 'created_at', 'last_synced_at', 'last_seen_at', 'confidence', 'status',
+                             'source_system', 'distinguishing_context', 'uuid', 'version']:
+                continue
+
+            req_marker = "*" if prop_def.get('required') else ""
+
+            if 'values' in prop_def:
+                enums = ", ".join(prop_def['values'])
+                prop_info.append(f"{prop_name}{req_marker} [{enums}]")
+            else:
+                p_type = prop_def.get('type', 'string')
+                prop_info.append(f"{prop_name}{req_marker} ({p_type})")
+
+        constraints = []
+        if 'name' in props and props['name'].get('description'):
+            constraints.append(f"Name rules: {props['name']['description']}")
+
+        info = f"- {k}: {desc}"
+        if prop_info:
+            info += f" | Properties: {', '.join(prop_info)}"
+        if constraints:
+            info += f" ({'; '.join(constraints)})"
+
+        node_lines.append(info)
+    node_types_str = "\n".join(node_lines)
+
+    filtered_edges = {k: v for k, v in schema.get('edges', {}).items() if k != 'MENTIONS'}
+    edge_names = list(filtered_edges.keys())
+    whitelist, blacklist = [], []
+
+    for k, v in filtered_edges.items():
+        desc = v.get('description', '')
+        sources = set(v.get('source_type', []))
+        targets = set(v.get('target_type', []))
+        whitelist.append(f"- {k}: [{', '.join(sources)}] -> [{', '.join(targets)}]  // {desc}")
+
+        forbidden_sources = valid_graph_nodes - sources
+        forbidden_targets = valid_graph_nodes - targets
+        if forbidden_sources:
+            blacklist.append(f"- {k}: NEVER starts from [{', '.join(forbidden_sources)}]")
+        if forbidden_targets:
+            blacklist.append(f"- {k}: NEVER points to [{', '.join(forbidden_targets)}]")
+
+    edge_types_str = (
+        f"ALLOWED RELATION NAMES:\n[{', '.join(edge_names)}]\n\n"
+        f"ALLOWED CONNECTIONS (WHITELIST):\n" + "\n".join(whitelist) + "\n\n"
+        f"FORBIDDEN CONNECTIONS (BLACKLIST - AUTO-GENERATED):\n" + "\n".join(blacklist)
+    )
+
+    source_context_instruction = ""
+    if "Slack" in source_hint:
+        source_context_instruction = "CONTEXT: This is a Slack chat. Format is often 'Name: Message'. Treat senders as strong Person candidates."
+    elif "Mail" in source_hint:
+        source_context_instruction = "CONTEXT: This is an email. Sender (From) and recipients (To) are important Person nodes."
+
+    final_prompt = raw_prompt.format(
+        text_chunk=text[:25000],
+        node_types_context=node_types_str,
+        edge_types_context=edge_types_str,
+        known_entities_context=source_context_instruction
+    )
+
+    try:
+        reference_timestamp = datetime.datetime.now().isoformat()
+        anchors = {}
+        response_json = asyncio.run(_call_mcp_validator(final_prompt, reference_timestamp, anchors))
+        return parse_llm_json(response_json)
+    except Exception as e:
+        LOGGER.error(f"HARDFAIL: MCP Extraction failed: {e}")
+        raise RuntimeError(f"MCP Entity Extraction failed: {e}") from e
+
+
+def resolve_entities(nodes: List[Dict], edges: List[Dict], source_type: str, filename: str) -> List[Dict]:
+    """
+    Resolve extracted entities against existing graph.
+    Returns list of mentions (actions to perform).
+    """
+    mentions = []
+    name_to_uuid = {}
+
+    graph = GraphService(GRAPH_DB_PATH, read_only=True)
+    seen_candidates = set()
+
+    for node in nodes:
+        name = node.get('name')
+        type_str = node.get('type')
+        confidence = node.get('confidence', 0.5)
+        node_context_text = node.get('node_context', '')
+
+        if not name or not type_str:
+            continue
+
+        # Noise filter based on confidence
+        if confidence < 0.3:
+            continue
+
+        key = f"{name}|{type_str}"
+        if key in seen_candidates:
+            continue
+        seen_candidates.add(key)
+
+        # Boost confidence for trusted sources
+        if source_type in ["Slack Log", "Email Thread"]:
+            confidence = max(confidence, 0.8)
+
+        # Entity resolution: LINK if exists, CREATE if new
+        existing_uuid = graph.find_node_by_name(type_str, name, fuzzy=True)
+
+        if existing_uuid:
+            action = "LINK"
+            target_uuid = existing_uuid
+        else:
+            action = "CREATE"
+            target_uuid = str(uuid.uuid4())
+
+        name_to_uuid[name] = target_uuid
+
+        mentions.append({
+            "action": action,
+            "target_uuid": target_uuid,
+            "type": type_str,
+            "label": name,
+            "node_context_text": node_context_text,
+            "confidence": confidence
+        })
+
+    graph.close()
+
+    # Handle relations
+    for edge in edges:
+        source_name = edge.get('source')
+        target_name = edge.get('target')
+        rel_type = edge.get('type')
+        rel_conf = edge.get('confidence', 0.5)
+
+        if source_name in name_to_uuid and target_name in name_to_uuid:
+            source_uuid = name_to_uuid[source_name]
+            target_uuid = name_to_uuid[target_name]
+
+            mentions.append({
+                "action": "CREATE_EDGE",
+                "source_uuid": source_uuid,
+                "target_uuid": target_uuid,
+                "edge_type": rel_type,
+                "confidence": rel_conf,
+                "source_text": f"{source_name} -> {target_name}"
+            })
+
+    return mentions
+
+
+def write_lake(unit_id: str, filename: str, raw_text: str, source_type: str,
+               semantic_metadata: Dict, ingestion_payload: List) -> str:
+    """Write document to Lake with frontmatter."""
+    base_name = os.path.splitext(filename)[0]
+    lake_file = os.path.join(LAKE_STORE, f"{base_name}.md")
+
+    timestamp_content = extract_content_date(raw_text)
+    default_access_level = CONFIG.get('security', {}).get('default_access_level', 5)
+
+    frontmatter = {
+        "unit_id": unit_id,
+        "source_ref": lake_file,
+        "original_filename": filename,
+        "timestamp_ingestion": datetime.datetime.now().isoformat(),
+        "timestamp_content": timestamp_content,
+        "timestamp_updated": None,
+        "source_type": source_type,
+        "access_level": default_access_level,
+        "context_summary": semantic_metadata.get("context_summary", ""),
+        "relations_summary": semantic_metadata.get("relations_summary", ""),
+        "document_keywords": semantic_metadata.get("document_keywords", []),
+        "ai_model": semantic_metadata.get("ai_model", "unknown"),
+    }
+
+    fm_str = yaml.dump(frontmatter, sort_keys=False, allow_unicode=True)
+    with open(lake_file, 'w', encoding='utf-8') as f:
+        f.write(f"---\n{fm_str}---\n\n# {filename}\n\n{raw_text}")
+
+    LOGGER.info(f"Lake: {filename} ({source_type}) -> {len(ingestion_payload)} mentions")
+    return lake_file
+
+
+def write_graph(unit_id: str, filename: str, ingestion_payload: List) -> tuple:
+    """Write entities and edges to graph."""
+    graph = GraphService(GRAPH_DB_PATH)
+
+    nodes_written = 0
+    edges_written = 0
+
+    for entity in ingestion_payload:
+        action = entity.get("action")
+
+        if action in ["CREATE", "LINK"]:
+            target_uuid = entity.get("target_uuid")
+            node_type = entity.get("type")
+            label = entity.get("label", "")
+            confidence = entity.get("confidence", 0.5)
+            node_context_text = entity.get("node_context_text", "")
+
+            if not target_uuid or not node_type:
+                continue
+
+            node_context_entry = {
+                "text": node_context_text or f"Mentioned in {filename}",
+                "origin": unit_id
+            }
+
+            props = {
+                "name": label,
+                "status": "PROVISIONAL",
+                "confidence": confidence,
+                "node_context": [node_context_entry],
+                "source_system": "IngestionEngine"
+            }
+
+            graph.upsert_node(
+                id=target_uuid,
+                type=node_type,
+                properties=props
+            )
+            nodes_written += 1
+
+            graph.upsert_edge(
+                source=unit_id,
+                target=target_uuid,
+                edge_type="MENTIONS",
+                properties={"confidence": confidence}
+            )
+            edges_written += 1
+
+        elif action == "CREATE_EDGE":
+            source_uuid = entity.get("source_uuid")
+            target_uuid = entity.get("target_uuid")
+            edge_type = entity.get("edge_type")
+            edge_conf = entity.get("confidence", 0.5)
+
+            if source_uuid and target_uuid and edge_type:
+                graph.upsert_edge(
+                    source=source_uuid,
+                    target=target_uuid,
+                    edge_type=edge_type,
+                    properties={"confidence": edge_conf}
+                )
+                edges_written += 1
+
+    LOGGER.info(f"Graph: {filename} -> {nodes_written} nodes, {edges_written} edges")
+    return nodes_written, edges_written
+
+
+def write_vector(unit_id: str, filename: str, raw_text: str, source_type: str,
+                 semantic_metadata: Dict, timestamp_ingestion: str):
+    """Write document to vector index."""
+    from services.utils.vector_service import get_vector_service
+    vector_service = get_vector_service("knowledge_base")
+
+    ctx_summary = semantic_metadata.get("context_summary", "")
+    rel_summary = semantic_metadata.get("relations_summary", "")
+
+    vector_text = f"FILENAME: {filename}\nSUMMARY: {ctx_summary}\nRELATIONS: {rel_summary}\n\nCONTENT:\n{raw_text[:8000]}"
+
+    vector_service.upsert(
+        id=unit_id,
+        text=vector_text,
+        metadata={
+            "timestamp": timestamp_ingestion,
+            "filename": filename,
+            "source_type": source_type
+        }
+    )
+    LOGGER.info(f"Vector: {filename} -> ChromaDB")
+
+
+def process_document(filepath: str, filename: str):
+    """
+    Main document processing function.
+    Orchestrates the full ingestion pipeline.
+    """
+    with PROCESS_LOCK:
+        if filename in PROCESSED_FILES:
+            return
+        PROCESSED_FILES.add(filename)
+
+    match = UUID_SUFFIX_PATTERN.search(filename)
+    if not match:
+        return
+    unit_id = match.group(1)
+    base_name = os.path.splitext(filename)[0]
+    lake_file = os.path.join(LAKE_STORE, f"{base_name}.md")
+
+    if os.path.exists(lake_file):
+        return  # Idempotent
+
+    LOGGER.debug(f"Processing: {filename}")
+    try:
+        # 1. Extract text (via text_extractor)
+        raw_text = extract_text(filepath)
+
+        if not raw_text or len(raw_text) < 10:
+            LOGGER.debug(f"File {filename} appears incomplete ({len(raw_text) if raw_text else 0} chars). Waiting for on_modified.")
+            with PROCESS_LOCK:
+                PROCESSED_FILES.discard(filename)
+            return
+
+        # 2. Determine source type
+        source_type = "Document"
+        if "slack" in filepath.lower():
+            source_type = "Slack Log"
+        elif "mail" in filepath.lower():
+            source_type = "Email Thread"
+        elif "calendar" in filepath.lower():
+            source_type = "Calendar Event"
+
+        # 3. Generate semantic metadata
+        semantic_metadata = generate_semantic_metadata(raw_text)
+
+        # 4. Extract entities via MCP
+        entity_data = extract_entities_mcp(raw_text, source_hint=source_type)
+        nodes = entity_data.get('nodes', [])
+        edges = entity_data.get('edges', [])
+
+        # 5. Resolve entities against graph
+        ingestion_payload = resolve_entities(nodes, edges, source_type, filename)
+
+        # 6. Write to Lake
+        write_lake(unit_id, filename, raw_text, source_type, semantic_metadata, ingestion_payload)
+
+        # 7. Write to Graph
+        write_graph(unit_id, filename, ingestion_payload)
+
+        # 8. Write to Vector
+        timestamp_ingestion = datetime.datetime.now().isoformat()
+        write_vector(unit_id, filename, raw_text, source_type, semantic_metadata, timestamp_ingestion)
+
+    except Exception as e:
+        LOGGER.error(f"HARDFAIL {filename}: {e}")
+        with PROCESS_LOCK:
+            PROCESSED_FILES.discard(filename)
+        raise RuntimeError(f"HARDFAIL: Document processing failed for {filename}: {e}") from e
+
+
+class DocumentHandler:
+    """Watchdog event handler for new documents."""
+
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        process_document(event.src_path, os.path.basename(event.src_path))
+
+
+# --- INIT & WATCHDOG ---
+if __name__ == "__main__":
+    os.makedirs(LAKE_STORE, exist_ok=True)
+    print("IngestionEngine (v12.0) online.")
+
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+
+    class WatchdogHandler(FileSystemEventHandler):
+        def on_created(self, event):
+            if event.is_directory:
+                return
+            process_document(event.src_path, os.path.basename(event.src_path))
+
+    folders = [
+        CONFIG['paths']['asset_documents'],
+        CONFIG['paths']['asset_slack'],
+        CONFIG.get('paths', {}).get('asset_mail'),
+        CONFIG['paths']['asset_transcripts']
+    ]
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        for folder in folders:
+            if folder and os.path.exists(folder):
+                for f in os.listdir(folder):
+                    if UUID_SUFFIX_PATTERN.search(f):
+                        executor.submit(process_document, os.path.join(folder, f), f)
+
+    observer = Observer()
+    for folder in folders:
+        if folder and os.path.exists(folder):
+            observer.schedule(WatchdogHandler(), folder, recursive=False)
+    observer.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()

@@ -22,7 +22,7 @@ from typing import Dict, List, Any
 # Lägg till projekt-root i path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.utils.graph_service import GraphStore
+from services.utils.graph_service import GraphService
 from services.utils.vector_service import VectorService
 from services.utils.llm_service import LLMService, TaskType
 
@@ -123,7 +123,7 @@ class DreamerDryRun:
         # Initiera tjänster
         graph_path = os.path.expanduser(self.config['paths']['graph_db'])
 
-        self.graph_store = GraphStore(graph_path)
+        self.graph_store = GraphService(graph_path)
         self.vector_service = VectorService()  # Läser config internt
         self.llm_service = LLMService()
 
