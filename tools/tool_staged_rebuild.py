@@ -56,7 +56,6 @@ def handle_interrupt(signum, frame):
     """Hantera avbrott (Ctrl+C)."""
     print("\n⚠️ Avbruten.")
     if _orchestrator:
-        _orchestrator.service_manager.stop()
         if _orchestrator.staging_info:
             print("📂 Återställer filer...")
             _orchestrator.file_manager.restore_all_from_staging(_orchestrator.staging_info)
