@@ -387,8 +387,11 @@ class Dreamer:
 
         # Track which nodes to skip in merge phase (deleted/split)
         skip_merge_ids = set()
+        LOGGER.info(f"Phase 1: Applying structural actions to {len(candidates)} candidates...")
 
-        for node in candidates:
+        for i, node in enumerate(candidates):
+            if (i + 1) % 10 == 0:
+                LOGGER.info(f"  Processing structural action {i + 1}/{len(candidates)}...")
             node_id = node.get("id")
             analysis = structural_results.get(node_id, {"action": "KEEP", "confidence": 0.0})
             action = analysis.get("action", "KEEP")
