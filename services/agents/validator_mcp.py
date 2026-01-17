@@ -202,7 +202,33 @@ def extract_and_validate_doc(initial_prompt: str, reference_timestamp: str = Non
             logging.error(f"Error in LLM loop: {e}")
             current_messages.append(types.Content(role="user", parts=[types.Part.from_text(text=f"Ogiltig JSON eller systemfel: {str(e)}. Försök igen.")]))
 
-    return {"error": "Max retries reached", "partial": extracted_data if 'extracted_data' in locals() else {}}
+    # Max retries reached - salvage valid data by filtering out invalid edges
+    if 'extracted_data' in locals() and extracted_data:
+        nodes = extracted_data.get('nodes', [])
+        edges = extracted_data.get('edges', [])
+
+        # Filter nodes: keep only valid ones
+        valid_nodes = []
+        for node in nodes:
+            is_valid, _ = validator.validate_node(node)
+            if is_valid:
+                valid_nodes.append(node)
+
+        # Filter edges: keep only valid ones
+        nodes_map = {n.get('name'): n.get('type') for n in valid_nodes}
+        valid_edges = []
+        invalid_edge_count = 0
+        for edge in edges:
+            is_valid, _ = validator.validate_edge(edge, nodes_map)
+            if is_valid:
+                valid_edges.append(edge)
+            else:
+                invalid_edge_count += 1
+
+        logging.warning(f"Max retries reached. Salvaging {len(valid_nodes)} nodes, {len(valid_edges)} edges (dropped {invalid_edge_count} invalid edges)")
+        return {"nodes": valid_nodes, "edges": valid_edges, "salvaged": True}
+
+    return {"error": "Max retries reached", "nodes": [], "edges": []}
 
 if __name__ == "__main__":
     try:
